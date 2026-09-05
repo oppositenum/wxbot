@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wxbot 微信后台</title>
+<style>
+  :root { --bg:#f5f6f7; --panel:#fff; --line:#e4e6eb; --brand:#07c160; --muted:#8a8f99; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,"PingFang SC",sans-serif; background:var(--bg); color:#1d1f23; }
+  header { display:flex; align-items:center; gap:14px; padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--line); }
+  header h1 { font-size:15px; margin:0; }
+  .dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:5px; }
+  .ok{background:var(--brand)} .bad{background:#e0554e} .warn{background:#e6a23c}
+  .pill { background:#f0f1f3; border-radius:12px; padding:3px 10px; font-size:12px; color:#555; }
+  button { font:inherit; border:none; border-radius:6px; padding:6px 12px; cursor:pointer; background:#eaecef; }
+  button.primary { background:var(--brand); color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  main { display:grid; grid-template-columns:300px 1fr; height:calc(100vh - 53px); }
+  .side { background:var(--panel); border-right:1px solid var(--line); display:flex; flex-direction:column; overflow:hidden; }
+  .tabs { display:flex; border-bottom:1px solid var(--line); }
+  .tabs div { flex:1; text-align:center; padding:9px; cursor:pointer; color:var(--muted); }
+  .tabs div.active { color:#1d1f23; border-bottom:2px solid var(--brand); font-weight:600; }
+  .search { padding:8px; border-bottom:1px solid var(--line); }
+  .search input { width:100%; padding:6px 9px; border:1px solid var(--line); border-radius:6px; }
+  .list { overflow-y:auto; flex:1; }
+  .row { display:flex; align-items:center; gap:9px; padding:9px 11px; cursor:pointer; border-bottom:1px solid #f2f3f5; }
+  .row:hover { background:#f7f8fa; }
+  .row.active { background:#eaf7ef; }
+  .avatar { width:36px; height:36px; border-radius:6px; background:#dcdfe4; flex:none; object-fit:cover; }
+  .row .name { font-weight:500; }
+  .row .sub { color:var(--muted); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:200px; }
+  .content { display:flex; flex-direction:column; overflow:hidden; }
+  .chat-head { padding:11px 16px; border-bottom:1px solid var(--line); background:var(--panel); display:flex; justify-content:space-between; align-items:center; }
+  .msgs { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
+  .msg { display:flex; gap:8px; max-width:72%; }
+  .msg .bubble { background:#fff; padding:8px 11px; border-radius:8px; box-shadow:0 1px 1px rgba(0,0,0,.05); word-break:break-word; }
+  .msg .who { font-size:11px; color:var(--muted); margin-bottom:3px; }
+  .msg.self { align-self:flex-end; flex-direction:row-reverse; }
+  .msg.self .bubble { background:#95ec69; }
+  .msg .refer { border-left:2px solid #ccc; padding-left:6px; margin-top:4px; color:#666; font-size:12px; }
+  .msg .time { font-size:10px; color:#b0b4bb; margin-top:3px; }
+  .composer { border-top:1px solid var(--line); background:var(--panel); padding:10px 14px; display:flex; gap:8px; align-items:center; }
+  .composer input[type=text] { flex:1; padding:9px; border:1px solid var(--line); border-radius:6px; }
+  .empty { color:var(--muted); text-align:center; margin-top:40px; }
+  .members { position:fixed; right:0; top:53px; bottom:0; width:280px; background:#fff; border-left:1px solid var(--line); box-shadow:-4px 0 12px rgba(0,0,0,.06); overflow-y:auto; padding:12px; display:none; }
+  .members.show { display:block; }
+  .members h3 { margin:4px 0 10px; font-size:14px; }
+  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#333; color:#fff; padding:9px 16px; border-radius:8px; opacity:0; transition:.3s; pointer-events:none; }
+  .toast.show { opacity:.95; }
+  .lightbox { position:fixed; inset:0; background:rgba(0,0,0,.85); display:none; align-items:center; justify-content:center; z-index:1000; cursor:zoom-out; }
+  .lightbox.show { display:flex; }
+  .lightbox img { max-width:92%; max-height:92%; border-radius:4px; box-shadow:0 4px 30px rgba(0,0,0,.5); }
+</style>
+</head>
+<body>
+<header>
+  <h1>wxbot 微信后台</h1>
+  <span class="pill" id="loginState">加载中…</span>
+  <span class="pill" id="keyState"></span>
+  <span class="pill" id="syncState"></span>
+  <button id="loginBtn">扫码登录(noVNC)</button>
+  <button id="keyBtn">刷新密钥</button>
+  <button id="syncBtn">立即同步</button>
+  <button id="botBtn">机器人：…</button>
+  <button id="aiBtn">蒸馏/AI</button>
+  <button id="watchBtn">监听设置</button>
+  <button id="followBtn">跟发设置</button>
+</header>
+<main>
+  <div class="side">
+    <div class="tabs">
+      <div data-tab="sessions" class="active">会话</div>
+      <div data-tab="contacts">联系人</div>
+      <div data-tab="groups">群聊</div>
+      <div data-tab="other">其他</div>
+    </div>
+    <div class="search"><input id="filter" placeholder="过滤…"></div>
+    <div class="list" id="list"></div>
+  </div>
+  <div class="content">
+    <div class="chat-head">
+      <span id="chatTitle">未选择会话</span>
+      <span style="display:flex;gap:8px">
+        <button id="harvestBtn" style="display:none" title="驱动微信翻遍本会话图片以解密显示">解密图片</button>
+        <button id="membersBtn" style="display:none">群成员</button>
+      </span>
+    </div>
+    <div class="msgs" id="msgs"><div class="empty">选择左侧会话查看消息</div></div>
+    <div class="composer">
+      <input type="text" id="msgInput" placeholder="输入文本，回车发送…" disabled>
+      <input type="file" id="imgInput" accept="image/*" style="display:none">
+      <button id="imgBtn" disabled>图片</button>
+      <button class="primary" id="sendBtn" disabled>发送</button>
+    </div>
+  </div>
+</main>
+<div class="members" id="membersPanel"></div>
+<div class="members" id="aiPanel" style="width:340px"></div>
+<div class="members" id="watchPanel" style="width:340px"></div>
+<div class="members" id="followPanel" style="width:340px"></div>
+<div class="toast" id="toast"></div>
+<div class="lightbox" id="lightbox" onclick="this.classList.remove('show')"><img id="lightboxImg" src=""></div>
+
+<script>
+const $ = s => document.querySelector(s);
+let tab = "sessions", data = {sessions:[],contacts:[],groups:[],other:[]}, current = null;
+
+function toast(m){ const t=$("#toast"); t.textContent=m; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),2200); }
+function fmtTime(ts){ if(!ts) return ""; const d=new Date(ts*1000); return d.toLocaleString("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}); }
+function avatarURL(u){ return "/api/avatar?username="+encodeURIComponent(u); }
+
+let NOVNC="http://localhost:6080/vnc.html";
+let imgReady=false;
+async function loadStatus(){
+  try{
+    const s = await (await fetch("/api/status")).json();
+    NOVNC = s.novnc_url || NOVNC;
+    imgReady = !!s.img_ready;
+    $("#loginState").innerHTML = `<span class="dot ${s.logged_in?'ok':(s.container_running?'warn':'bad')}"></span>`
+      + (s.logged_in ? ("小号已登录 "+(s.logged_in_wxid||"")) : (s.container_running?"容器在跑·未登录":"容器未运行"));
+    $("#keyState").innerHTML = `<span class="dot ${s.keys_ready?'ok':'warn'}"></span>`
+      + (s.keys_ready ? "密钥就绪" : "缺密钥(点刷新密钥)");
+    $("#syncState").innerHTML = `<span class="dot ${s.decrypted_ready?'ok':'warn'}"></span>`
+      + (s.decrypted_ready ? ("上次同步 "+(s.last_sync?fmtTime(s.last_sync):"—")) : "未解密");
+  }catch(e){ $("#loginState").textContent="后台连接失败"; }
+}
+
+async function loadTab(t){
+  if(t==="sessions"||t==="other"){        // 会话 与 其他 共用 /api/sessions，按 category 分流
+    const r = await fetch("/api/sessions");
+    if(!r.ok){ const e=await r.json(); toast(e.error||"加载失败"); data.sessions=[]; data.other=[]; render(); return; }
+    const all = await r.json();
+    data.sessions = all.filter(x=>x.category!=="other");   // 私聊+群聊
+    data.other    = all.filter(x=>x.category==="other");   // 公众号/服务号/系统
+    render(); return;
+  }
+  const ep = {contacts:"/api/contacts",groups:"/api/groups"}[t];
+  const r = await fetch(ep);
+  if(!r.ok){ const e=await r.json(); toast(e.error||"加载失败"); data[t]=[]; render(); return; }
+  data[t] = await r.json();
+  render();
+}
+
+function itemName(t,x){
+  if(t==="sessions") return x.username;
+  return x.name || x.username;
+}
+function render(){
+  const f = $("#filter").value.trim();
+  const list = $("#list"); list.innerHTML="";
+  let items = data[tab]||[];
+  if(f) items = items.filter(x=> JSON.stringify(x).includes(f));
+  for(const x of items){
+    const u = x.username;
+    const name = x.name || x.username;
+    const sub = (tab==="sessions"||tab==="other") ? (x.summary||"") : (x.member_count!=null?("成员 "+x.member_count):(x.remark||x.nick_name||x.username||""));
+    const src = x.head_url || avatarURL(u);
+    const div = document.createElement("div");
+    div.className="row"+(current&&current.username===u?" active":"");
+    div.innerHTML = `<img class="avatar" src="${src}" onerror="this.onerror=null;this.src='${avatarURL(u)}'">
+      <div style="min-width:0"><div class="name">${escape_(name)}</div><div class="sub">${escape_(sub)}</div></div>`;
+    div.onclick = ()=> openChat({username:u, name, is_group:u.endsWith("@chatroom")});
+    list.appendChild(div);
+  }
+}
+function escape_(s){ return (s||"").replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function showImg(u){ $("#lightboxImg").src=u; $("#lightbox").classList.add("show"); }
+
+async function openChat(chat){
+  current = chat;
+  $("#chatTitle").textContent = chat.name || chat.username;
+  $("#msgInput").disabled=false; $("#sendBtn").disabled=false; $("#imgBtn").disabled=false;
+  $("#membersBtn").style.display = chat.is_group ? "" : "none";
+  $("#harvestBtn").style.display = "";
+  render();
+  await loadMessages();
+}
+
+$("#harvestBtn").onclick=async()=>{
+  if(!current) return;
+  if(!confirm("解密图片说明：\n\n收到的图片被微信加密，需让微信自己“翻一遍大图”来解密。\n\n最可靠做法：先在 noVNC 微信窗口里打开【"+(current.name||current.username)+"】这个会话，然后点确定。\n\n(我会尝试自动打开该会话，但这版微信自动搜索不稳，手动打开更保险。)")) return;
+  const btn=$("#harvestBtn"); btn.disabled=true; const old=btn.textContent;
+  btn.textContent="解密中…(约30秒,勿动微信)"; toast("正在驱动微信翻图解密,请稍候…");
+  try{
+    const r=await (await fetch("/api/harvest",{method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify({chat:current.username})})).json();
+    toast(r.decrypted>0?`已解密 ${r.decrypted} 张图片,正在刷新`:"没解出新图(请先在noVNC微信里打开此会话再试;表情/视频无法解)");
+    await loadMessages();
+  }catch(e){ toast("解密失败:"+e); }
+  btn.disabled=false; btn.textContent=old;
+};
+
+async function loadMessages(){
+  if(!current) return;
+  const box = $("#msgs");
+  const atBottom = box.scrollHeight-box.scrollTop-box.clientHeight < 60;
+  const r = await fetch("/api/messages?chat="+encodeURIComponent(current.username)+"&limit=60");
+  if(!r.ok){ const e=await r.json(); box.innerHTML=`<div class="empty">${e.error||"加载失败"}</div>`; return; }
+  const msgs = await r.json();
+  const prevTop=box.scrollTop;
+  box.innerHTML="";
+  if(!msgs.length){ box.innerHTML=`<div class="empty">暂无消息</div>`; return; }
+  for(const m of msgs){
+    const div=document.createElement("div");
+    div.className="msg"+(m.is_self?" self":"");
+    let inner="";
+    if(current.is_group && !m.is_self) inner+=`<div class="who">${escape_(m.sender_name||m.sender||"")}</div>`;
+    let text = m.content;
+    if(m.type===3){
+      if(imgReady){ inner+=`<img src="/api/msgimage?chat=${encodeURIComponent(current.username)}&id=${m.local_id}" style="max-width:200px;border-radius:6px;display:block;cursor:zoom-in" onclick="showImg(this.src)" onerror="this.replaceWith(Object.assign(document.createElement('div'),{textContent:'[图片]'}))">`; text=null; }
+      else text="[图片]";
+    }
+    else if(m.type===34){   // 语音：可播(全量解密)
+      const u=`/api/msgvoice?chat=${encodeURIComponent(current.username)}&id=${m.local_id}`;
+      inner+=`<audio controls preload="none" src="${u}" style="height:32px;vertical-align:middle"></audio> <span style="color:var(--muted);font-size:12px">${escape_(m.content||"[语音]")}</span>`;
+      text=null;
+    }
+    else if(m.type===43){   // 视频：缩略图作封面，点开若无本地明文则只显示封面
+      const t=`/api/msgvideothumb?chat=${encodeURIComponent(current.username)}&id=${m.local_id}`;
+      const v=`/api/msgvideo?chat=${encodeURIComponent(current.username)}&id=${m.local_id}`;
+      inner+=`<video controls preload="none" poster="${t}" src="${v}" style="max-width:220px;border-radius:6px;display:block" onerror="this.removeAttribute('src')"></video><span style="color:var(--muted);font-size:12px">${escape_(m.content||"[视频]")}</span>`;
+      text=null;
+    }
+    else if(m.type===47) text="[表情]";
+    if(m.article){   // 公众号图文/卡片/服务通知
+      const a=m.article; let h="";
+      if(a.articles&&a.articles.length>1){   // 仅多篇图文才用列表；单篇/通知显示 标题+详情
+        h=a.articles.map(x=>x.url
+          ? `<div style="padding:2px 0">📄 <a href="${x.url}" target="_blank" style="color:#576b95;text-decoration:none">${escape_(x.title)}</a></div>`
+          : `<div style="padding:2px 0">📄 ${escape_(x.title)}</div>`).join("");
+      } else {
+        h=(a.title?`<div style="font-weight:600">${escape_(a.title)}</div>`:"")
+         +(a.des?`<div style="color:#555;white-space:pre-wrap;margin-top:2px">${escape_(a.des)}</div>`:"")
+         +(a.url?`<div style="margin-top:4px"><a href="${a.url}" target="_blank" style="color:#576b95;font-size:12px;text-decoration:none">查看链接 ›</a></div>`:"");
+      }
+      inner+=`<div style="border-left:3px solid var(--brand);background:#f7f8fa;border-radius:6px;padding:7px 9px">${h}</div>`;
+      text=null;
+    }
+    if(text!==null) inner+=`<div style="white-space:pre-wrap">${escape_(text)}</div>`;
+    if(m.refer) inner+=`<div class="refer">${escape_(m.refer.displayname||"")}: ${escape_(m.refer.content||"")}</div>`;
+    inner+=`<div class="time">${fmtTime(m.create_time)}</div>`;
+    div.innerHTML=`<div class="bubble">${inner}</div>`;
+    box.appendChild(div);
+  }
+  // 追加本会话本地已发图片预览（网页即时可见）
+  for(const p of (sentImg[current.username]||[])){
+    const div=document.createElement("div");
+    div.className="msg self";
+    div.innerHTML=`<div class="bubble"><img src="${p.url}" style="max-width:180px;border-radius:6px;display:block;cursor:zoom-in" onclick="showImg(this.src)"><div class="time">${fmtTime(p.ts)} 本地预览</div></div>`;
+    box.appendChild(div);
+  }
+  // 在底部才自动滚到底(否则保持用户浏览位置,避免刷新时乱跳)
+  if(atBottom) box.scrollTop=box.scrollHeight; else box.scrollTop=prevTop;
+}
+
+let sending=false;
+const sentImg={};   // username -> [{url, ts}]  本地已发图片预览
+function setSending(v){
+  sending=v;
+  $("#sendBtn").disabled=v; $("#imgBtn").disabled=v;
+  $("#sendBtn").textContent=v?"发送中…":"发送";
+  $("#sendBtn").style.opacity=v?0.6:1;
+}
+async function send(kind, payload, localUrl){
+  if(!current || sending) return;
+  setSending(true);
+  const body={to: current.name || current.username, type:kind};
+  if(kind==="text") body.content=payload; else body.path=payload;
+  try{
+    const r=await fetch("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    const res=await r.json();
+    if(res.ok){
+      toast("已发送");
+      if(kind==="text") $("#msgInput").value="";
+      if(kind==="image" && localUrl){ (sentImg[current.username]=sentImg[current.username]||[]).push({url:localUrl, ts:Date.now()/1000}); }
+      loadMessages(); setTimeout(loadMessages,2500);
+    } else toast("发送失败："+(res.error||""));
+  }catch(e){ toast("发送出错"); }
+  finally{ setSending(false); }
+}
+
+// 事件
+document.querySelectorAll(".tabs div").forEach(d=>d.onclick=()=>{
+  document.querySelectorAll(".tabs div").forEach(x=>x.classList.remove("active"));
+  d.classList.add("active"); tab=d.dataset.tab; loadTab(tab);
+});
+$("#filter").oninput=render;
+$("#loginBtn").onclick=()=>{ window.open(NOVNC,"_blank"); toast("在打开的 noVNC 里用小号扫码"); };
+$("#keyBtn").onclick=async()=>{ toast("刷新密钥中…"); const r=await(await fetch("/api/keys/refresh",{method:"POST"})).json(); await loadStatus(); toast(r.ok?"密钥已刷新+解密":"刷新失败"); };
+$("#syncBtn").onclick=async()=>{ toast("同步中…"); await fetch("/api/sync",{method:"POST"}); await loadStatus(); if(current) loadMessages(); toast("同步完成"); };
+$("#sendBtn").onclick=()=>{ if(sending) return; const v=$("#msgInput").value.trim(); if(v) send("text",v); };
+$("#msgInput").onkeydown=e=>{ if(e.key==="Enter"){ e.preventDefault(); if(!sending) $("#sendBtn").click(); } };
+$("#imgBtn").onclick=()=>{ if(!sending) $("#imgInput").click(); };
+$("#imgInput").onchange=async()=>{
+  const f=$("#imgInput").files[0]; if(!f || sending) return;
+  const localUrl=URL.createObjectURL(f);           // 立即本地预览
+  setSending(true);
+  toast("上传图片中…");
+  try{
+    const fd=new FormData(); fd.append("file",f);
+    const up=await(await fetch("/api/upload",{method:"POST",body:fd})).json();
+    setSending(false);
+    if(up.ok) send("image",up.path,localUrl); else toast("上传失败");
+  }catch(e){ setSending(false); toast("上传出错"); }
+  $("#imgInput").value="";
+};
+// 输入框里 Ctrl+V 粘贴图片(如截图) → 直接上传发送
+$("#msgInput").addEventListener("paste", async (e)=>{
+  const items=(e.clipboardData||{}).items||[];
+  for(const it of items){
+    if(it.type && it.type.startsWith("image/")){
+      e.preventDefault();
+      if(!current || sending) return;
+      const f=it.getAsFile(); const localUrl=URL.createObjectURL(f);
+      setSending(true); toast("上传粘贴的图片…");
+      try{
+        const fd=new FormData(); fd.append("file",f,"paste.png");
+        const up=await(await fetch("/api/upload",{method:"POST",body:fd})).json();
+        setSending(false);
+        if(up.ok) send("image",up.path,localUrl); else toast("上传失败");
+      }catch(err){ setSending(false); toast("上传出错"); }
+      return;
+    }
+  }
+});
+function closePanel(id){ $(id).classList.remove("show"); }
+$("#membersBtn").onclick=async()=>{
+  const p=$("#membersPanel");
+  if(p.classList.contains("show")){ p.classList.remove("show"); return; }
+  const r=await fetch("/api/groups/"+encodeURIComponent(current.username)+"/members");
+  const ms=await r.json();
+  p.innerHTML=`<h3>群成员 (${ms.length}) <span style="float:right;cursor:pointer;color:#999" onclick="closePanel('#membersPanel')">✕ 关闭</span></h3>`+ms.map(m=>{
+    const src=m.head_url||avatarURL(m.wxid);
+    return `<div class="row"><img class="avatar" src="${src}" onerror="this.onerror=null;this.src='${avatarURL(m.wxid)}'">
+     <div style="min-width:0"><div class="name">${escape_(m.name||m.wxid)}</div><div class="sub">${escape_(m.wxid)}</div></div></div>`;}).join("");
+  p.classList.add("show");
+};
+
+async function renderAI(){
+  const p=$("#aiPanel");
+  const llm=await(await fetch("/api/llm")).json();
+  const groups=(data.groups&&data.groups.length)?data.groups:(await(await fetch("/api/groups")).json());
+  data.groups=groups;
+  // 私聊列表(用于蒸馏私聊对象)：会话里非群、非"其他"
+  let privs=[];
+  try{ const ss=await(await fetch("/api/sessions")).json();
+    privs=ss.filter(s=>!s.username.endsWith("@chatroom")&&s.category!=="other"); }catch(e){}
+  const personas=await(await fetch("/api/personas")).json();
+  let activePersona="";
+  try{ const botr=await(await fetch("/api/bot")).json(); const rr=(botr.rules&&botr.rules.rules||[]).find(r=>r.action&&r.action.type==="reply_ai"); activePersona=(rr&&rr.action.persona)||""; }catch(e){}
+  p.innerHTML=`
+    <h3>AI 设置</h3>
+    <div class="sub" style="margin-bottom:6px">大模型：${llm.configured?('已配置 ✅ '+(llm.provider||'')):'未配置'}</div>
+    <select id="llmProv" style="width:100%;padding:5px;margin-bottom:6px"><option value="claude">Claude</option><option value="gpt">GPT</option></select>
+    <input id="llmKey" placeholder="API key(留空=不改)" style="width:100%;margin-bottom:6px;padding:5px">
+    <input id="llmModel" placeholder="模型(可选,如 claude-sonnet-5 / gpt-4o)" style="width:100%;margin-bottom:6px;padding:5px">
+    <input id="llmBase" placeholder="Base URL(可选,中转网关)" style="width:100%;margin-bottom:6px;padding:5px" value="${llm.base_url||''}">
+    <input id="llmProxy" placeholder="代理(可选,如 http://127.0.0.1:7890,留空=不走代理)" style="width:100%;margin-bottom:6px;padding:5px" value="${llm.proxy||''}">
+    <button id="llmSave" class="primary">保存 AI 配置</button>
+    <hr style="margin:12px 0;border:none;border-top:1px solid #eee">
+    <h3>蒸馏人设</h3>
+    <select id="distGroup" style="width:100%;padding:5px;margin-bottom:6px">
+      ${groups.map(g=>`<option value="${g.username}">${escape_(g.name)} (${g.member_count}人)</option>`).join("")}
+    </select>
+    <button id="candBtn">列出发言候选人</button>
+    <div id="candList" style="margin-top:8px"></div>
+    <hr style="margin:12px 0;border:none;border-top:1px solid #eee">
+    <h3>蒸馏私聊对象</h3>
+    <select id="distPriv" style="width:100%;padding:5px;margin-bottom:6px">
+      ${privs.length?privs.map(s=>`<option value="${s.username}">${escape_(s.name||s.username)}</option>`).join(""):'<option value="">(暂无私聊)</option>'}
+    </select>
+    <button id="distPrivBtn" class="primary">蒸馏该私聊对象</button>
+    <div class="sub" style="margin-top:4px">提取对方在这段私聊里的全部发言来学他的风格(发言≥20条才行)</div>
+    <hr style="margin:12px 0;border:none;border-top:1px solid #eee">
+    <h3>蒸馏我自己</h3>
+    <input id="distSelfName" placeholder="人设名字(默认: 我)" style="width:100%;padding:5px;margin-bottom:6px">
+    <button id="distSelfBtn" class="primary">蒸馏我自己(汇总全部群聊+私聊)</button>
+    <div class="sub" style="margin-top:4px">把你在所有会话里自己发的话全部拿来学你自己的风格</div>
+    <hr style="margin:12px 0;border:none;border-top:1px solid #eee">
+    <h3>导入人设</h3>
+    <input id="impName" placeholder="名字(如 老王)" style="width:100%;padding:5px;margin-bottom:6px">
+    <textarea id="impText" placeholder="粘贴人设内容(第二人称,如：你是老王，说话…)" style="width:100%;height:70px;padding:5px;margin-bottom:6px"></textarea>
+    <button id="impBtn" class="primary">导入人设</button>
+    <hr style="margin:12px 0;border:none;border-top:1px solid #eee">
+    <h3>已有人设 <span class="sub" style="font-weight:normal">(当前机器人用：${escape_(activePersona||'无')})</span></h3>
+    ${personas.length?personas.map(x=>`<div class="row"><div style="flex:1;min-width:0"><div class="name">${escape_(x.name)}${x.slug===activePersona?' ⭐':''}</div><div class="sub">slug: ${escape_(x.slug)} · ${x.count||0}条</div></div><button class="pView" data-s="${escape_(x.slug)}">查看</button><button class="pUse primary" data-s="${escape_(x.slug)}" style="margin-left:4px">设为回复</button><button class="pDel" data-s="${escape_(x.slug)}" style="margin-left:4px">删</button></div>`).join(""):'<div class="sub">还没有，先蒸馏或导入一个</div>'}
+    <div id="personaView" style="margin-top:8px"></div>`;
+  $("#impBtn").onclick=async()=>{
+    const name=$("#impName").value.trim(), persona=$("#impText").value.trim();
+    if(!name||!persona){ toast("填名字和人设内容"); return; }
+    const r=await(await fetch("/api/personas/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,persona})})).json();
+    toast(r.ok?("已导入 "+r.slug):"导入失败"); renderAI();
+  };
+  document.querySelectorAll(".pDel").forEach(b=>b.onclick=async()=>{
+    if(!confirm("删除人设 "+b.dataset.s+"?")) return;
+    await fetch("/api/personas/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({slug:b.dataset.s})});
+    toast("已删除"); renderAI();
+  });
+  if(llm.provider) $("#llmProv").value=llm.provider;
+  document.querySelectorAll(".pView").forEach(b=>b.onclick=async()=>{
+    const d=await(await fetch("/api/personas/"+encodeURIComponent(b.dataset.s))).json();
+    $("#personaView").innerHTML=`<div style="background:#f7f8fa;border-radius:8px;padding:10px;font-size:13px;line-height:1.6"><b>${escape_(d.name)} 的说话风格</b><br>${escape_(d.persona||'').replace(/\\n/g,'<br>')}<br><br><span class="sub">统计：${d.stats?.count}条 · 平均${d.stats?.avg_len}字 · 高频词 ${(d.stats?.top_words||[]).slice(0,8).join('、')}</span></div>`;
+  });
+  document.querySelectorAll(".pUse").forEach(b=>b.onclick=async()=>{
+    const r=await(await fetch("/api/bot/persona",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({slug:b.dataset.s})})).json();
+    toast(r.ok?("机器人回复人设已设为 "+b.dataset.s):"设置失败"); renderAI();
+  });
+  $("#llmSave").onclick=async()=>{
+    const body={provider:$("#llmProv").value, base_url:$("#llmBase").value.trim(), proxy:$("#llmProxy").value.trim()};
+    if($("#llmKey").value) body.api_key=$("#llmKey").value;
+    if($("#llmModel").value){ if(body.provider==="gpt") body.gpt_model=$("#llmModel").value; else body.model=$("#llmModel").value; }
+    const r=await(await fetch("/api/llm/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
+    toast(r.configured?"AI 已配置 ✅":"已保存"); renderAI();
+  };
+  $("#distPrivBtn").onclick=async()=>{
+    const sel=$("#distPriv"); const uname=sel.value; if(!uname){ toast("没有可蒸馏的私聊"); return; }
+    const nm=sel.options[sel.selectedIndex].text;
+    toast("蒸馏中(调用大模型,稍等)…");
+    // 私聊：group 与 wxid 都传对方 username
+    const r=await(await fetch("/api/distill/run",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({group:uname,wxid:uname,name:nm})})).json();
+    if(r.ok){ alert("人设["+r.name+"] 已生成(slug: "+r.slug+")\n\n"+r.persona); renderAI(); }
+    else toast("蒸馏失败: "+(r.error||""));
+  };
+  $("#distSelfBtn").onclick=async()=>{
+    const btn=$("#distSelfBtn"); btn.disabled=true; const old=btn.textContent;
+    btn.textContent="蒸馏中(汇总全部会话,稍等)…"; toast("正在汇总你的全部发言并调用大模型…");
+    try{
+      const r=await(await fetch("/api/distill/self",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({name:$("#distSelfName").value.trim()||"我"})})).json();
+      if(r.ok){ alert("你的人设["+r.name+"] 已生成(slug: "+r.slug+")\n共 "+(r.stats&&r.stats.count)+" 条发言\n\n"+r.persona); renderAI(); }
+      else toast("蒸馏失败: "+(r.error||""));
+    }catch(e){ toast("蒸馏失败:"+e); }
+    btn.disabled=false; btn.textContent=old;
+  };
+  $("#candBtn").onclick=async()=>{
+    const g=$("#distGroup").value; $("#candList").innerHTML='<div class="sub">加载中…</div>';
+    const cs=await(await fetch("/api/distill/candidates",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({group:g})})).json();
+    $("#candList").innerHTML=cs.length?cs.map(c=>`<div class="row"><div style="flex:1;min-width:0"><div class="name">${escape_(c.name)}</div><div class="sub">${c.count}条 · ${escape_(c.wxid)}</div></div><button class="distOne" data-w="${escape_(c.wxid)}" data-n="${escape_(c.name)}">蒸馏</button></div>`).join(""):'<div class="sub">该群无发言记录</div>';
+    document.querySelectorAll(".distOne").forEach(b=>b.onclick=async()=>{
+      toast("蒸馏中(调用大模型,稍等)…");
+      const r=await(await fetch("/api/distill/run",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({group:$("#distGroup").value,wxid:b.dataset.w,name:b.dataset.n})})).json();
+      if(r.ok){ alert("人设["+r.name+"] 已生成(slug: "+r.slug+")\n\n"+r.persona+"\n\n→ 把 bot_rules.json 里 style-reply 的 persona 设为: "+r.slug); renderAI(); }
+      else toast("蒸馏失败: "+(r.error||""));
+    });
+  };
+}
+$("#aiBtn").onclick=()=>{ const p=$("#aiPanel"); if(p.classList.contains("show")){p.classList.remove("show");return;} $("#membersPanel").classList.remove("show");$("#watchPanel").classList.remove("show");$("#followPanel").classList.remove("show"); renderAI(); p.classList.add("show"); };
+
+async function renderWatch(){
+  const p=$("#watchPanel");
+  const [gs,ss,botr]=await Promise.all([
+    (await fetch("/api/groups")).json(),
+    (await fetch("/api/sessions")).json(),
+    (await fetch("/api/bot")).json()
+  ]);
+  const watch=new Set((botr.rules&&botr.rules.watch)||[]);
+  // 群：全部群(名字准)。私聊：最近会话里的真人私聊
+  const groups=gs.map(g=>({username:g.username,name:g.name,is_group:true}));
+  const isOfficial=u=>u.startsWith("gh_")||u.endsWith("@openim")||u.includes("@kefu")||["brandsessionholder","weixin","filehelper"].includes(u);
+  const privs=ss.filter(s=>!s.is_group && !isOfficial(s.username));
+  const rowHtml=s=>`<label class="row" style="cursor:pointer"><input type="checkbox" class="wchk" value="${s.username}" ${watch.has(s.username)?"checked":""} style="margin-right:8px"><div style="min-width:0"><div class="name">${escape_(s.name||s.username)}</div><div class="sub">${s.is_group?'群·@我/引用我触发':'私聊·任意消息自动回复'}</div></div></label>`;
+  p.innerHTML=`<h3>监听设置 <span style="float:right;cursor:pointer;color:#999" onclick="closePanel('#watchPanel')">✕</span></h3>
+    <div class="sub" style="margin-bottom:6px">勾选的才会自动回复。<b>群</b>=被@或引用才回；<b>私聊</b>=对方一发消息就回。没勾的不动。</div>
+    <input id="wfilter" placeholder="过滤…" style="width:100%;padding:5px;margin-bottom:6px">
+    <button id="wsave" class="primary">保存监听</button>
+    <div style="margin-top:8px"><b>群聊 (${groups.length})</b></div>
+    <div id="wgroups">${groups.map(rowHtml).join("")}</div>
+    <div style="margin-top:8px"><b>私聊 (${privs.length})</b></div>
+    <div id="wprivs">${privs.map(rowHtml).join("")}</div>`;
+  $("#wfilter").oninput=()=>{ const f=$("#wfilter").value.trim();
+    document.querySelectorAll("#watchPanel label.row").forEach(l=>{ l.style.display=(!f||l.textContent.includes(f))?"":"none"; }); };
+  $("#wsave").onclick=async()=>{
+    const w=[...document.querySelectorAll(".wchk:checked")].map(c=>c.value);
+    const r=await(await fetch("/api/bot/watch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({watch:w})})).json();
+    toast("已保存监听 "+r.watch.length+" 个会话");
+  };
+  p.classList.add("show");
+}
+$("#watchBtn").onclick=()=>{ const p=$("#watchPanel"); if(p.classList.contains("show")){p.classList.remove("show");return;} $("#aiPanel").classList.remove("show");$("#membersPanel").classList.remove("show");$("#followPanel").classList.remove("show"); renderWatch(); };
+
+async function renderFollow(){
+  const p=$("#followPanel");
+  const [gs,cfg]=await Promise.all([
+    (await fetch("/api/groups")).json(),
+    (await fetch("/api/bot/follow")).json()
+  ]);
+  const on=new Set(cfg.groups||[]);
+  const thr=cfg.threshold||3;
+  const rowHtml=g=>`<label class="row" style="cursor:pointer"><input type="checkbox" class="fchk" value="${g.username}" ${on.has(g.username)?"checked":""} style="margin-right:8px"><div style="min-width:0"><div class="name">${escape_(g.name||g.username)}</div></div></label>`;
+  p.innerHTML=`<h3>跟发设置(接龙/+1) <span style="float:right;cursor:pointer;color:#999" onclick="closePanel('#followPanel')">✕</span></h3>
+    <div class="sub" style="margin-bottom:6px">勾选的群里，同一句话被<b>连续</b>发到<b>第 N 次</b>时，机器人自动跟发这句一次；同一串只发一次，内容变了才会重置。没勾的群不动。</div>
+    <div style="margin-bottom:6px">触发次数 N：<input id="fthr" type="number" min="2" value="${thr}" style="width:60px;padding:4px"><span class="sub" style="margin-left:6px">连续相同满 N 次触发(默认3=超过2次)</span></div>
+    <input id="ffilter" placeholder="过滤…" style="width:100%;padding:5px;margin-bottom:6px">
+    <button id="fsave" class="primary">保存跟发</button>
+    <div style="margin-top:8px"><b>群聊 (${gs.length})</b></div>
+    <div id="fgroups">${gs.map(rowHtml).join("")}</div>`;
+  $("#ffilter").oninput=()=>{ const f=$("#ffilter").value.trim();
+    document.querySelectorAll("#followPanel label.row").forEach(l=>{ l.style.display=(!f||l.textContent.includes(f))?"":"none"; }); };
+  $("#fsave").onclick=async()=>{
+    const g=[...document.querySelectorAll(".fchk:checked")].map(c=>c.value);
+    const t=parseInt($("#fthr").value)||3;
+    const r=await(await fetch("/api/bot/follow",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({groups:g,threshold:t})})).json();
+    toast("已保存跟发 "+r.groups.length+" 个群 (N="+r.threshold+")");
+  };
+  p.classList.add("show");
+}
+$("#followBtn").onclick=()=>{ const p=$("#followPanel"); if(p.classList.contains("show")){p.classList.remove("show");return;} $("#aiPanel").classList.remove("show");$("#membersPanel").classList.remove("show");$("#watchPanel").classList.remove("show"); renderFollow(); };
+
+let botRunning=false;
+async function loadBot(){
+  try{ const b=await(await fetch("/api/bot")).json();
+    botRunning=b.running;
+    $("#botBtn").textContent="机器人："+(b.running?"运行中⏹":"已停止▶");
+    $("#botBtn").className=b.running?"primary":"";
+  }catch(e){}
+}
+$("#botBtn").onclick=async()=>{
+  await fetch("/api/bot/"+(botRunning?"stop":"start"),{method:"POST"});
+  await loadBot(); toast(botRunning?"机器人已启动":"机器人已停止");
+};
+
+loadStatus(); loadTab("sessions"); loadBot();
+setInterval(loadStatus, 8000); setInterval(loadBot, 8000);
+// 自动刷新：当前会话消息 2.5s（贴近实时，配合后台撤回快照）、会话列表 12s
+setInterval(()=>{ if(current && !sending) loadMessages(); }, 2500);
+setInterval(()=>{ if(tab==="sessions"||tab==="other") loadTab(tab); }, 12000);
+</script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+# ==== 运行时数据 / 密钥 / 隐私（切勿提交）====
+# 容器里的微信数据 + 登录态 + 解密库
+docker/wxdata/
+# 每账号密钥/解密库/人设/机器人规则(含真实 wxid/群号/聊天内容)
+accounts/
+work/
+# compose 本地数据(若用 bind mount)
+data/
+keys.json
+# 含 LLM API key
+llm_config.json
+# 含 registry 地址 / VNC 密码等私密配置
+.env
+*.vncpass
+# 旧规则迁移备份(可能含真实群号)
+bot_rules.json
+bot_rules.json.migrated
+
+# ==== 大文件 / 二进制 ====
+# 微信安装包(镜像构建时自动下载,勿入库)
+*.deb
+
+# ==== 杂项 ====
+*.pyc
+__pycache__/
+.DS_Store
+*.log
+.idea/
+.vscode/
+
+# 旧版全局人设目录(已迁移到 accounts/，含真实人物)
+personas/

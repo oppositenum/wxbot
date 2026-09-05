@@ -1,0 +1,195 @@
+"""统一 LLM 客户端：支持 Claude(Anthropic) 与 GPT(OpenAI)，走可选代理。
+仅用标准库 urllib，避免额外依赖。配置读 llm_config.json。
+"""
+import json
+import os
+import sys
+import urllib.request
+from urllib.error import HTTPError
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config  # noqa: E402
+
+# 可用 WXBOT_LLM_CONFIG 指定(容器部署时放到持久化卷里)
+CONFIG_FILE = os.environ.get("WXBOT_LLM_CONFIG") or \
+    os.path.join(config.PROJECT_DIR, "llm_config.json")
+
+# 有些中转在 Cloudflare 后面，按 UA 拦截(error 1010)，用浏览器 UA 绕过
+UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+
+
+def load_cfg():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def _opener(proxy):
+    if proxy:
+        h = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+        return urllib.request.build_opener(h)
+    return urllib.request.build_opener()
+
+
+def _post(url, headers, body, proxy, timeout=60, retries=3):
+    import time
+    import urllib.error
+    data = json.dumps(body).encode("utf-8")
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        try:
+            with _opener(proxy).open(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except HTTPError as e:
+            if e.code >= 500 and attempt < retries:      # 网关抖动(502/503/504)重试
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", "ignore")[:400]
+            except Exception:  # noqa: BLE001
+                pass
+            raise RuntimeError(f"HTTP {e.code} @ {url} — {detail or e.reason}")
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            if attempt < retries:                         # 超时/连接抖动重试
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise RuntimeError(f"连接失败 @ {url} — {e}")
+
+
+def _endpoint(base, tail):
+    """拼接端点，避免重复 /v1。tail 如 'messages' 或 'chat/completions'。
+    base 可填到域名(补 /v1/<tail>)、带 /v1(补 /<tail>)、或完整端点(原样)。"""
+    base = base.rstrip("/")
+    if base.endswith(tail):
+        return base
+    if base.endswith("/v1"):
+        return base + "/" + tail
+    return base + "/v1/" + tail
+
+
+def chat(system, messages, cfg=None):
+    """messages: [{"role":"user"/"assistant","content":str}]，返回回复文本。"""
+    cfg = cfg or load_cfg()
+    provider = cfg.get("provider", "claude")
+    key = cfg.get("api_key") or os.environ.get("WXBOT_LLM_KEY", "")
+    proxy = cfg.get("proxy") or None          # 空=直连(不隐式走系统代理)
+    max_tokens = cfg.get("max_tokens", 600)
+    temperature = cfg.get("temperature", 0.9)
+    if not key:
+        raise RuntimeError("未配置 LLM api_key（编辑 llm_config.json）")
+
+    base = (cfg.get("base_url") or "").rstrip("/")
+
+    if provider == "claude":
+        model = cfg.get("model", "claude-sonnet-5")
+        body = {"model": model, "max_tokens": max_tokens,
+                "system": system, "messages": messages}
+        if temperature is not None and cfg.get("send_temperature"):
+            body["temperature"] = temperature
+        headers = {"content-type": "application/json", "x-api-key": key,
+                   "authorization": f"Bearer {key}",   # 中转常用 Bearer
+                   "anthropic-version": "2023-06-01", "user-agent": UA}
+        url = _endpoint(base or "https://api.anthropic.com", "messages")
+        r = _post(url, headers, body, proxy)
+        parts = r.get("content", [])
+        return "".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
+
+    # OpenAI / GPT 兼容
+    model = cfg.get("gpt_model", cfg.get("model", "gpt-4o"))
+    url = _endpoint(base or "https://api.openai.com/v1", "chat/completions")
+    msgs = ([{"role": "system", "content": system}] if system else []) + messages
+    body = {"model": model, "max_tokens": max_tokens, "messages": msgs}
+    if temperature is not None and cfg.get("send_temperature"):
+        body["temperature"] = temperature
+    headers = {"content-type": "application/json", "authorization": f"Bearer {key}",
+               "user-agent": UA}
+    r = _post(url, headers, body, proxy)
+    return r["choices"][0]["message"]["content"].strip()
+
+
+def describe_image(img_bytes, media_type="image/jpeg",
+                   prompt="用一句中文简短、客观地描述这张图片的主要内容（是什么/在做什么），不要评论、不要猜测。",
+                   cfg=None):
+    """让多模态模型看图并返回一句中文描述。支持 Claude / OpenAI 视觉。"""
+    import base64
+    cfg = cfg or load_cfg()
+    provider = cfg.get("provider", "claude")
+    key = cfg.get("api_key") or os.environ.get("WXBOT_LLM_KEY", "")
+    proxy = cfg.get("proxy") or None
+    base = (cfg.get("base_url") or "").rstrip("/")
+    if not key:
+        return None
+    b64 = base64.b64encode(img_bytes).decode()
+    try:
+        if provider == "claude":
+            model = cfg.get("vision_model") or cfg.get("model", "claude-sonnet-5")
+            body = {"model": model, "max_tokens": 300, "messages": [{"role": "user",
+                    "content": [{"type": "text", "text": prompt},
+                                {"type": "image", "source": {"type": "base64",
+                                 "media_type": media_type, "data": b64}}]}]}
+            headers = {"content-type": "application/json", "x-api-key": key,
+                       "authorization": f"Bearer {key}",
+                       "anthropic-version": "2023-06-01", "user-agent": UA}
+            url = _endpoint(base or "https://api.anthropic.com", "messages")
+            r = _post(url, headers, body, proxy)
+            return "".join(p.get("text", "") for p in r.get("content", [])
+                           if p.get("type") == "text").strip() or None
+        # OpenAI 视觉
+        model = cfg.get("vision_model") or cfg.get("gpt_model", "gpt-4o")
+        url = _endpoint(base or "https://api.openai.com/v1", "chat/completions")
+        body = {"model": model, "max_tokens": 300, "messages": [{"role": "user",
+                "content": [{"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {
+                             "url": f"data:{media_type};base64,{b64}"}}]}]}
+        headers = {"content-type": "application/json",
+                   "authorization": f"Bearer {key}", "user-agent": UA}
+        r = _post(url, headers, body, proxy)
+        return r["choices"][0]["message"]["content"].strip() or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def transcribe(audio_bytes, filename="voice.mp3", content_type="audio/mpeg", cfg=None):
+    """语音转文字(whisper 兼容端点)。需在 llm_config.json 里 enable_stt=true 并配置
+    stt_base_url/stt_api_key/stt_model。未配置或失败返回 None。"""
+    import uuid
+    cfg = cfg or load_cfg()
+    if not cfg.get("enable_stt"):
+        return None
+    base = (cfg.get("stt_base_url") or cfg.get("base_url") or "").rstrip("/")
+    key = cfg.get("stt_api_key") or cfg.get("api_key") or ""
+    model = cfg.get("stt_model", "whisper-1")
+    proxy = cfg.get("proxy") or None
+    if not base or not key:
+        return None
+    bnd = "----wxbot" + uuid.uuid4().hex
+    body = (f"--{bnd}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n"
+            f"{model}\r\n").encode()
+    body += (f"--{bnd}\r\nContent-Disposition: form-data; name=\"file\"; "
+             f"filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n"
+             ).encode() + audio_bytes + b"\r\n"
+    body += (f"--{bnd}--\r\n").encode()
+    url = _endpoint(base, "audio/transcriptions")
+    req = urllib.request.Request(url, data=body, method="POST", headers={
+        "authorization": f"Bearer {key}", "user-agent": UA,
+        "content-type": f"multipart/form-data; boundary={bnd}"})
+    try:
+        with _opener(proxy).open(req, timeout=90) as resp:
+            r = json.loads(resp.read().decode("utf-8"))
+        return (r.get("text") or "").strip() or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def available():
+    cfg = load_cfg()
+    return bool(cfg.get("api_key") or os.environ.get("WXBOT_LLM_KEY"))
+
+
+if __name__ == "__main__":
+    print("provider:", load_cfg().get("provider"), "configured:", available())
+    if available():
+        print(chat("你是一个只会说'喵'的猫。", [{"role": "user", "content": "你好"}]))

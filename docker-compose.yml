@@ -1,0 +1,28 @@
+# wxbot 一键部署（x86/arm Linux 服务器）
+#   docker compose up -d
+#   浏览器开 http://<host>:6080/vnc.html 扫码登录小号 → http://<host>:5100 用后台
+services:
+  wxbot:
+    image: ${WXBOT_IMAGE:-wxbot-wechat:latest}   # 在 .env 里设 WXBOT_IMAGE 指向你的镜像/registry
+    container_name: wxbot
+    restart: unless-stopped
+    shm_size: "1g"
+    security_opt:
+      - seccomp=unconfined          # 微信(CEF)需要
+    cap_add:
+      - SYS_PTRACE                   # 读 /proc/<pid>/mem 提取数据库密钥
+    environment:
+      - VNC_PASSWORD=${VNC_PASSWORD:-}   # 建议设置；留空=noVNC 无密码
+      - SCREEN=${SCREEN:-1360x900x24}
+      - TZ=${TZ:-Asia/Shanghai}
+    ports:
+      # 默认只绑 127.0.0.1（安全）。要局域网/公网访问改 BIND_HOST=0.0.0.0 并务必设 VNC_PASSWORD + 反代加认证
+      - "${BIND_HOST:-127.0.0.1}:5100:5100"   # 后台 Web
+      - "${BIND_HOST:-127.0.0.1}:6080:6080"   # noVNC(扫码/手动操作微信)
+    volumes:
+      - wxdata:/root                 # 微信数据+登录态(持久化，勿删否则要重新扫码)
+      - appdata:/app/accounts        # 密钥/解密库/人设/机器人规则/LLM配置(持久化)
+
+volumes:
+  wxdata:
+  appdata:

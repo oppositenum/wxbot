@@ -1,0 +1,11 @@
+# 构建镜像时排除运行时数据/密钥/大文件，只打包代码
+docker/wxdata/
+docker/*.deb
+accounts/
+work/
+llm_config.json
+*.pyc
+__pycache__/
+.DS_Store
+.git/
+data/

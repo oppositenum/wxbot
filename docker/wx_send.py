@@ -153,6 +153,28 @@ def paste_text(text):
     print("OK")
 
 
+def paste_at(member_name, text):
+    """向【当前已打开的群】发一条【@某人】的消息(不重新搜索)。
+    流程：聚焦输入框→按@弹出成员选择器→粘成员名过滤→回车选中(插入真·@提及)→粘正文→发送。"""
+    wid = win_id()
+    if not wid:
+        print("ERR:no-window"); sys.exit(2)
+    px, py, w, h = win_geom(wid)
+    focus_input(px, py, w, h)
+    key("at")                     # 按 @ 触发成员选择器
+    time.sleep(0.9)
+    set_clip_text(member_name)     # 粘成员名做过滤
+    key("ctrl+v")
+    time.sleep(1.1)
+    key("Return")                  # 选中高亮项 → 插入真正的 @提及 + 空格
+    time.sleep(0.5)
+    set_clip_text(text)            # 粘正文
+    key("ctrl+v")
+    time.sleep(0.5)
+    key("Return")                  # 发送
+    print("OK")
+
+
 def paste_image(path):
     """向【当前已打开】的会话发图片(不重新搜索/打开)。"""
     wid = win_id()
@@ -221,6 +243,8 @@ if __name__ == "__main__":
         title_shot(sys.argv[2]); print("OK")
     elif kind == "pastetext":         # 向当前已打开会话发文本
         paste_text(sys.argv[2])
+    elif kind == "pasteat":           # 向当前已打开群发 @某人 的消息: pasteat <成员名> <正文>
+        paste_at(sys.argv[2], sys.argv[3])
     elif kind == "pasteimage":        # 向当前已打开会话发图片
         paste_image(sys.argv[2])
     elif len(sys.argv) < 4:

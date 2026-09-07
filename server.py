@@ -481,6 +481,41 @@ def api_agent_config_set():
     return jsonify({"ok": True, "agent": rules["agent"]})
 
 
+# ---------------- 定时任务(自然语言) ----------------
+@app.get("/api/schedule")
+def api_schedule_list():
+    from core import schedule
+    return jsonify({"tasks": schedule.list_view(), "log": schedule.logs()[-20:]})
+
+
+@app.post("/api/schedule/nl")
+def api_schedule_nl():
+    """自然语言创建/取消/列出定时任务。"""
+    from core import schedule
+    text = (request.get_json(force=True, silent=True) or {}).get("text", "").strip()
+    if not text:
+        return jsonify({"ok": False, "message": "描述为空"}), 400
+    return jsonify(schedule.handle_nl(text))
+
+
+@app.post("/api/schedule/<int:tid>/delete")
+def api_schedule_delete(tid):
+    from core import schedule
+    n = schedule.remove_task(id=tid)
+    return jsonify({"ok": n > 0})
+
+
+@app.post("/api/schedule/<int:tid>/run")
+def api_schedule_run(tid):
+    """立即手动触发一次(测试用)。"""
+    from core import schedule
+    for t in schedule.load_tasks():
+        if t.get("id") == tid:
+            threading.Thread(target=schedule.fire, args=(t,), daemon=True).start()
+            return jsonify({"ok": True})
+    return jsonify({"ok": False, "error": "任务不存在"}), 404
+
+
 @app.post("/api/distill/candidates")
 def api_distill_candidates():
     g = (request.get_json(force=True, silent=True) or {}).get("group")
@@ -806,6 +841,11 @@ def main():
         print("机器人已自启")
     except Exception as e:  # noqa: BLE001
         print("机器人自启失败:", e)
+    try:
+        from core import schedule
+        schedule.start_loop()             # 定时任务调度线程随后台自启
+    except Exception as e:  # noqa: BLE001
+        print("定时任务调度自启失败:", e)
     bind = os.environ.get("WXBOT_BIND", "127.0.0.1")  # 容器内设 0.0.0.0，宿主默认只本地
     print(f"wxbot 后台启动： http://localhost:{config.PORT} (bind {bind})")
     app.run(host=bind, port=config.PORT, debug=False, threaded=True)

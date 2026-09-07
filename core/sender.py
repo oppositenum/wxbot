@@ -123,7 +123,11 @@ def _vision_open(display_name, chat_username=None):
                 docker_wx.note_open(chat_username)     # 记住当前打开的会话
             return True
         time.sleep(0.4)
-    return False
+    # 视觉不可用/失败(如 LLM 中转挂了)→退回搜索式打开(search+回车)，不至于完全发不出
+    ok = docker_wx.open_chat(query)
+    if ok and chat_username:
+        docker_wx.note_open(chat_username)
+    return ok
 
 
 _focus_lock = threading.Lock()
@@ -266,6 +270,41 @@ def send_text(display_name, text, chat_username=None, retries=2, verify=True):
                                                     time.time() + VERIFY_WINDOW),
                 retries=retries,
                 predelivered=lambda base: _delivered_text(chat_username, text, base))
+    finally:
+        docker_wx.release_priority()
+
+
+def _verify_contains(chat_username, text, baseline_id, deadline):
+    """确认出现一条 is_self、内容【包含】text 的新消息(用于 @提及：内容是 '@某人 正文')。"""
+    from core import decrypt, messages
+    want = _norm(text)
+    while time.time() < deadline:
+        time.sleep(POLL_STEP)
+        try:
+            decrypt.run(force=True, only=["message"])
+            msgs = messages.get_messages(chat_username, limit=30)
+        except Exception:  # noqa: BLE001
+            continue
+        for m in msgs:
+            if (m.get("is_self") and (m.get("local_id") or -1) > baseline_id
+                    and m.get("type") == 1 and want and want in _norm(m.get("content"))):
+                return True
+    return False
+
+
+def send_at(display_name, chat_username, member_wxid, member_display, text, retries=2):
+    """向群里发一条【@某人】的消息。member_display=群里显示名(用于@选择器过滤)。"""
+    docker_wx.request_priority()
+    try:
+        with SEND_LOCK:
+            return _guarded_send(
+                display_name, chat_username,
+                do_paste=lambda: docker_wx.paste_at(member_display or "", text),
+                verify_fn=lambda base: _verify_contains(chat_username, text, base,
+                                                        time.time() + VERIFY_WINDOW),
+                retries=retries,
+                predelivered=lambda base: _verify_contains(chat_username, text, base,
+                                                           time.time() + 0.1))
     finally:
         docker_wx.release_priority()
 

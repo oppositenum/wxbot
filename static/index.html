@@ -69,6 +69,7 @@
   <button id="aiBtn">蒸馏/AI</button>
   <button id="watchBtn">监听设置</button>
   <button id="followBtn">跟发设置</button>
+  <button id="scheduleBtn">定时任务</button>
   <label class="pill" style="cursor:pointer" title="打开有图/视频的会话时,自动驱动微信解密其媒体"><input type="checkbox" id="autoDecrypt" checked style="vertical-align:middle"> 自动解密媒体</label>
   <label class="pill" style="cursor:pointer" title="打开会话时让微信也停在该会话,新图到达微信会自动下清晰版,即使秒撤也已拿到清晰图(微信视图会跟着你看的会话走)"><input type="checkbox" id="fullresCap" style="vertical-align:middle"> 保持会话打开(撤回图清晰)</label>
 </header>
@@ -104,6 +105,7 @@
 <div class="members" id="aiPanel" style="width:340px"></div>
 <div class="members" id="watchPanel" style="width:340px"></div>
 <div class="members" id="followPanel" style="width:340px"></div>
+<div class="members" id="schedulePanel" style="width:380px"></div>
 <div class="toast" id="toast"></div>
 <div class="lightbox" id="lightbox" onclick="this.classList.remove('show')"><img id="lightboxImg" src=""></div>
 
@@ -623,6 +625,42 @@ async function renderFollow(){
   p.classList.add("show");
 }
 $("#followBtn").onclick=()=>{ const p=$("#followPanel"); if(p.classList.contains("show")){p.classList.remove("show");return;} $("#aiPanel").classList.remove("show");$("#membersPanel").classList.remove("show");$("#watchPanel").classList.remove("show"); renderFollow(); };
+$("#scheduleBtn").onclick=()=>{ const p=$("#schedulePanel"); if(p.classList.contains("show")){p.classList.remove("show");return;} document.querySelectorAll(".members").forEach(x=>x.classList.remove("show")); renderSchedule(); p.classList.add("show"); };
+async function renderSchedule(){
+  const p=$("#schedulePanel");
+  let d={tasks:[],log:[]}; try{ d=await(await fetch("/api/schedule")).json(); }catch(e){}
+  const rows=(d.tasks||[]).map(t=>`<div class="row" style="align-items:flex-start">
+      <div style="flex:1;min-width:0">
+        <div class="name">${escape_(t.title||'')} ${t.is_group?'👥':'👤'}</div>
+        <div class="sub" style="white-space:normal">→ ${escape_(t.target_display||t.target||'')}${t.mention_display?(' @'+escape_(t.mention_display)):''}<br>${escape_(t.schedule_desc||'')} · 下次 ${escape_(t.next||'?')}${t.use_llm?' · AI生成':''}<br>${escape_((t.prompt||'').slice(0,50))}</div>
+      </div>
+      <button class="schRun" data-id="${t.id}" title="立即执行一次">▶</button>
+      <button class="schDel" data-id="${t.id}" style="margin-left:4px">删</button>
+    </div>`).join("") || '<div class="sub">还没有定时任务</div>';
+  p.innerHTML=`<h3>定时任务 <span style="float:right;cursor:pointer;color:#999" onclick="closePanel('#schedulePanel')">✕</span></h3>
+    <div class="sub" style="margin-bottom:6px">用一句话描述：创建/取消/列出。到点把结果发给对方（私聊直发，群聊@他）。</div>
+    <textarea id="schNL" placeholder="例：每天早上9点在test-001群@大南是逗比 提醒他交周报&#10;例：明天下午3点提醒老婆去开家长会&#10;例：取消周报提醒&#10;例：列出所有定时任务" style="width:100%;height:70px;padding:6px;margin-bottom:6px"></textarea>
+    <button id="schGo" class="primary">执行</button>
+    <div id="schMsg" class="sub" style="margin:6px 0"></div>
+    <hr style="margin:10px 0;border:none;border-top:1px solid #eee">
+    <h3>当前任务 <span class="sub" style="font-weight:normal">${(d.tasks||[]).length} 个</span></h3>
+    ${rows}
+    ${(d.log||[]).length?('<hr style="margin:10px 0;border:none;border-top:1px solid #eee"><div class="sub" style="white-space:pre-wrap;color:#999">'+escape_((d.log||[]).slice(-6).join("\\n"))+'</div>'):''}`;
+  $("#schGo").onclick=async()=>{
+    const text=$("#schNL").value.trim(); if(!text){ return; }
+    $("#schMsg").textContent="处理中…";
+    try{
+      const r=await(await fetch("/api/schedule/nl",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text})})).json();
+      $("#schMsg").textContent=(r.ok?"✅ ":"⚠️ ")+(r.message||(r.action==="list"?("共 "+(r.tasks||[]).length+" 个任务"):""));
+      if(r.ok){ $("#schNL").value=""; renderSchedule(); }
+    }catch(e){ $("#schMsg").textContent="出错:"+e; }
+  };
+  document.querySelectorAll(".schDel").forEach(b=>b.onclick=async()=>{
+    await fetch("/api/schedule/"+b.dataset.id+"/delete",{method:"POST"}); toast("已删除"); renderSchedule();
+  });
+  document.querySelectorAll(".schRun").forEach(b=>b.onclick=async()=>{
+    await fetch("/api/schedule/"+b.dataset.id+"/run",{method:"POST"}); toast("已触发执行(看聊天)"); });
+}
 
 let botRunning=false;
 async function loadBot(){

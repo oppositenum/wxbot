@@ -259,6 +259,16 @@ def title_shot(host_out):
     return os.path.exists(host_out)
 
 
+def paste_at(member_name, text):
+    """向【当前已打开的群】发一条 @某人 的消息(需先 open_chat 到该群)。"""
+    with UI_LOCK:
+        r = _exec("python3", "/usr/local/bin/wx_send.py", "pasteat",
+                  member_name, text, timeout=40)
+    if "OK" in r.stdout:
+        return {"ok": True}
+    return {"ok": False, "error": (r.stdout + r.stderr).strip() or "paste@ failed"}
+
+
 def paste_image_open(host_path):
     """向【当前已打开】的会话发图片(不重新搜索)。"""
     if not os.path.exists(host_path):

@@ -200,6 +200,27 @@ def _decrypt_from_dat(chat_username, local_id):
     return None
 
 
+def _best_image(chat_username, local_id):
+    """取本地能拿到的【最大(最清晰)】版本：比较 .dat 解密结果 与 微信已解密到 temp 的明文图。
+    "打开图"后全图常落在 temp/ImageUtils(明文)，未必生成 _b.dat，故要一并比较取最大。"""
+    cands = []
+    d = _decrypt_from_dat(chat_username, local_id)
+    if d:
+        cands.append(d)
+    md5 = _msg_img_md5(chat_username, local_id)
+    if md5:
+        for name in (_basehash(md5), md5):
+            p = _temp_jpg(name)
+            if p:
+                try:
+                    data = open(p, "rb").read()
+                    if data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n":
+                        cands.append(data)
+                except Exception:  # noqa: BLE001
+                    pass
+    return max(cands, key=len) if cands else None
+
+
 def _looks_thumb(data):
     """粗判是否只是缩略图(小)：优先按像素尺寸，缺 PIL 时按字节数。"""
     if not data:
@@ -229,7 +250,7 @@ def cache_image(chat_username, local_id, upgrade=False):
             existing = open(p, "rb").read()
         except Exception:  # noqa: BLE001
             existing = None
-    img = _decrypt_from_dat(chat_username, local_id)      # 优先 _b.dat(全分辨率)
+    img = _best_image(chat_username, local_id)            # 取本地最大(最清晰)版
     if not img:
         return (existing is not None), _looks_thumb(existing) if existing else True
     # 已有缓存且新解出的不比旧的大，就别覆盖(避免用缩略图盖掉已缓存的大图)
@@ -276,7 +297,8 @@ def _fullres_worker(chat_username):
     try:
         from core import harvest
         name = _display_name(chat_username)
-        harvest.harvest(name, nav=8, log=lambda *_: None)   # 打开最近的图→微信下全图
+        # 轻量：只点最新那张图触发下全图(不翻历史/不滚动)
+        harvest.pull_latest_fullres(name, log=lambda *_: None)
         _t.sleep(0.5)
         with _fr_lock:
             lids = list(dict.fromkeys(_fr_recent.pop(chat_username, [])))

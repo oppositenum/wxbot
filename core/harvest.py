@@ -140,6 +140,41 @@ def harvest(display_name=None, nav=60, log=print):
         return _harvest_locked(display_name, nav, log)
 
 
+def pull_latest_fullres(display_name, log=print):
+    """轻量抓全图：打开会话→只点【最底部(最新)那张图】一下触发微信下全图→Esc。
+    不翻历史、不滚动，几乎无感；专给"新到的图"预取高清版(供撤回后仍清晰)。
+    返回是否触发成功(temp 落了新明文)。发送优先时立即让位。"""
+    if docker_wx.priority_pending():
+        return False
+    with docker_wx.UI_LOCK:
+        if docker_wx.priority_pending():
+            return False
+        try:
+            if display_name and (_vision_title() or "") not in (display_name, ):
+                # 没开在目标会话→用搜索式快速打开(比翻列表的 _vision_open 快很多)
+                from core import sender
+                sender._vision_open(display_name)
+            _x("xdotool", "mousemove", "800", "400")   # 确保新消息在底部
+            for _ in range(6):
+                _x("xdotool", "click", "5")
+                time.sleep(0.06)
+            time.sleep(0.8)
+            pts = _vision_find_photos(log)        # 找当前屏里的真实照片
+            if not pts:
+                return False
+            pt = max(pts, key=lambda p: p[1])     # 取最底部(最新)那张
+            c0 = _temp_count()
+            _click(*pt)
+            time.sleep(1.6)                       # 等查看器打开+微信下全图落盘
+            opened = _temp_count() > c0
+            _x("xdotool", "key", "Escape")
+            time.sleep(0.3)
+            return opened
+        except Exception as e:  # noqa: BLE001
+            log(f"pull_latest_fullres error: {e}")
+            return False
+
+
 def _vision_shot_bytes():
     _screenshot()
     return open("/tmp/_hv_host.png", "rb").read()

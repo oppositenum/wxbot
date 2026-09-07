@@ -384,7 +384,8 @@ def _maybe_learn(chat, ctx_msgs, log):
 def _handle_schedule_msg(chat, m, is_group, log):
     """把一条像"定时/提醒"的聊天消息当作定时任务指令处理，并把回执发回该会话。
     返回是否已处理(处理了就不再走闲聊回复)。"""
-    text = _strip_at(m.get("content") or "")
+    # 用原始内容(不 _strip_at)：@大南是逗比后没空格会被正则连内容一起吃掉；LLM 能正确解析 @
+    text = m.get("content") or ""
     ctx = {"chat_username": chat, "chat_display": send_name_for(chat),
            "is_group": is_group, "requester_wxid": m.get("sender"),
            "requester_name": _sender_name(m.get("sender")) or m.get("sender_name")}

@@ -340,8 +340,29 @@ def parse_nl(text):
     return json.loads(raw)
 
 
-def handle_nl(text):
-    """解析并执行一条自然语言定时指令。返回 {ok, action, message, ...}。"""
+_SCHED_VERB = re.compile(r"提醒|定时|闹钟|催我|叫我|通知我")
+_SCHED_TIME = re.compile(
+    r"每[天周月日]|每隔|每小时|每分钟|每\d|明天|后天|今天|上午|下午|晚上|早上|凌晨|"
+    r"周[一二三四五六日天]|礼拜|\d+\s*点|\d{1,2}:\d{2}|过\d+分|一分钟|半小时")
+_SCHED_MANAGE = re.compile(r"(取消|删除|关掉|停掉|列出|查看|有哪些|看看).{0,8}(任务|提醒|定时|闹钟)")
+
+
+def looks_schedule(text):
+    """粗判一句话是不是"定时任务"指令(用于机器人聊天里识别,避免每句都调LLM)。"""
+    if not text:
+        return False
+    if _SCHED_MANAGE.search(text):
+        return True
+    return bool(_SCHED_VERB.search(text) and _SCHED_TIME.search(text))
+
+
+_SELF_WORDS = {"我", "自己", "me", "本人", "俺"}
+
+
+def handle_nl(text, ctx=None):
+    """解析并执行一条自然语言定时指令。返回 {ok, action, message, ...}。
+    ctx(可选)={chat_username, chat_display, is_group, requester_wxid, requester_name}：
+    指令来自聊天时用作默认目标——说"提醒我"就发回给说话的人(私聊直发,群里@他)。"""
     if not llm.available():
         return {"ok": False, "message": "未配置 LLM,无法解析自然语言"}
     try:
@@ -355,13 +376,20 @@ def handle_nl(text):
         n = remove_task(match=d.get("cancel_match") or d.get("target") or d.get("title"))
         return {"ok": n > 0, "action": "cancel",
                 "message": f"已取消 {n} 个任务" if n else "没找到匹配的任务"}
-    # create
+    # create——目标为空或"我/自己"时,用指令来源(说话的人/所在会话)作默认目标
+    tgt = (d.get("target") or "").strip()
+    mention = (d.get("mention") or "").strip() or None
+    if ctx and (not tgt or _norm(tgt) in {_norm(w) for w in _SELF_WORDS}):
+        if ctx.get("is_group"):
+            tgt = ctx.get("chat_display") or ctx.get("chat_username")
+            mention = mention or ctx.get("requester_name")   # 群里默认@提出人
+        else:
+            tgt = ctx.get("chat_display") or ctx.get("chat_username")
     t, err = add_task(
-        title=d.get("title"), target=d.get("target"), prompt=d.get("prompt"),
+        title=d.get("title"), target=tgt, prompt=d.get("prompt"),
         cron=(d.get("cron") or "").strip() or None,
         once_at=(d.get("once_at") or "").strip() or None,
-        mention=(d.get("mention") or "").strip() or None,
-        use_llm=bool(d.get("use_llm")))
+        mention=mention, use_llm=bool(d.get("use_llm")))
     if err:
         return {"ok": False, "action": "create", "message": err, "parsed": d}
     return {"ok": True, "action": "create",

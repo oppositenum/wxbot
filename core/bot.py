@@ -17,7 +17,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config  # noqa: E402
 from core import decrypt, messages, contacts, docker_wx, distill, llm  # noqa: E402
-from core import imgdec, media, sender, agent, memory  # noqa: E402
+from core import imgdec, media, sender, agent, memory, schedule  # noqa: E402
 
 _DEFAULT_RULES = {
     "poll_interval": 5, "include_self": False, "watch": [],
@@ -381,6 +381,33 @@ def _maybe_learn(chat, ctx_msgs, log):
         log(f"[记忆] error: {e}")
 
 
+def _handle_schedule_msg(chat, m, is_group, log):
+    """把一条像"定时/提醒"的聊天消息当作定时任务指令处理，并把回执发回该会话。
+    返回是否已处理(处理了就不再走闲聊回复)。"""
+    text = _strip_at(m.get("content") or "")
+    ctx = {"chat_username": chat, "chat_display": send_name_for(chat),
+           "is_group": is_group, "requester_wxid": m.get("sender"),
+           "requester_name": _sender_name(m.get("sender")) or m.get("sender_name")}
+    try:
+        r = schedule.handle_nl(text, ctx)
+    except Exception as e:  # noqa: BLE001
+        log(f"[定时] 处理出错: {e}")
+        return False
+    if r.get("action") == "list":
+        ts = r.get("tasks", [])
+        msg = ("当前定时任务：\n" + "\n".join(
+            f"· {t['title']} → {t['target_display']}（{t['schedule_desc']}，下次{t['next']}）"
+            for t in ts)) if ts else "当前没有定时任务"
+    else:
+        msg = ("✅ " if r.get("ok") else "⚠️ ") + (r.get("message") or "")
+    try:
+        sender.send_text(send_name_for(chat), msg, chat_username=chat)
+    except Exception as e:  # noqa: BLE001
+        log(f"[定时] 回执发送失败: {e}")
+    log(f"[定时] {chat}: {text[:30]!r} => {r.get('message') or r.get('action')}")
+    return True
+
+
 def run_once(rules, state, log=print):
     import time
     decrypt.run(force=False)
@@ -410,6 +437,11 @@ def run_once(rules, state, log=print):
                 continue
             if m["is_self"] and not include_self:
                 continue
+            # 定时任务指令：私聊任意 / 群里@我 时，若像"提醒/定时"就直接建任务并回执(不走闲聊)
+            engage = (not is_group) or m.get("at_me") or m.get("quote_me")
+            if engage and schedule.looks_schedule(m.get("content") or ""):
+                if _handle_schedule_msg(chat, m, is_group, log):
+                    break
             for rule in rules.get("rules", []):
                 g = match_rule(rule, m, is_group)
                 if g is None:

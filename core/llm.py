@@ -43,8 +43,9 @@ def _post(url, headers, body, proxy, timeout=60, retries=3):
             with _opener(proxy).open(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except HTTPError as e:
-            if e.code >= 500 and attempt < retries:      # 网关抖动(502/503/504)重试
-                time.sleep(1.5 * (attempt + 1))
+            if (e.code >= 500 or e.code == 429) and attempt < retries:
+                # 网关抖动(502/503/504)或并发限流(429)重试；429 退避更久
+                time.sleep((3.0 if e.code == 429 else 1.5) * (attempt + 1))
                 continue
             detail = ""
             try:

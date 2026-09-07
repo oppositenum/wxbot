@@ -307,6 +307,88 @@ def api_bot_persona():
     return jsonify({"ok": True, "persona": slug})
 
 
+# ---------------- 知识库(RAG) ----------------
+@app.get("/api/kb")
+def api_kb_list():
+    from core import knowledge
+    return jsonify(knowledge.list_docs())
+
+
+@app.post("/api/kb/add")
+def api_kb_add():
+    from core import knowledge
+    b = request.get_json(force=True, silent=True) or {}
+    content = (b.get("content") or "").strip()
+    if not content:
+        return jsonify({"ok": False, "error": "content 为空"}), 400
+    if b.get("chunk"):
+        n = knowledge.import_text(content, source=b.get("source", "import"),
+                                  title_prefix=b.get("title", ""))
+        return jsonify({"ok": True, "chunks": n})
+    knowledge.add(b.get("title", ""), content, b.get("source", "manual"))
+    return jsonify({"ok": True})
+
+
+@app.post("/api/kb/delete")
+def api_kb_delete():
+    from core import knowledge
+    b = request.get_json(force=True, silent=True) or {}
+    knowledge.delete(source=b.get("source"), doc_id=b.get("id"))
+    return jsonify({"ok": True})
+
+
+@app.get("/api/kb/search")
+def api_kb_search():
+    from core import knowledge
+    q = request.args.get("q", "")
+    return jsonify({"hits": knowledge.search(q, int(request.args.get("k", 5)))})
+
+
+# ---------------- 人物画像 / 长期记忆 ----------------
+@app.get("/api/profiles")
+def api_profiles():
+    from core import memory
+    return jsonify({"profiles": memory.list_profiles()})
+
+
+@app.get("/api/profiles/<path:wxid>")
+def api_profile_detail(wxid):
+    from core import memory
+    return jsonify(memory.load_profile(wxid))
+
+
+@app.post("/api/profiles/<path:wxid>/delete")
+def api_profile_delete(wxid):
+    from core import memory
+    import os as _os
+    try:
+        _os.remove(memory._path(wxid))
+    except OSError:
+        pass
+    return jsonify({"ok": True})
+
+
+# ---------------- Agent 开关/工具白名单 ----------------
+@app.get("/api/agent/config")
+def api_agent_config_get():
+    from core import agent, tools
+    rules = botmod.load_rules()
+    cfg = agent.agent_config(rules)
+    return jsonify({"enabled": cfg["enabled"], "tools": cfg["tools"],
+                    "all_tools": [s["name"] for s in tools.SPECS]})
+
+
+@app.post("/api/agent/config")
+def api_agent_config_set():
+    b = request.get_json(force=True, silent=True) or {}
+    rules = botmod.load_rules()
+    rules["agent"] = {"enabled": bool(b.get("enabled")),
+                      "tools": b.get("tools") or []}
+    with open(botmod.rules_file(), "w", encoding="utf-8") as f:
+        json.dump(rules, f, ensure_ascii=False, indent=2)
+    return jsonify({"ok": True, "agent": rules["agent"]})
+
+
 @app.post("/api/distill/candidates")
 def api_distill_candidates():
     g = (request.get_json(force=True, silent=True) or {}).get("group")

@@ -110,6 +110,75 @@ def chat(system, messages, cfg=None):
     return r["choices"][0]["message"]["content"].strip()
 
 
+def chat_tools(system, messages, tools, dispatch, cfg=None, max_rounds=6):
+    """多轮工具调用(Claude tools)。dispatch(name, input_dict)->str 执行工具并回结果。
+
+    tools: [{"name","description","input_schema"}]。返回最终回复文本。
+    非 Claude provider 时退回无工具的 chat()（中转对 Claude tools 已验证可用）。
+    """
+    cfg = cfg or load_cfg()
+    if cfg.get("provider", "claude") != "claude":
+        return chat(system, messages, cfg)
+    key = cfg.get("api_key") or os.environ.get("WXBOT_LLM_KEY", "")
+    proxy = cfg.get("proxy") or None
+    base = (cfg.get("base_url") or "").rstrip("/")
+    model = cfg.get("model", "claude-sonnet-5")
+    if not key:
+        raise RuntimeError("未配置 LLM api_key")
+    headers = {"content-type": "application/json", "x-api-key": key,
+               "authorization": f"Bearer {key}",
+               "anthropic-version": "2023-06-01", "user-agent": UA}
+    url = _endpoint(base or "https://api.anthropic.com", "messages")
+    convo = list(messages)
+    for _ in range(max_rounds):
+        body = {"model": model, "max_tokens": cfg.get("max_tokens", 800),
+                "system": system, "messages": convo, "tools": tools}
+        r = _post(url, headers, body, proxy)
+        content = r.get("content", [])
+        if r.get("stop_reason") == "tool_use":
+            convo.append({"role": "assistant", "content": content})
+            results = []
+            for blk in content:
+                if blk.get("type") == "tool_use":
+                    try:
+                        out = dispatch(blk.get("name"), blk.get("input") or {})
+                    except Exception as e:  # noqa: BLE001
+                        out = f"[工具出错] {e}"
+                    results.append({"type": "tool_result", "tool_use_id": blk.get("id"),
+                                    "content": str(out)[:6000]})
+            convo.append({"role": "user", "content": results})
+            continue
+        return "".join(p.get("text", "") for p in content
+                       if p.get("type") == "text").strip()
+    # 轮数用尽：再要一次无工具的收尾
+    body = {"model": model, "max_tokens": cfg.get("max_tokens", 800),
+            "system": system + "\n(请基于已有信息直接给出最终回复。)", "messages": convo}
+    r = _post(url, headers, body, proxy)
+    return "".join(p.get("text", "") for p in r.get("content", [])
+                   if p.get("type") == "text").strip()
+
+
+def embed(texts, cfg=None):
+    """可选：文本向量化。多数中转不支持(404)→返回 None，RAG 退回 FTS5/BM25。"""
+    cfg = cfg or load_cfg()
+    if not cfg.get("enable_embed"):
+        return None
+    base = (cfg.get("embed_base_url") or cfg.get("base_url") or "").rstrip("/")
+    key = cfg.get("embed_api_key") or cfg.get("api_key") or ""
+    model = cfg.get("embed_model", "text-embedding-3-small")
+    proxy = cfg.get("proxy") or None
+    if not base or not key:
+        return None
+    try:
+        r = _post(_endpoint(base, "embeddings"),
+                  {"content-type": "application/json",
+                   "authorization": f"Bearer {key}", "user-agent": UA},
+                  {"model": model, "input": texts}, proxy)
+        return [d["embedding"] for d in r.get("data", [])] or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def describe_image(img_bytes, media_type="image/jpeg",
                    prompt="用一句中文简短、客观地描述这张图片的主要内容（是什么/在做什么），不要评论、不要猜测。",
                    cfg=None):

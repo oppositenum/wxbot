@@ -365,6 +365,10 @@ async function renderAI(){
   try{ const ss=await(await fetch("/api/sessions")).json();
     privs=ss.filter(s=>!s.username.endsWith("@chatroom")&&s.category!=="other"); }catch(e){}
   const personas=await(await fetch("/api/personas")).json();
+  let ag={enabled:false,tools:[],all_tools:[]}, kb={total:0,docs:[]}, profs={profiles:[]};
+  try{ ag=await(await fetch("/api/agent/config")).json(); }catch(e){}
+  try{ kb=await(await fetch("/api/kb")).json(); }catch(e){}
+  try{ profs=await(await fetch("/api/profiles")).json(); }catch(e){}
   let activePersona="";
   try{ const botr=await(await fetch("/api/bot")).json(); const rr=(botr.rules&&botr.rules.rules||[]).find(r=>r.action&&r.action.type==="reply_ai"); activePersona=(rr&&rr.action.persona)||""; }catch(e){}
   p.innerHTML=`
@@ -376,6 +380,21 @@ async function renderAI(){
     <input id="llmBase" placeholder="Base URL(可选,中转网关)" style="width:100%;margin-bottom:6px;padding:5px" value="${llm.base_url||''}">
     <input id="llmProxy" placeholder="代理(可选,如 http://127.0.0.1:7890,留空=不走代理)" style="width:100%;margin-bottom:6px;padding:5px" value="${llm.proxy||''}">
     <button id="llmSave" class="primary">保存 AI 配置</button>
+    <hr style="margin:12px 0;border:none;border-top:1px solid #eee">
+    <h3>Agent 模式 <span class="sub" style="font-weight:normal">(机器人可联网/查历史/查画像/查知识库后再答)</span></h3>
+    <label style="display:block;margin-bottom:6px;cursor:pointer"><input type="checkbox" id="agEnabled" ${ag.enabled?'checked':''}> 开启 Agent 工具调用</label>
+    <div id="agTools" style="margin-bottom:6px">${ag.all_tools.map(t=>`<label class="pill" style="cursor:pointer;margin:2px"><input type="checkbox" class="agTool" value="${t}" ${ag.tools.includes(t)?'checked':''}> ${t}</label>`).join("")}</div>
+    <button id="agSave" class="primary">保存 Agent 配置</button>
+    <hr style="margin:12px 0;border:none;border-top:1px solid #eee">
+    <h3>知识库(RAG) <span class="sub" style="font-weight:normal">共 ${kb.total} 块</span></h3>
+    <textarea id="kbText" placeholder="粘贴文档/FAQ，保存后可被机器人检索(search_kb)" style="width:100%;height:64px;padding:5px;margin-bottom:6px"></textarea>
+    <input id="kbSrc" placeholder="来源标签(可选,如 faq)" style="width:100%;padding:5px;margin-bottom:6px">
+    <button id="kbAdd" class="primary">切块导入知识库</button>
+    <div id="kbList" style="margin-top:8px">${(kb.docs||[]).map(d=>`<div class="row"><div style="flex:1;min-width:0"><div class="sub">[${escape_(d.source||'')}] ${escape_(d.preview||'')}</div></div><button class="kbDel" data-id="${d.id}">删</button></div>`).join("")||'<div class="sub">空</div>'}</div>
+    <hr style="margin:12px 0;border:none;border-top:1px solid #eee">
+    <h3>人物画像 <span class="sub" style="font-weight:normal">(长期记忆,聊天中自动累积)</span></h3>
+    <div id="profList">${(profs.profiles||[]).map(pr=>`<div class="row"><div style="flex:1;min-width:0"><div class="name">${escape_(pr.name||pr.wxid)}</div><div class="sub">${pr.facts}条事实 ${pr.summary?('· '+escape_(pr.summary.slice(0,24))):''}</div></div><button class="prView" data-w="${escape_(pr.wxid)}">看</button><button class="prDel" data-w="${escape_(pr.wxid)}">删</button></div>`).join("")||'<div class="sub">还没学到画像(开启AI后聊天会自动累积)</div>'}</div>
+    <div id="profView" style="margin-top:8px"></div>
     <hr style="margin:12px 0;border:none;border-top:1px solid #eee">
     <h3>蒸馏人设</h3>
     <select id="distGroup" style="width:100%;padding:5px;margin-bottom:6px">
@@ -410,6 +429,29 @@ async function renderAI(){
     const r=await(await fetch("/api/personas/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,persona})})).json();
     toast(r.ok?("已导入 "+r.slug):"导入失败"); renderAI();
   };
+  $("#agSave").onclick=async()=>{
+    const tools=[...document.querySelectorAll(".agTool:checked")].map(x=>x.value);
+    const r=await(await fetch("/api/agent/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:$("#agEnabled").checked,tools})})).json();
+    toast(r.ok?"Agent 配置已保存":"保存失败");
+  };
+  $("#kbAdd").onclick=async()=>{
+    const content=$("#kbText").value.trim(); if(!content){ toast("粘贴内容"); return; }
+    const r=await(await fetch("/api/kb/add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({content,source:$("#kbSrc").value.trim()||"import",chunk:true})})).json();
+    toast(r.ok?("已导入 "+(r.chunks||1)+" 块"):"导入失败"); renderAI();
+  };
+  document.querySelectorAll(".kbDel").forEach(b=>b.onclick=async()=>{
+    await fetch("/api/kb/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:+b.dataset.id})});
+    toast("已删除"); renderAI();
+  });
+  document.querySelectorAll(".prView").forEach(b=>b.onclick=async()=>{
+    const d=await(await fetch("/api/profiles/"+encodeURIComponent(b.dataset.w))).json();
+    $("#profView").innerHTML=`<div style="background:#f7f8fa;border-radius:8px;padding:10px;font-size:13px;line-height:1.6"><b>${escape_(d.name||d.wxid)}</b>${d.summary?('<br>'+escape_(d.summary)):''}<br>${(d.facts||[]).map(f=>'· '+escape_(f.fact)).join('<br>')||'<span class=sub>无事实</span>'}</div>`;
+  });
+  document.querySelectorAll(".prDel").forEach(b=>b.onclick=async()=>{
+    if(!confirm("删除画像 "+b.dataset.w+"?")) return;
+    await fetch("/api/profiles/"+encodeURIComponent(b.dataset.w)+"/delete",{method:"POST"});
+    toast("已删除"); renderAI();
+  });
   document.querySelectorAll(".pDel").forEach(b=>b.onclick=async()=>{
     if(!confirm("删除人设 "+b.dataset.s+"?")) return;
     await fetch("/api/personas/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({slug:b.dataset.s})});

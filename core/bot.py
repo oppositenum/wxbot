@@ -17,7 +17,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config  # noqa: E402
 from core import decrypt, messages, contacts, docker_wx, distill, llm  # noqa: E402
-from core import imgdec, media, sender  # noqa: E402
+from core import imgdec, media, sender, agent, memory  # noqa: E402
 
 _DEFAULT_RULES = {
     "poll_interval": 5, "include_self": False, "watch": [],
@@ -170,15 +170,22 @@ def _enrich_media(chat, m):
     return out
 
 
-def _ai_reply(persona, chat_username, msg, context_msgs):
+def _ai_reply(persona, chat_username, msg, context_msgs, rules=None):
     """用 LLM 以蒸馏人设生成回复。处理"先说话再单独@"：@那条没内容时，
-    用该发送者最近连发的几句作为要回应的内容。"""
+    用该发送者最近连发的几句作为要回应的内容。
+
+    增强：注入对方长期画像；开启 agent 模式时可联网/查历史/查知识库后再答。
+    """
     system = (persona["persona"] +
               "\n\n【模仿要求】结合下面的对话上下文来回应,像真人聊天。"
               "只输出回复内容,1~2句、口语化、简短自然,贴合上面风格;"
               "不要解释、不要加引号、不要逐句复述对方的话、不要重复问候。")
     if persona.get("samples"):
         system += "\n\n【口吻样例】\n" + "\n".join(persona["samples"][-12:])
+    # 注入对方长期画像(记得住人)
+    prof = memory.profile_context(msg.get("sender")) if msg.get("sender") else ""
+    if prof:
+        system += "\n\n" + prof
 
     asker = _sender_name(msg.get("sender")) or "群友"
     # @那条里@之外的实质内容；若是图片/语音/视频，替换成模型看懂/听懂后的描述
@@ -211,10 +218,18 @@ def _ai_reply(persona, chat_username, msg, context_msgs):
         ask = f"\n\n{asker} 说：{said[-1]}\n请以你的风格回 1~2 句："
     else:
         ask = f"\n\n{asker} @了你。请结合上文、以你的风格接 1~2 句："
+
+    acfg = agent.agent_config(rules)
+    if acfg["enabled"]:
+        # agent 模式：可自主联网/查历史/查画像/查知识库后再以人设风格作答
+        sys_a = system + ("\n\n【工具】必要时可查资料/历史/知识库后再答，但最终回复仍要"
+                          "简短口语、贴合上面风格。")
+        return agent.run(sys_a, ctx + ask, chat=chat_username,
+                         tool_names=acfg["tools"])
     return llm.chat(system, [{"role": "user", "content": ctx + ask}])
 
 
-def do_action(rule, msg, chat_username, groups, log, context_msgs=None):
+def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=None):
     act = rule.get("action", {})
     kind = act.get("type")
     if kind == "reply":
@@ -234,7 +249,7 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None):
             log(f"  reply_ai 跳过：人设 {act.get('persona')} 不存在")
             return
         try:
-            text = _ai_reply(persona, chat_username, msg, context_msgs or [])
+            text = _ai_reply(persona, chat_username, msg, context_msgs or [], rules)
         except Exception as e:  # noqa: BLE001
             log(f"  reply_ai LLM 出错：{e}")
             return
@@ -337,6 +352,27 @@ def run_follow(rules, state, log=print):
         log(f"[跟发] {chat} 连发{count}次 -> {target}: {content!r} => {res}")
 
 
+_last_learn = {}          # chat -> ts，画像抽取节流(避免每轮都调 LLM)
+LEARN_INTERVAL = 600      # 每会话最多 10 分钟学一次
+
+
+def _maybe_learn(chat, ctx_msgs, log):
+    """节流地从最近对话抽取人物画像(长期记忆)。开关：bot_rules/llm_config 的 learn_profiles。"""
+    import time as _t
+    try:
+        if not agent.agent_config().get("enabled") and not llm.available():
+            return
+        now = _t.time()
+        if now - _last_learn.get(chat, 0) < LEARN_INTERVAL:
+            return
+        _last_learn[chat] = now
+        n = memory.extract_from_messages(ctx_msgs, me=config.wxid())
+        if n:
+            log(f"[记忆] {chat} 更新 {n} 人画像")
+    except Exception as e:  # noqa: BLE001
+        log(f"[记忆] error: {e}")
+
+
 def run_once(rules, state, log=print):
     import time
     decrypt.run(force=False)
@@ -379,7 +415,7 @@ def run_once(rules, state, log=print):
                     p["last_seen"] = now
                     log(f"[攒:{rule['name']}] {chat} +1条(共{len(p['msgs'])})")
                 else:
-                    do_action(rule, m, chat, g, log, context_msgs=msgs)
+                    do_action(rule, m, chat, g, log, context_msgs=msgs, rules=rules)
                 break
     # 去抖：对方停顿够久 → 综合最近这批消息回一次
     for chat in list(_pending.keys()):
@@ -390,7 +426,8 @@ def run_once(rules, state, log=print):
         if now - p.get("last_seen", 0) >= SETTLE:
             trig = p["msgs"][-1]
             log(f"[AI批量回复] {chat} 综合 {len(p['msgs'])} 条")
-            do_action(p["rule"], trig, chat, {}, log, context_msgs=p["ctx"])
+            do_action(p["rule"], trig, chat, {}, log, context_msgs=p["ctx"], rules=rules)
+            _maybe_learn(chat, p.get("ctx") or [], log)
             _pending.pop(chat, None)
     # 群消息跟发(接龙/+1)——与上面的回复逻辑并行独立，互不影响
     try:

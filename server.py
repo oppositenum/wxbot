@@ -54,12 +54,13 @@ def _focus_loop():
             # 被切走(发送/翻图/别的会话)就重开，保持钉住
             if not docker_wx.priority_pending() and docker_wx.current_open() != chat:
                 _snd.focus_chat(name, chat)
-            # 快轮询该会话：get_messages 内部会缓存(升级)清晰图
+            # 快轮询该会话：get_messages 内部会缓存(升级)清晰图。收紧到 ~0.5s 提高抓到
+            # "撤回前那一刻清晰图已就位"的命中率(微信下 _b.dat 约需1秒)。
             _dec.run(force=False, only=["message"])
             _msg.get_messages(chat, limit=15)
         except Exception:  # noqa: BLE001
             pass
-        time.sleep(1.2)
+        time.sleep(0.5)
 
 
 def _ensure_focus_loop():

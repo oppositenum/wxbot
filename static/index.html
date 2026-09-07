@@ -652,7 +652,7 @@ async function renderSchedule(){
   const rows=(d.tasks||[]).map(t=>`<div class="row" style="align-items:flex-start">
       <div style="flex:1;min-width:0">
         <div class="name">${escape_(t.title||'')} ${t.is_group?'👥':'👤'}</div>
-        <div class="sub" style="white-space:normal">→ ${escape_(t.target_display||t.target||'')}${t.mention_display?(' @'+escape_(t.mention_display)):''}<br>${escape_(t.schedule_desc||'')} · 下次 ${escape_(t.next||'?')}${t.use_llm?' · AI生成':''}<br>${escape_((t.prompt||'').slice(0,50))}</div>
+        <div class="sub" style="white-space:normal">→ ${escape_(t.target_display||t.target||'')}${t.mention_display?(' @'+escape_(t.mention_display)):''}<br>${escape_(t.schedule_desc||'')} · 下次 ${escape_(t.next||'?')}${t.use_llm?' · AI生成':''}${t.creator_name?(' · 由 '+escape_(t.creator_name)+' 设置'):''}<br>${escape_((t.prompt||'').slice(0,50))}</div>
       </div>
       <button class="schRun" data-id="${t.id}" title="立即执行一次">▶</button>
       <button class="schDel" data-id="${t.id}" style="margin-left:4px">删</button>

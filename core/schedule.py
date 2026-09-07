@@ -254,7 +254,7 @@ def _new_id(tasks):
 
 
 def add_task(title, target, prompt, cron=None, once_at=None, mention=None,
-             use_llm=False, persona=None):
+             use_llm=False, persona=None, creator_wxid=None, creator_name=None):
     """创建任务，自动解析目标/被@成员。返回 (task, error)。"""
     uname, is_group, disp = resolve_target(target)
     if not uname:
@@ -272,6 +272,7 @@ def add_task(title, target, prompt, cron=None, once_at=None, mention=None,
          "is_group": bool(is_group), "mention": mention, "mention_wxid": mention_wxid,
          "mention_display": mention_disp, "cron": cron, "once_at": once_at,
          "prompt": prompt, "use_llm": bool(use_llm), "persona": persona,
+         "creator_wxid": creator_wxid, "creator_name": creator_name,
          "enabled": True, "created": time.strftime("%Y-%m-%d %H:%M")}
     tasks.append(t)
     save_tasks(tasks)
@@ -279,20 +280,34 @@ def add_task(title, target, prompt, cron=None, once_at=None, mention=None,
     return t, None
 
 
-def remove_task(id=None, match=None):
-    """按 id 删除；或按 match(标题/目标模糊匹配) 删除。返回删除数。"""
+_GENERIC_WORDS = ("定时任务", "任务", "提醒我", "提醒", "定时", "闹钟", "通知", "一下", "的", "取消", "删除")
+
+
+def _strip_generic(s):
+    for w in _GENERIC_WORDS:
+        s = s.replace(_norm(w), "")
+    return s
+
+
+def remove_task(id=None, match=None, creator_wxid=None):
+    """按 id 或 match 删除。creator_wxid 非空时【只在该创建者自己的任务里】删(数据隔离)。"""
     tasks = load_tasks()
     keep, removed = [], 0
     for t in tasks:
+        if creator_wxid is not None and t.get("creator_wxid") != creator_wxid:
+            keep.append(t)                    # 不是你建的,跳过(隔离:不能删别人的)
+            continue
         hit = False
         if id is not None and t.get("id") == id:
             hit = True
         elif match:
             m = _norm(match)
             hay = _norm(t.get("title")) + " " + _norm(t.get("target")) + " " + _norm(t.get("prompt"))
-            if m and (m in hay
-                      # 宽松:匹配串的任意 2-gram 命中即算(容忍"周报提醒"↔"提醒交周报"词序不同)
-                      or any(m[i:i+2] in hay for i in range(len(m) - 1) if len(m) >= 2)):
+            # 去掉"任务/提醒/定时…"这类通用词再比,避免"取消X任务"命中所有含"任务"的
+            mc, hc = _strip_generic(m), _strip_generic(hay)
+            if m and (m in hay or (mc and (mc in hc
+                      # 宽松:去通用词后的实义 2-gram 命中(容忍"周报提醒"↔"提醒交周报"词序)
+                      or any(mc[i:i+2] in hc for i in range(len(mc) - 1) if len(mc) >= 2)))):
                 hit = True
         if hit:
             removed += 1
@@ -303,9 +318,12 @@ def remove_task(id=None, match=None):
     return removed
 
 
-def list_view():
+def list_view(creator_wxid=None):
+    """列出任务。creator_wxid 非空时【只列该创建者自己的】(数据隔离);为空=全部(主人视角)。"""
     out = []
     for t in load_tasks():
+        if creator_wxid is not None and t.get("creator_wxid") != creator_wxid:
+            continue
         out.append({**t, "schedule_desc": describe_schedule(t), "next": _next_hint(t)})
     return out
 
@@ -371,13 +389,16 @@ def handle_nl(text, ctx=None):
         d = parse_nl(text)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"解析失败: {e}"}
+    # 数据隔离：来自聊天(ctx 有 requester_wxid)时,只能看/删自己建的;网页(无ctx)=主人看全部
+    creator = ctx.get("requester_wxid") if ctx else None
     action = (d.get("action") or "create").lower()
     if action == "list":
-        return {"ok": True, "action": "list", "tasks": list_view()}
+        return {"ok": True, "action": "list", "tasks": list_view(creator_wxid=creator)}
     if action == "cancel":
-        n = remove_task(match=d.get("cancel_match") or d.get("target") or d.get("title"))
+        n = remove_task(match=d.get("cancel_match") or d.get("target") or d.get("title"),
+                        creator_wxid=creator)
         return {"ok": n > 0, "action": "cancel",
-                "message": f"已取消 {n} 个任务" if n else "没找到匹配的任务"}
+                "message": f"已取消 {n} 个任务" if n else "没找到你设置的匹配任务"}
     # create——目标为空或"我/自己"时,用指令来源(说话的人/所在会话)作默认目标
     tgt = (d.get("target") or "").strip()
     mention = (d.get("mention") or "").strip() or None
@@ -391,7 +412,9 @@ def handle_nl(text, ctx=None):
         title=d.get("title"), target=tgt, prompt=d.get("prompt"),
         cron=(d.get("cron") or "").strip() or None,
         once_at=(d.get("once_at") or "").strip() or None,
-        mention=mention, use_llm=bool(d.get("use_llm")))
+        mention=mention, use_llm=bool(d.get("use_llm")),
+        creator_wxid=creator,
+        creator_name=(ctx.get("requester_name") if ctx else None))
     if err:
         return {"ok": False, "action": "create", "message": err, "parsed": d}
     return {"ok": True, "action": "create",

@@ -288,9 +288,9 @@ async function send(kind, payload, localUrl){
     const r=await fetch("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     const res=await r.json();
     if(!res.ok){ toast("发送失败："+(res.error||"")); setSending(false); return; }
-    // 异步：后台在做"视觉核对会话+发送+发后校验"(十几秒)。先乐观清空输入、开始轮询消息，
-    // 消息一落库就会显示；同时轮询任务状态给最终结果。不阻塞界面。
-    toast("发送中…(后台核对会话并确认送达)");
+    // 异步队列：后台单 worker 一条条发(视觉核对会话+发后校验，十几秒/条)，新消息排队不打断
+    // 正在发的那条。先乐观清空输入、轮询消息(落库即显示)+轮询任务状态。不阻塞界面。
+    toast(res.ahead>0 ? ("已排队(前面"+res.ahead+"条)…") : "发送中…(后台核对并确认送达)");
     if(kind==="text") $("#msgInput").value="";
     if(kind==="image" && localUrl){ (sentImg[current.username]=sentImg[current.username]||[]).push({url:localUrl, ts:Date.now()/1000}); }
     setSending(false);
@@ -300,12 +300,14 @@ async function send(kind, payload, localUrl){
   }catch(e){ toast("发送出错"); setSending(false); }
 }
 async function pollSend(job){
-  for(let i=0;i<12;i++){                     // 最多轮询 ~24s
+  let lastPos=-1;
+  for(let i=0;i<30;i++){                      // 最多轮询 ~60s(含排队)
     await new Promise(r=>setTimeout(r,2000));
     loadMessages();                          // 消息落库就会显示
     let s; try{ s=await(await fetch("/api/send/status?job="+encodeURIComponent(job))).json(); }catch(e){ continue; }
+    if(s.status==="queued" && s.position!=null && s.position!==lastPos){ lastPos=s.position; toast("排队中(第"+s.position+"位)…"); }
     if(s.status==="done"){ toast(s.verified?"✅ 已送达(已核对会话)":"已发送"); loadMessages(); return; }
-    if(s.status==="error"){ toast("发送失败："+(s.error||s.wrong_chat?"打开的会话不对，已阻止":"未确认")); return; }
+    if(s.status==="error"){ toast("发送失败："+(s.wrong_chat?"打开的会话不对，已阻止":(s.error||"未确认"))); return; }
   }
 }
 

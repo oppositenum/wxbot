@@ -278,16 +278,18 @@ def _expand_watch(watch):
 _pending = {}          # chat -> {"msgs":[触发消息], "ctx":[...], "rule":.., "last_seen":ts}
 SETTLE = 8             # 对方停顿这么多秒才回（去抖，避免一句一回）
 
-FOLLOW_THRESHOLD = 3   # 群消息跟发默认阈值：连续相同 >=3 次(即"超过2次")才跟发
+FOLLOW_THRESHOLD = 2   # 群跟发默认阈值：末尾同一句话由 >=2 个【不同的人】发过才算接龙
 
 
 def _follow_streak(msgs, threshold=FOLLOW_THRESHOLD):
-    """检测群消息末尾"连续内容完全相同"的普通文本串(接龙/+1)。
+    """检测群消息末尾"多人接龙同一句话"(接龙/+1)。
 
-    msgs: 消息列表，会按 local_id 升序处理。只统计 type==1 且非撤回的普通文本，
+    关键：要【不同的人】各发一次同样的话才算接龙——同一个人连发两遍不算。
+    msgs: 消息列表，按 local_id 升序处理。只统计 type==1 且非撤回的普通文本，
     其余消息(图片/系统/撤回等)从时间线上忽略后再看相邻是否相同。
-    返回 (content, start_local_id, count)——content=那句话、start_local_id=该串
-    最早一条的 local_id(串的稳定标识)、count=连续次数；不足阈值或无文本时返回 None。
+    从末尾往回取"内容完全相同"的一串，统计其中【去重后的非本人发送者】数量，
+    达到阈值(默认2个不同的人)才算。返回 (content, start_local_id, distinct_senders)；
+    不足阈值/无文本时返回 None。start_local_id=该串最早一条的 local_id(稳定标识)。
     """
     rel = [m for m in sorted(msgs, key=lambda x: x.get("local_id") or 0)
            if m.get("type") == 1 and not m.get("revoke")]
@@ -296,17 +298,17 @@ def _follow_streak(msgs, threshold=FOLLOW_THRESHOLD):
     content = (rel[-1].get("content") or "").strip()
     if not content:
         return None
-    count = 0
+    senders = set()          # 该串里"不同的人"(排除机器人自己发的那条)
     start_id = rel[-1].get("local_id")
     for m in reversed(rel):
-        if (m.get("content") or "").strip() == content:
-            count += 1
-            start_id = m.get("local_id")
-        else:
+        if (m.get("content") or "").strip() != content:
             break
-    if count < int(threshold or FOLLOW_THRESHOLD):
+        start_id = m.get("local_id")
+        if not m.get("is_self") and m.get("sender"):
+            senders.add(m.get("sender"))
+    if len(senders) < int(threshold or FOLLOW_THRESHOLD):
         return None
-    return content, start_id, count
+    return content, start_id, len(senders)
 
 
 def _follow_key(content, start_id):
@@ -346,7 +348,7 @@ def run_follow(rules, state, log=print):
             continue
         if done.get(chat) == key:       # 这串已跟发过(或历史已登记)——只发一次
             continue
-        content, _start, count = r
+        content, _start, people = r
         target = send_name_for(chat)
         try:
             res = sender.send_text(target, content, chat_username=chat)
@@ -354,7 +356,7 @@ def run_follow(rules, state, log=print):
             log(f"[跟发] 发送失败 {chat}: {e}")
             continue
         done[chat] = key                # 发完立即标记，避免下轮重复
-        log(f"[跟发] {chat} 连发{count}次 -> {target}: {content!r} => {res}")
+        log(f"[跟发] {chat} {people}人接龙 -> {target}: {content!r} => {res}")
 
 
 _last_learn = {}          # chat -> ts，画像抽取节流(避免每轮都调 LLM)

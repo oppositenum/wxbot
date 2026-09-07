@@ -11,6 +11,7 @@
 import os
 import re
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,6 +21,11 @@ from core import docker_wx  # noqa: E402
 VERIFY_WINDOW = 10.0       # 发后最多等这么多秒确认消息落库(宽一点，避免误判失败→重发变刷屏)
 POLL_STEP = 0.6
 _TITLE_TMP = "/tmp/wxbot_title.png"
+
+# 整条发送(打开→核对→发送→校验)的粗粒度锁：UI_LOCK 只锁单步操作，两条发送会在步骤间
+# 相互穿插(A 刚打开会话、B 又打开别的会话→A 发错人)。这把锁保证【一整条发送】原子，
+# 网页队列worker 与 机器人线程 的发送彼此串行，绝不交错。
+SEND_LOCK = threading.Lock()
 
 
 def _norm_name(s):
@@ -231,17 +237,18 @@ def send_text(display_name, text, chat_username=None, retries=2, verify=True):
     """
     docker_wx.request_priority()             # 抢占：harvest 会立刻让位
     try:
-        if not (verify and chat_username):
-            r = docker_wx.send_text(display_name, text)
-            r.setdefault("verified", False)
-            return r
-        return _guarded_send(
-            display_name, chat_username,
-            do_paste=lambda: docker_wx.paste_text(text),
-            verify_fn=lambda base: _verify_text(chat_username, text, base,
-                                                time.time() + VERIFY_WINDOW),
-            retries=retries,
-            predelivered=lambda base: _delivered_text(chat_username, text, base))
+        with SEND_LOCK:                      # 整条发送原子，绝不与另一条发送交错
+            if not (verify and chat_username):
+                r = docker_wx.send_text(display_name, text)
+                r.setdefault("verified", False)
+                return r
+            return _guarded_send(
+                display_name, chat_username,
+                do_paste=lambda: docker_wx.paste_text(text),
+                verify_fn=lambda base: _verify_text(chat_username, text, base,
+                                                    time.time() + VERIFY_WINDOW),
+                retries=retries,
+                predelivered=lambda base: _delivered_text(chat_username, text, base))
     finally:
         docker_wx.release_priority()
 
@@ -252,15 +259,16 @@ def send_image(display_name, host_path, chat_username=None, retries=1, verify=Tr
         return {"ok": False, "error": f"图片不存在: {host_path}", "verified": False}
     docker_wx.request_priority()
     try:
-        if not (verify and chat_username):
-            r = docker_wx.send_image(display_name, host_path)
-            r.setdefault("verified", False)
-            return r
-        return _guarded_send(
-            display_name, chat_username,
-            do_paste=lambda: docker_wx.paste_image_open(host_path),
-            verify_fn=lambda base: _verify_image(chat_username, base,
-                                                 time.time() + VERIFY_WINDOW),
-            retries=retries)
+        with SEND_LOCK:
+            if not (verify and chat_username):
+                r = docker_wx.send_image(display_name, host_path)
+                r.setdefault("verified", False)
+                return r
+            return _guarded_send(
+                display_name, chat_username,
+                do_paste=lambda: docker_wx.paste_image_open(host_path),
+                verify_fn=lambda base: _verify_image(chat_username, base,
+                                                     time.time() + VERIFY_WINDOW),
+                retries=retries)
     finally:
         docker_wx.release_priority()

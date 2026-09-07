@@ -651,30 +651,11 @@ def api_msgvideothumb():
     return send_file(io.BytesIO(data), mimetype=mime)
 
 
-# 发送任务状态(异步)：id -> {status:sending/done/error, ...}。发送含视觉核对+发后落库
-# 校验，耗时十几秒；同步等会让网页一直卡"发送中"。故后台执行、立即返回，前端轮询状态+靠
-# 消息轮询看到已发出的消息。
-_send_jobs = {}
-_send_seq = [0]
-
-
-def _run_send(job_id, kind, to, chat, content, path):
-    try:
-        if kind == "text":
-            res = sender.send_text(to, content, chat_username=chat)
-        else:
-            res = sender.send_image(to, path, chat_username=chat)
-    except Exception as e:  # noqa: BLE001
-        res = {"ok": False, "error": str(e)}
-    _send_jobs[job_id] = {"status": "done" if res.get("ok") else "error", **res}
-    # 只保留最近 50 条任务
-    if len(_send_jobs) > 50:
-        for k in sorted(_send_jobs)[:len(_send_jobs) - 50]:
-            _send_jobs.pop(k, None)
-
-
 @app.post("/api/send")
 def api_send():
+    """入发送队列(单 worker FIFO 串行)，立即返回 job；发送含视觉核对+发后落库校验耗时
+    十几秒，同步等会卡界面，故异步+队列。同步模式(body.sync)供脚本。"""
+    from core import sendq
     body = request.get_json(force=True, silent=True) or {}
     to = body.get("to")
     kind = body.get("type", "text")
@@ -689,7 +670,6 @@ def api_send():
         return jsonify({"ok": False, "error": f"图片不存在：{path}"}), 400
     if kind not in ("text", "image"):
         return jsonify({"ok": False, "error": "type 必须是 text/image"}), 400
-    # 同步模式(?sync 或 body.sync)：老接口/脚本用；默认异步
     if body.get("sync"):
         try:
             res = (sender.send_text(to, content, chat_username=chat) if kind == "text"
@@ -697,18 +677,14 @@ def api_send():
             return jsonify(res), (200 if res.get("ok") else 500)
         except Exception as e:  # noqa: BLE001
             return jsonify({"ok": False, "error": str(e)}), 500
-    _send_seq[0] += 1
-    job_id = str(_send_seq[0])
-    _send_jobs[job_id] = {"status": "sending"}
-    threading.Thread(target=_run_send,
-                     args=(job_id, kind, to, chat, content, path), daemon=True).start()
-    return jsonify({"ok": True, "queued": True, "job": job_id})
+    job_id, ahead = sendq.enqueue(kind, to, chat, content, path)
+    return jsonify({"ok": True, "queued": True, "job": job_id, "ahead": ahead})
 
 
 @app.get("/api/send/status")
 def api_send_status():
-    job = request.args.get("job", "")
-    return jsonify(_send_jobs.get(job, {"status": "unknown"}))
+    from core import sendq
+    return jsonify(sendq.status(request.args.get("job", "")))
 
 
 @app.post("/api/upload")

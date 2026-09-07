@@ -75,6 +75,7 @@ COPY static/ /app/static/
 # 容器内工具：取密钥 + 发送
 COPY docker/linux_keys.py /usr/local/bin/linux_keys.py
 COPY docker/wx_send.py /usr/local/bin/wx_send.py
+COPY docker/capture_imgkey.py /usr/local/bin/capture_imgkey.py
 COPY docker/start.sh /start.sh
 RUN chmod +x /start.sh /usr/local/bin/wx_send.py
 

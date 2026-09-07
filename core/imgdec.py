@@ -42,16 +42,19 @@ def _key_bytes(key):
 
 
 def decrypt_dat(data, key):
-    """V2 结构(实测): [6B magic][u32 aes_size][u32 xor_size] + AES段 + 明文段 + XOR段。
-    - AES段 = 前 aes_size 字节，AES-128-ECB(图片密钥)。含 JPEG 头。
-    - XOR段 = 末 xor_size 字节，每字节 ^ xor_key；xor_key 由末字节推(JPEG 尾 FFD9)。
+    """V2 结构(实测,经注入微信解密例程逆向确认):
+      [6B magic][u32 aes_size][u32 xor_size][1B]  ← 共 15 字节头
+      + AES段(从偏移 15 起, aes_size 字节, AES-128-ECB 全局图片密钥, 含 JPEG 头)
+      + 明文中段
+      + XOR段(末 xor_size 字节, 每字节 ^ xor_key; xor_key = 末字节 ^ 0xD9, 即 JPEG 尾 0xD9)
+    密钥为账号级 16 字节(实测是 ASCII 串), 由注入抓取一次后存 keys.json。
     """
     if data[:6] != SIG:
         return None
     aes_size = int.from_bytes(data[6:10], "little")
     xor_size = int.from_bytes(data[10:14], "little")
-    body = data[14:]
-    n = ((aes_size + 15) // 16) * 16
+    body = data[15:]                                    # AES 段从文件偏移 15 开始
+    n = (aes_size // 16) * 16
     k = _key_bytes(key)
     try:
         dec = AES.new(k, AES.MODE_ECB).decrypt(body[:n])
@@ -60,7 +63,7 @@ def decrypt_dat(data, key):
     out = bytearray(dec[:aes_size])
     out += body[aes_size:len(body) - xor_size]          # 明文中段
     if xor_size:
-        xk = data[-1] ^ 0xD9                            # 末字节 ^ 0xD9(=JPEG的0xD9)
+        xk = data[-1] ^ 0xD9
         out += bytes(b ^ xk for b in body[len(body) - xor_size:])
     return bytes(out)
 
@@ -104,20 +107,66 @@ def _dat_filename(md5):
     return None
 
 
-def _find_dat(md5):
-    base = os.path.join(account_dir(), "msg", "attach")
-    fn = _dat_filename(md5)
-    names = [fn] if fn else []
-    names += [md5 + ".dat", md5 + "_t.dat"]     # 兜底：直接用 md5 命名
-    for n in names:
-        hits = glob.glob(os.path.join(base, "**", "Img", n), recursive=True)
+def _resource_basehash(chat_username, local_id):
+    """从 message_resource.db 的 MessageResourceInfo 取该图的本地文件名 hash。
+    这是最全的映射(覆盖 1000+ 媒体消息)，远超 hardlink(仅百余条)。"""
+    try:
+        con = db.connect("msgres")
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        if not db.table_exists(con, "MessageResourceInfo"):
+            return None
+        cid = con.execute("SELECT rowid FROM ChatName2Id WHERE user_name=?",
+                          (chat_username,)).fetchone()
+        if not cid:
+            return None
+        r = con.execute(
+            "SELECT packed_info FROM MessageResourceInfo "
+            "WHERE chat_id=? AND message_local_id=? AND message_local_type=3",
+            (cid[0], local_id)).fetchone()
+        if not r or not r[0]:
+            return None
+        m = re.search(rb"[0-9a-f]{32}", bytes(r[0]))   # packed_info 里的文件名 hash
+        return m.group().decode() if m else None
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        con.close()
+
+
+def _find_dat_by_hash(h):
+    """按本地文件名 hash 找加密 .dat。优先大图 _b.dat，其次缩略图 _t.dat。"""
+    acc = account_dir()
+    if not acc or not h:
+        return None
+    for pat in (
+        "/cache/**/Bubble/" + h + "_b.dat",         # 大图(全分辨率)
+        "/cache/**/Bubble/" + h + ".dat",
+        "/msg/attach/**/Img/" + h + ".dat",         # 缩略图
+        "/msg/attach/**/Img/" + h + "_t.dat",
+    ):
+        hits = glob.glob(acc + pat, recursive=True)
         if hits:
             return hits[0]
     return None
 
 
+def _find_dat(md5):
+    """兜底：仅有 md5 时经 hardlink 映射找 .dat（覆盖少）。"""
+    fn = _dat_filename(md5)
+    if fn:
+        h = re.sub(r"_[tbh]$", "", re.sub(r"\.dat$", "", os.path.basename(fn), flags=re.I))
+        p = _find_dat_by_hash(h)
+        if p:
+            return p
+    return _find_dat_by_hash(md5)
+
+
 def images_available():
-    """微信是否已把明文图解密到 temp/ImageUtils(有就说明能显示收到的图)。"""
+    """能否显示收到的图：有账号级图片密钥即可(离线解密)，或微信已解密到 temp。"""
+    if img_key():
+        return True
     acc = account_dir()
     if not acc:                          # 未登录/无数据
         return False
@@ -168,28 +217,34 @@ def _temp_jpg(name):
 def get_msg_image(chat_username, local_id):
     """返回 (bytes, mime) 或 (None, reason)。
 
-    不再依赖图片密钥(取不到)——微信显示图片时会把明文解密到
-    temp/ImageUtils/<hash>.jpg，直接读它。按 消息md5→hardlink文件名→temp 定位。
+    主路径：用账号级图片密钥直接离线解密 .dat（AES-128-ECB 段 + XOR 段），
+    对任意收到的图都可用、实时、无需在微信里看过、无需注入。
+    兜底：微信已解密到 temp/ImageUtils 的明文图。
     """
+    # 主路径：离线解密 .dat（message_resource 映射覆盖最全，其次 hardlink/md5）
+    key = img_key()
+    if key:
+        path = _find_dat_by_hash(_resource_basehash(chat_username, local_id))
+        if not path:
+            md5 = _msg_img_md5(chat_username, local_id)
+            if md5:
+                path = _find_dat(md5)
+        if path:
+            img = decrypt_dat(open(path, "rb").read(), key)
+            if img and (img[:3] == b"\xff\xd8\xff" or img[:8] == b"\x89PNG\r\n\x1a\n"
+                        or img[:4] in (b"GIF8", b"RIFF")):
+                return img, _mime(img)
+    # 兜底：微信已解密的明文图
     md5 = _msg_img_md5(chat_username, local_id)
     if not md5:
         return None, "no-md5"
-    # 主路径：微信已解密的明文图
     for name in (_basehash(md5), md5):
         p = _temp_jpg(name)
         if p:
             data = open(p, "rb").read()
             if data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n":
                 return data, _mime(data)
-    # 兜底：有图片密钥时直接解 .dat（当前一般没有）
-    key = img_key()
-    if key:
-        path = _find_dat(md5)
-        if path:
-            img = decrypt_dat(open(path, "rb").read(), key)
-            if img:
-                return img, _mime(img)
-    return None, "not-decrypted(在微信窗口里滚动看过该图后即可显示)"
+    return None, ("no-img-key(点刷新密钥重新抓取)" if not key else "no-dat(该图未下载到本地)")
 
 
 if __name__ == "__main__":

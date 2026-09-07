@@ -61,11 +61,13 @@
   <span class="pill" id="syncState"></span>
   <button id="loginBtn">扫码登录(noVNC)</button>
   <button id="keyBtn">刷新密钥</button>
+  <button id="imgKeyBtn" title="切换微信账号后,注入抓取该账号的图片解密密钥">抓图片密钥</button>
   <button id="syncBtn">立即同步</button>
   <button id="botBtn">机器人：…</button>
   <button id="aiBtn">蒸馏/AI</button>
   <button id="watchBtn">监听设置</button>
   <button id="followBtn">跟发设置</button>
+  <label class="pill" style="cursor:pointer" title="打开有图/视频的会话时,自动驱动微信解密其媒体"><input type="checkbox" id="autoDecrypt" checked style="vertical-align:middle"> 自动解密媒体</label>
 </header>
 <main>
   <div class="side">
@@ -104,7 +106,7 @@
 
 <script>
 const $ = s => document.querySelector(s);
-let tab = "sessions", data = {sessions:[],contacts:[],groups:[],other:[]}, current = null;
+let tab = "sessions", data = {sessions:[],contacts:[],groups:[],other:[]}, current = null, lastMsgs = [];
 
 function toast(m){ const t=$("#toast"); t.textContent=m; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),2200); }
 function fmtTime(ts){ if(!ts) return ""; const d=new Date(ts*1000); return d.toLocaleString("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}); }
@@ -167,6 +169,7 @@ function render(){
 function escape_(s){ return (s||"").replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function showImg(u){ $("#lightboxImg").src=u; $("#lightbox").classList.add("show"); }
 
+const harvestedChats = new Set();   // 本会话已自动解密过的会话，避免重复驱动微信
 async function openChat(chat){
   current = chat;
   $("#chatTitle").textContent = chat.name || chat.username;
@@ -175,6 +178,19 @@ async function openChat(chat){
   $("#harvestBtn").style.display = "";
   render();
   await loadMessages();
+  maybeAutoDecrypt(chat.username);
+}
+
+async function maybeAutoDecrypt(username){
+  if(!$("#autoDecrypt").checked || harvestedChats.has(username)) return;
+  const hasMedia = (lastMsgs||[]).some(m=>m.type===3||m.type===43);
+  if(!hasMedia) return;
+  harvestedChats.add(username);
+  try{
+    const r=await (await fetch("/api/harvest",{method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify({chat:username,nav:20})})).json();
+    if(r.decrypted>0 && current && current.username===username){ toast(`自动解密 ${r.decrypted} 张`); await loadMessages(); }
+  }catch(e){}
 }
 
 $("#harvestBtn").onclick=async()=>{
@@ -198,6 +214,7 @@ async function loadMessages(){
   const r = await fetch("/api/messages?chat="+encodeURIComponent(current.username)+"&limit=60");
   if(!r.ok){ const e=await r.json(); box.innerHTML=`<div class="empty">${e.error||"加载失败"}</div>`; return; }
   const msgs = await r.json();
+  lastMsgs = msgs;
   const prevTop=box.scrollTop;
   box.innerHTML="";
   if(!msgs.length){ box.innerHTML=`<div class="empty">暂无消息</div>`; return; }
@@ -288,6 +305,7 @@ document.querySelectorAll(".tabs div").forEach(d=>d.onclick=()=>{
 $("#filter").oninput=render;
 $("#loginBtn").onclick=()=>{ window.open(NOVNC,"_blank"); toast("在打开的 noVNC 里用小号扫码"); };
 $("#keyBtn").onclick=async()=>{ toast("刷新密钥中…"); const r=await(await fetch("/api/keys/refresh",{method:"POST"})).json(); await loadStatus(); toast(r.ok?"密钥已刷新+解密":"刷新失败"); };
+$("#imgKeyBtn").onclick=async()=>{ if(!confirm("注入微信抓取本账号图片密钥(约20-30秒,会短暂驱动微信界面)。切换账号后需要重抓。继续?"))return; toast("抓取图片密钥中(勿动微信)…"); try{const r=await(await fetch("/api/keys/capture_img",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({force:true})})).json(); toast(r.ok?("图片密钥已抓取: "+r.key):("失败: "+r.key)); await loadStatus();}catch(e){toast("失败:"+e);} };
 $("#syncBtn").onclick=async()=>{ toast("同步中…"); await fetch("/api/sync",{method:"POST"}); await loadStatus(); if(current) loadMessages(); toast("同步完成"); };
 $("#sendBtn").onclick=()=>{ if(sending) return; const v=$("#msgInput").value.trim(); if(v) send("text",v); };
 $("#msgInput").onkeydown=e=>{ if(e.key==="Enter"){ e.preventDefault(); if(!sending) $("#sendBtn").click(); } };

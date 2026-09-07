@@ -1,4 +1,5 @@
 """与 Docker 容器里的 Linux 微信交互：状态 / 取密钥 / 发送 / 截图。"""
+import json
 import os
 import subprocess
 import sys
@@ -70,8 +71,81 @@ def logged_in():
     return container_wxid() is not None and wechat_running()
 
 
+def capture_img_key(log=lambda m: None, trigger=True):
+    """注入微信抓账号级图片 AES 密钥(存 keys.json 的 _img_key)。切号后可重跑。
+    需在抓取期间触发图片显示(冷缓存时打开会话即可)。返回 (ok, key_hex_or_msg)。"""
+    import json
+    import shutil
+    import time as _t
+    pid_cmd = "pgrep -x wechat | head -1"
+    r = _exec("bash", "-lc", pid_cmd)
+    pid = (r.stdout or "").strip()
+    if not pid:
+        return False, "微信未运行"
+    _exec("bash", "-lc", "pkill -9 gdb 2>/dev/null; rm -f /tmp/cap_ready /root/imgkey.txt")
+    # 后台起 gdb 捕获脚本
+    if LOCAL:
+        subprocess.Popen(["bash", "-lc",
+                          f"gdb -p {pid} -batch -x /usr/local/bin/capture_imgkey.py "
+                          f"> /tmp/capk.log 2>&1"])
+    else:
+        _docker("exec", "-d", CONTAINER, "bash", "-lc",
+                f"gdb -p {pid} -batch -x /usr/local/bin/capture_imgkey.py > /tmp/capk.log 2>&1")
+    for _ in range(20):                       # 等 gdb 就绪
+        if _exec("bash", "-lc", "[ -f /tmp/cap_ready ] && echo r").stdout.strip():
+            break
+        _t.sleep(1)
+    if trigger:                               # 触发图片 .dat 读取(滚动若干会话)
+        with UI_LOCK:
+            for y in (160, 232, 300, 370, 440):
+                _exec("bash", "-lc", f"DISPLAY=:0 xdotool mousemove 340 {y} click 1")
+                _t.sleep(0.7)
+                _exec("bash", "-lc", "DISPLAY=:0 xdotool mousemove 800 400; "
+                      "for j in 1 2 3 4; do DISPLAY=:0 xdotool click 4; sleep 0.15; done")
+    for _ in range(20):                       # 等抓取结果
+        out = _exec("bash", "-lc", "cat /root/imgkey.txt 2>/dev/null").stdout.strip()
+        if out:
+            keys_path = config.keys_json()
+            os.makedirs(os.path.dirname(keys_path), exist_ok=True)
+            d = {}
+            if os.path.exists(keys_path):
+                try:
+                    d = json.load(open(keys_path))
+                except Exception:  # noqa: BLE001
+                    d = {}
+            d["_img_key"] = out
+            json.dump(d, open(keys_path, "w"), ensure_ascii=False, indent=2)
+            log(f"图片密钥已抓取并保存: {out[:8]}…")
+            return True, out
+        _t.sleep(1)
+    _exec("bash", "-lc", "pkill -9 gdb 2>/dev/null")
+    tail = _exec("bash", "-lc", "tail -3 /tmp/capk.log").stdout
+    return False, "未抓到(可能图片已缓存未触发解密;切号后冷缓存更易抓)。日志:" + tail[-200:]
+
+
+def _preserve_img_key(dst):
+    """linux_keys.py 只产 DB 密钥、会整体覆盖 keys.json，而 _img_key 是账号级持久值
+    (微信重启不变)——刷新 DB 密钥后必须把它补回，否则收到的图片会全部解不开。"""
+    try:
+        return json.load(open(dst)).get("_img_key")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _restore_img_key(dst, img):
+    if not img:
+        return
+    try:
+        d = json.load(open(dst))
+        if not d.get("_img_key"):
+            d["_img_key"] = img
+            json.dump(d, open(dst, "w"), ensure_ascii=False, indent=2)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def refresh_keys():
-    """跑 linux_keys.py 提取密钥，写到本账号 keys.json。"""
+    """跑 linux_keys.py 提取密钥，写到本账号 keys.json。保留已存的 _img_key。"""
     wxid = container_wxid()
     if not wxid:
         return False, "未检测到已登录账号"
@@ -80,6 +154,7 @@ def refresh_keys():
     out_keys = config.keys_json() if LOCAL else "/root/keys.json"
     if LOCAL:
         os.makedirs(os.path.dirname(out_keys), exist_ok=True)
+    img = _preserve_img_key(config.keys_json())          # 刷新前记住图片密钥
     r = _exec("python3", "/usr/local/bin/linux_keys.py", dbs, out_keys, timeout=120)
     ok = "命中" in (r.stdout + r.stderr)
     if ok and not LOCAL:
@@ -89,6 +164,8 @@ def refresh_keys():
         if os.path.exists(src):
             os.makedirs(os.path.dirname(config.keys_json()), exist_ok=True)
             shutil.copy(src, config.keys_json())
+    if ok:
+        _restore_img_key(config.keys_json(), img)        # 刷新后补回图片密钥
     return ok, (r.stdout + r.stderr)[-500:]
 
 

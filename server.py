@@ -142,6 +142,27 @@ def api_keys_refresh():
     return jsonify({"ok": ok, "log": log})
 
 
+@app.post("/api/keys/capture_img")
+def api_capture_img_key():
+    """注入微信抓账号级图片AES密钥(切号后用)。抓取期间暂停机器人+驱动UI触发图片解密。"""
+    from core import imgdec
+    if imgdec.img_key() and not (request.get_json(force=True, silent=True) or {}).get("force"):
+        return jsonify({"ok": True, "key": "已有(加 force 可重抓)"})
+    was = _bot["running"]
+    _bot["running"] = False
+    time.sleep(0.6)
+    try:
+        ok, res = docker_wx.capture_img_key(log=lambda m: _bot["log"].append(m))
+    except Exception as e:  # noqa: BLE001
+        ok, res = False, str(e)
+    finally:
+        if was and not _bot["running"]:
+            _bot["running"] = True
+            _bot["thread"] = threading.Thread(target=_bot_loop, daemon=True)
+            _bot["thread"].start()
+    return jsonify({"ok": ok, "key": (res[:10] + "…") if ok else res})
+
+
 @app.get("/api/bot")
 def api_bot_status():
     try:
@@ -484,7 +505,8 @@ def api_harvest():
     time.sleep(0.6)
     logs = []
     try:
-        got = hv.harvest(name, log=lambda m: logs.append(str(m)))
+        nav = int(body.get("nav") or 60)
+        got = hv.harvest(name, nav=max(6, min(nav, 80)), log=lambda m: logs.append(str(m)))
     except Exception as e:  # noqa: BLE001
         got = 0
         logs.append(f"出错: {e}")

@@ -133,9 +133,20 @@ def api_status():
         try:
             with open(config.keys_json()) as f:
                 keys = json.load(f)
-            core_vals = set(config.CORE_DBS.values())
             core_keys = [k for k, v in config.CORE_DBS.items() if v in keys]
-            keys_ready = core_vals.issubset(set(keys.keys()))
+            # 只要求【磁盘上确实存在的】核心库都有密钥——media_0.db 等在没收到语音/视频前
+            # 根本不存在,不该因此报"缺密钥"。db_storage 拿不到时退回宽松判断(有message密钥即可)。
+            dbs = config.db_storage_dir()
+            if dbs:
+                required = {v for v in config.CORE_DBS.values()
+                            if os.path.exists(os.path.join(dbs, v))}
+            else:
+                required = set()
+            if required:
+                keys_ready = required.issubset(set(keys.keys()))
+            else:
+                keys_ready = config.CORE_DBS.get("message", "message/message_0.db") in keys \
+                    or "message/message_0.db" in keys
         except Exception:  # noqa: BLE001
             pass
     decrypted_ready = os.path.exists(config.decrypted_path("message"))
@@ -577,6 +588,10 @@ def _is_holder(u):
 @app.get("/api/sessions")
 def api_sessions():
     try:
+        decrypt.run(force=False, only=["session"])   # 保证未读数等是最新(变了才重解密)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         ss = messages.list_sessions()
     except FileNotFoundError as e:
         return jsonify({"error": str(e)}), 409
@@ -622,6 +637,10 @@ def api_messages():
     limit = int(request.args.get("limit", 50))
     before = request.args.get("before")
     before = int(before) if before else None
+    try:
+        decrypt.run(force=False, only=["message"])   # 新消息实时可见(变了才重解密)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         return jsonify(messages.get_messages(chat, limit=limit, before=before))
     except FileNotFoundError as e:

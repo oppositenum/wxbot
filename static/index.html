@@ -30,6 +30,8 @@
   .avatar { width:36px; height:36px; border-radius:6px; background:#dcdfe4; flex:none; object-fit:cover; }
   .row .name { font-weight:500; }
   .row .sub { color:var(--muted); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:200px; }
+  .badge { flex:none; min-width:18px; height:18px; padding:0 5px; border-radius:9px; background:#fa5151; color:#fff; font-size:11px; line-height:18px; text-align:center; box-sizing:border-box; }
+  .tabs .cnt { display:inline-block; min-width:15px; height:15px; padding:0 4px; margin-left:3px; border-radius:8px; background:#fa5151; color:#fff; font-size:10px; line-height:15px; vertical-align:middle; }
   .content { display:flex; flex-direction:column; overflow:hidden; }
   .chat-head { padding:11px 16px; border-bottom:1px solid var(--line); background:var(--panel); display:flex; justify-content:space-between; align-items:center; }
   .msgs { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
@@ -161,11 +163,31 @@ function render(){
     const src = x.head_url || avatarURL(u);
     const div = document.createElement("div");
     div.className="row"+(current&&current.username===u?" active":"");
+    const unread = x.unread || 0;
+    const badge = unread > 0 ? `<div class="badge">${unread>99?'99+':unread}</div>` : "";
     div.innerHTML = `<img class="avatar" src="${src}" onerror="this.onerror=null;this.src='${avatarURL(u)}'">
-      <div style="min-width:0"><div class="name">${escape_(name)}</div><div class="sub">${escape_(sub)}</div></div>`;
+      <div style="min-width:0;flex:1"><div class="name">${escape_(name)}</div><div class="sub">${escape_(sub)}</div></div>${badge}`;
     div.onclick = ()=> openChat({username:u, name, is_group:u.endsWith("@chatroom")});
     list.appendChild(div);
   }
+  updateTabBadges();
+}
+function updateTabBadges(){
+  const sum = arr => (arr||[]).reduce((a,x)=>a+(x.unread||0),0);
+  const set = (t,label,n)=>{ const el=document.querySelector('.tabs div[data-tab="'+t+'"]');
+    if(el) el.innerHTML = label + (n>0?'<span class="cnt">'+(n>99?'99+':n)+'</span>':''); };
+  set("sessions","会话",sum(data.sessions));
+  set("other","其他",sum(data.other));
+}
+async function refreshSessions(){   // 定时刷未读数(即使当前不在会话tab也更新角标)
+  try{
+    const all = await (await fetch("/api/sessions")).json();
+    if(!Array.isArray(all)) return;
+    data.sessions = all.filter(x=>x.category!=="other");
+    data.other    = all.filter(x=>x.category==="other");
+    updateTabBadges();
+    if(tab==="sessions"||tab==="other") render();
+  }catch(e){}
 }
 function escape_(s){ return (s||"").replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function showImg(u){ $("#lightboxImg").src=u; $("#lightbox").classList.add("show"); }
@@ -620,9 +642,9 @@ $("#botBtn").onclick=async()=>{
 $("#fullresCap").onchange=async()=>{ await fetch("/api/bot/fullres",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:$("#fullresCap").checked})}); toast($("#fullresCap").checked?"已开启:微信会跟随你看的会话保持打开,新图自动下清晰版":"已关闭"); if($("#fullresCap").checked&&current){ fetch("/api/focus",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat:current.username,name:current.name||current.username})}).catch(()=>{}); } };
 loadStatus(); loadTab("sessions"); loadBot();
 setInterval(loadStatus, 8000); setInterval(loadBot, 8000);
-// 自动刷新：当前会话消息 2.5s（贴近实时，配合后台撤回快照）、会话列表 12s
+// 自动刷新(无需手动刷新页面)：当前会话消息 2.5s；会话列表+未读角标 5s(始终刷,任意tab都更新角标)
 setInterval(()=>{ if(current && !sending) loadMessages(); }, 2500);
-setInterval(()=>{ if(tab==="sessions"||tab==="other") loadTab(tab); }, 12000);
+setInterval(refreshSessions, 5000);
 </script>
 </body>
 </html>

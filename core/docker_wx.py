@@ -179,6 +179,66 @@ def send_text(name, text):
     return {"ok": False, "error": out or "send failed"}
 
 
+def open_chat(name):
+    """只打开会话、不发送(供发送前截图核对标题)。"""
+    with UI_LOCK:
+        r = _exec("python3", "/usr/local/bin/wx_send.py", "justopen", name, timeout=30)
+    return "OK" in r.stdout
+
+
+def search_query(name):
+    """在侧栏搜索框输入查询、弹出结果下拉(不回车)。"""
+    with UI_LOCK:
+        r = _exec("python3", "/usr/local/bin/wx_send.py", "searchquery", name, timeout=30)
+    return "OK" in r.stdout
+
+
+def click(cx, cy):
+    """点击绝对屏幕坐标。"""
+    with UI_LOCK:
+        r = _exec("python3", "/usr/local/bin/wx_send.py", "clickxy",
+                  str(int(cx)), str(int(cy)), timeout=20)
+    return "OK" in r.stdout
+
+
+def paste_text(text):
+    """向【当前已打开】的会话发文本(不重新搜索)。需在 open_chat 之后调用。"""
+    with UI_LOCK:
+        r = _exec("python3", "/usr/local/bin/wx_send.py", "pastetext", text, timeout=30)
+    if "OK" in r.stdout:
+        return {"ok": True}
+    return {"ok": False, "error": (r.stdout + r.stderr).strip() or "paste failed"}
+
+
+def title_shot(host_out):
+    """截当前微信窗口(含会话标题)到 host_out，返回是否成功。"""
+    cpath = host_out if LOCAL else "/tmp/_titleshot.png"
+    with UI_LOCK:
+        _exec("python3", "/usr/local/bin/wx_send.py", "titleshot", cpath, timeout=20)
+    if not LOCAL:
+        _docker("cp", f"{CONTAINER}:{cpath}", host_out)
+    return os.path.exists(host_out)
+
+
+def paste_image_open(host_path):
+    """向【当前已打开】的会话发图片(不重新搜索)。"""
+    if not os.path.exists(host_path):
+        return {"ok": False, "error": f"图片不存在: {host_path}"}
+    if LOCAL:
+        cpath = host_path
+    else:
+        base = os.path.basename(host_path)
+        cpath = f"/tmp/wxsend_{int(os.path.getmtime(host_path))}_{base}"
+        cp = _docker("cp", host_path, f"{CONTAINER}:{cpath}")
+        if cp.returncode != 0:
+            return {"ok": False, "error": "docker cp 失败: " + cp.stderr}
+    with UI_LOCK:
+        r = _exec("python3", "/usr/local/bin/wx_send.py", "pasteimage", cpath, timeout=60)
+    if "OK" in r.stdout:
+        return {"ok": True}
+    return {"ok": False, "error": (r.stdout + r.stderr).strip() or "paste failed"}
+
+
 def send_image(name, host_path):
     if not os.path.exists(host_path):
         return {"ok": False, "error": f"图片不存在: {host_path}"}

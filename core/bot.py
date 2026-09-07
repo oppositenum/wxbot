@@ -17,7 +17,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config  # noqa: E402
 from core import decrypt, messages, contacts, docker_wx, distill, llm  # noqa: E402
-from core import imgdec, media  # noqa: E402
+from core import imgdec, media, sender  # noqa: E402
 
 _DEFAULT_RULES = {
     "poll_interval": 5, "include_self": False, "watch": [],
@@ -220,7 +220,7 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None):
     if kind == "reply":
         target = send_name_for(chat_username)
         text = render(act.get("text", ""), msg["content"], msg.get("sender"), groups)
-        r = docker_wx.send_text(target, text)
+        r = sender.send_text(target, text, chat_username=chat_username)
         log(f"  回复[{rule['name']}] -> {target}: {text!r} => {r}")
     elif kind == "forward":
         target = act.get("to")
@@ -239,7 +239,7 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None):
             log(f"  reply_ai LLM 出错：{e}")
             return
         target = send_name_for(chat_username)
-        r = docker_wx.send_text(target, text)
+        r = sender.send_text(target, text, chat_username=chat_username)
         log(f"  AI回复[{persona['name']}] -> {target}: {text!r} => {r}")
 
 
@@ -329,7 +329,7 @@ def run_follow(rules, state, log=print):
         content, _start, count = r
         target = send_name_for(chat)
         try:
-            res = docker_wx.send_text(target, content)
+            res = sender.send_text(target, content, chat_username=chat)
         except Exception as e:  # noqa: BLE001
             log(f"[跟发] 发送失败 {chat}: {e}")
             continue
@@ -351,6 +351,13 @@ def run_once(rules, state, log=print):
         if last is None:                     # 首次：只记录当前位置，不回放历史
             state[chat] = maxid
             continue
+        # 缺口恢复：两次轮询间若涌入 >窗口 条消息，最老的会滚出 40 条窗口被漏。
+        # 只要窗口最小 local_id 仍 > last(没接上上次位置)，就加大窗口重取，直到接上。
+        limit = 40
+        while last is not None and msgs and min(m["local_id"] for m in msgs) > last \
+                and limit < 400:
+            limit *= 3
+            msgs = messages.get_messages(chat, limit=limit) or msgs
         is_group = chat.endswith("@chatroom")
         fresh = [m for m in msgs if m["local_id"] > last]
         for m in sorted(fresh, key=lambda x: x["local_id"]):

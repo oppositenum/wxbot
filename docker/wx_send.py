@@ -58,21 +58,32 @@ def open_chat(wid, name):
     x("xdotool", "windowactivate", "--sync", wid)
     time.sleep(0.5)
     px, py, w, h = win_geom(wid)
-    # 用 Ctrl+F 聚焦搜索框(比点坐标可靠)，兜底再点一次搜索框
-    key("ctrl+f")
-    time.sleep(0.3)
+    # 直接点侧栏搜索框(顶部，会话列表上方)——不用 Ctrl+F(有些版本是"聊天内搜索")
     x("xdotool", "mousemove", str(px + 131), str(py + 43), "click", "1")
-    time.sleep(0.3)
+    time.sleep(0.35)
     key("ctrl+a")
     time.sleep(0.1)
-    key("Delete")
-    time.sleep(0.1)
+    key("Delete")            # 清掉搜索框残留
+    time.sleep(0.15)
     set_clip_text(name)
     key("ctrl+v")
-    time.sleep(1.3)          # 等搜索结果
-    key("Return")            # 打开首个匹配
+    time.sleep(1.5)          # 等搜索结果浮出
+    key("Down")              # 高亮第一个结果(比裸 Return 更稳)
+    time.sleep(0.3)
+    key("Return")            # 打开选中的匹配
     time.sleep(1.0)
     return px, py, w, h
+
+
+def title_shot(out_path):
+    """截会话标题区(会话名在顶栏左侧)。返回 (px,py,w,h) 供裁剪，图落 out_path。"""
+    wid = win_id()
+    if not wid:
+        return None
+    x("xdotool", "windowactivate", "--sync", wid)
+    time.sleep(0.2)
+    x("scrot", "-o", out_path)
+    return win_geom(wid)
 
 
 def focus_input(px, py, w, h):
@@ -91,6 +102,69 @@ def send_text(name, text):
     time.sleep(0.2)
     key("ctrl+v")
     time.sleep(0.5)
+    key("Return")
+    print("OK")
+
+
+def just_open(name):
+    """只打开会话、不发送(供 host 端截图核对标题后再发)。"""
+    wid = win_id()
+    if not wid:
+        print("ERR:no-window"); sys.exit(2)
+    open_chat(wid, name)
+    print("OK")
+
+
+def search_query(name):
+    """只在侧栏搜索框输入查询、弹出结果下拉，【不回车】——供 host 端视觉定位结果行后点击。"""
+    wid = win_id()
+    if not wid:
+        print("ERR:no-window"); sys.exit(2)
+    x("xdotool", "windowactivate", "--sync", wid)
+    time.sleep(0.4)
+    px, py, _w, _h = win_geom(wid)
+    x("xdotool", "mousemove", str(px + 131), str(py + 43), "click", "1")
+    time.sleep(0.35)
+    key("ctrl+a"); time.sleep(0.1); key("Delete"); time.sleep(0.15)
+    set_clip_text(name)          # 剪贴板粘贴，避免 xdotool type 丢首字符
+    key("ctrl+v")
+    time.sleep(1.6)              # 等结果下拉渲染
+    print("OK")
+
+
+def click_xy(cx, cy):
+    x("xdotool", "mousemove", str(cx), str(cy), "click", "1")
+    time.sleep(1.0)
+    print("OK")
+
+
+def paste_text(text):
+    """向【当前已打开】的会话发文本(不重新搜索/打开)。"""
+    wid = win_id()
+    if not wid:
+        print("ERR:no-window"); sys.exit(2)
+    px, py, w, h = win_geom(wid)
+    focus_input(px, py, w, h)
+    set_clip_text(text)
+    time.sleep(0.2)
+    key("ctrl+v")
+    time.sleep(0.5)
+    key("Return")
+    print("OK")
+
+
+def paste_image(path):
+    """向【当前已打开】的会话发图片(不重新搜索/打开)。"""
+    wid = win_id()
+    if not wid:
+        print("ERR:no-window"); sys.exit(2)
+    px, py, w, h = win_geom(wid)
+    x("xdotool", "mousemove", str(px + 397), str(py + h - 131), "click", "1")
+    time.sleep(1.5)
+    key("ctrl+a"); time.sleep(0.2); key("Delete"); time.sleep(0.2)
+    x("xdotool", "type", "--clearmodifiers", "--delay", "25", path)
+    time.sleep(0.4)
+    key("Return"); time.sleep(1.5)
     key("Return")
     print("OK")
 
@@ -137,6 +211,18 @@ if __name__ == "__main__":
     kind = sys.argv[1] if len(sys.argv) > 1 else ""
     if kind == "open":
         open_and_scroll(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 6)
+    elif kind == "justopen":          # 只打开会话，不发送
+        just_open(sys.argv[2])
+    elif kind == "searchquery":       # 只输入搜索、弹结果，不回车(供视觉定位)
+        search_query(sys.argv[2])
+    elif kind == "clickxy":           # 点击绝对坐标 x y
+        click_xy(int(sys.argv[2]), int(sys.argv[3]))
+    elif kind == "titleshot":         # 截当前窗口(含会话标题)到指定路径
+        title_shot(sys.argv[2]); print("OK")
+    elif kind == "pastetext":         # 向当前已打开会话发文本
+        paste_text(sys.argv[2])
+    elif kind == "pasteimage":        # 向当前已打开会话发图片
+        paste_image(sys.argv[2])
     elif len(sys.argv) < 4:
         print(__doc__); sys.exit(1)
     elif kind == "text":
@@ -144,4 +230,5 @@ if __name__ == "__main__":
     elif kind == "image":
         send_image(sys.argv[2], sys.argv[3])
     else:
-        print("kind must be text|image|open"); sys.exit(1)
+        print("kind must be text|image|open|justopen|pastetext|pasteimage|titleshot")
+        sys.exit(1)

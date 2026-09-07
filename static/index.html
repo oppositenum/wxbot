@@ -282,7 +282,7 @@ function setSending(v){
 async function send(kind, payload, localUrl){
   if(!current || sending) return;
   setSending(true);
-  const body={to: current.name || current.username, type:kind};
+  const body={to: current.name || current.username, chat: current.username, type:kind};
   if(kind==="text") body.content=payload; else body.path=payload;
   try{
     const r=await fetch("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});

@@ -12,7 +12,7 @@ from flask import Flask, jsonify, request, send_file, send_from_directory, Respo
 import io
 
 import config
-from core import decrypt, contacts, messages, avatars, docker_wx
+from core import decrypt, contacts, messages, avatars, docker_wx, sender
 from core import bot as botmod
 
 app = Flask(__name__, static_folder=None)
@@ -562,6 +562,7 @@ def api_send():
     body = request.get_json(force=True, silent=True) or {}
     to = body.get("to")
     kind = body.get("type", "text")
+    chat = body.get("chat")            # 会话 wxid：传了就做发后校验(确认落到正确会话)
     if not to:
         return jsonify({"ok": False, "error": "缺少 to（会话显示名）"}), 400
     try:
@@ -569,12 +570,12 @@ def api_send():
             content = body.get("content", "")
             if not content:
                 return jsonify({"ok": False, "error": "content 为空"}), 400
-            res = docker_wx.send_text(to, content)
+            res = sender.send_text(to, content, chat_username=chat)
         elif kind == "image":
             path = body.get("path", "")
             if not path or not os.path.exists(path):
                 return jsonify({"ok": False, "error": f"图片不存在：{path}"}), 400
-            res = docker_wx.send_image(to, path)
+            res = sender.send_image(to, path, chat_username=chat)
         else:
             return jsonify({"ok": False, "error": "type 必须是 text/image"}), 400
         code = 200 if res.get("ok") else 500

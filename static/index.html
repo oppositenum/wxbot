@@ -254,6 +254,16 @@ async function loadMessages(){
       inner+=`<div style="border-left:3px solid var(--brand);background:#f7f8fa;border-radius:6px;padding:7px 9px">${h}</div>`;
       text=null;
     }
+    if(m.revoke_image && imgReady){   // 撤回的图片：本地 .dat 多半还在，仍能解出来显示
+      inner+=`<div style="color:var(--muted);font-size:12px;margin-bottom:3px">${escape_(text||"撤回了一张图片")}</div>`;
+      inner+=`<img src="/api/msgimage?chat=${encodeURIComponent(current.username)}&id=${m.revoke_local_id||m.local_id}" style="max-width:200px;border-radius:6px;display:block;cursor:zoom-in;opacity:.85" onclick="showImg(this.src)" onerror="this.replaceWith(Object.assign(document.createElement('div'),{textContent:'[撤回的图片已不在本地]'}))">`;
+      text=null;
+    }
+    else if(m.revoke_video && imgReady){   // 撤回的视频：至少还能显示封面
+      inner+=`<div style="color:var(--muted);font-size:12px;margin-bottom:3px">${escape_(text||"撤回了一个视频")}</div>`;
+      inner+=`<img src="/api/msgvideothumb?chat=${encodeURIComponent(current.username)}&id=${m.revoke_local_id||m.local_id}" style="max-width:200px;border-radius:6px;display:block;opacity:.85" onerror="this.replaceWith(Object.assign(document.createElement('div'),{textContent:'[撤回的视频已不在本地]'}))">`;
+      text=null;
+    }
     if(text!==null) inner+=`<div style="white-space:pre-wrap">${escape_(text)}</div>`;
     if(m.refer) inner+=`<div class="refer">${escape_(m.refer.displayname||"")}: ${escape_(m.refer.content||"")}</div>`;
     inner+=`<div class="time">${fmtTime(m.create_time)}</div>`;

@@ -163,6 +163,61 @@ def _find_dat(md5):
     return _find_dat_by_hash(md5)
 
 
+def is_image_msg(chat_username, local_id):
+    """该消息在本地是否仍有可解密的图片 .dat 或已缓存(用于撤回图片的探测：能显示才认)。"""
+    try:
+        if os.path.exists(_revoke_cache_path(chat_username, local_id)):
+            return True
+        h = _resource_basehash(chat_username, local_id)
+        return bool(h and _find_dat_by_hash(h))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _revoke_cache_path(chat_username, local_id):
+    acc = account_dir() or "/tmp"
+    d = os.path.join(acc, "revokecache")
+    key = hashlib.md5(chat_username.encode()).hexdigest()[:12]
+    return os.path.join(d, f"{key}_{local_id}.jpg")
+
+
+def _decrypt_from_dat(chat_username, local_id):
+    """走主路径(资源映射→.dat→解密)返回明文图 bytes，仅用于缓存(不含 temp 兜底)。"""
+    key = img_key()
+    if not key:
+        return None
+    path = _find_dat_by_hash(_resource_basehash(chat_username, local_id))
+    if not path:
+        md5 = _msg_img_md5(chat_username, local_id)
+        if md5:
+            path = _find_dat(md5)
+    if not path:
+        return None
+    img = decrypt_dat(open(path, "rb").read(), key)
+    if img and (img[:3] == b"\xff\xd8\xff" or img[:8] == b"\x89PNG\r\n\x1a\n"
+                or img[:4] in (b"GIF8", b"RIFF")):
+        return img
+    return None
+
+
+def cache_image(chat_username, local_id):
+    """收到图片时先解密缓存一份到 revokecache/，这样即便之后被撤回、微信删了本地 .dat，
+    仍能显示。已缓存则跳过(便宜的文件判断)。返回是否已就绪。"""
+    p = _revoke_cache_path(chat_username, local_id)
+    if os.path.exists(p):
+        return True
+    img = _decrypt_from_dat(chat_username, local_id)
+    if not img:
+        return False
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write(img)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def images_available():
     """能否显示收到的图：有账号级图片密钥即可(离线解密)，或微信已解密到 temp。"""
     if img_key():
@@ -234,7 +289,13 @@ def get_msg_image(chat_username, local_id):
             if img and (img[:3] == b"\xff\xd8\xff" or img[:8] == b"\x89PNG\r\n\x1a\n"
                         or img[:4] in (b"GIF8", b"RIFF")):
                 return img, _mime(img)
-    # 兜底：微信已解密的明文图
+    # 兜底1：撤回前预缓存的明文图(微信可能已删本地 .dat)
+    cp = _revoke_cache_path(chat_username, local_id)
+    if os.path.exists(cp):
+        data = open(cp, "rb").read()
+        if data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n":
+            return data, _mime(data)
+    # 兜底2：微信已解密的明文图
     md5 = _msg_img_md5(chat_username, local_id)
     if not md5:
         return None, "no-md5"

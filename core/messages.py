@@ -77,22 +77,61 @@ def _resolve_revokes(chat, out):
         if not sid:
             continue
         if m.get("revoke"):
-            orig = revoked.get(sid)
-            if not orig:
-                prev = snap.get(sid)          # 同一行撤回前的快照里留着原文
-                if prev and prev.get("content"):
-                    orig = prev["content"]
-                    revoked[sid] = orig
+            rec = revoked.get(sid)
+            if rec is None:
+                prev = snap.get(sid)          # 同一行撤回前的快照(含类型/local_id)
+                if prev and (prev.get("content") or prev.get("type") in (3, 43, 34)):
+                    rec = {"content": prev.get("content"), "type": prev.get("type"),
+                           "local_id": prev.get("local_id")}
+                    revoked[sid] = rec
                     changed = True
-            if orig:
-                m["content"] = m["content"] + "：" + orig
-                m["revoke_original"] = orig
-        else:                                  # 真实消息：记进快照，供之后被撤回时取原文
+                else:
+                    # 无快照(可能是我们没见过原消息的历史撤回)：探测本地是否还留着该图 .dat，
+                    # 留着就说明撤回的是图片、且仍能解密显示。查过就缓存(含"不是图")避免重复探测。
+                    lid = m.get("local_id")
+                    is_img = False
+                    if lid:
+                        try:
+                            from core import imgdec
+                            is_img = imgdec.is_image_msg(chat, lid)
+                        except Exception:  # noqa: BLE001
+                            is_img = False
+                    rec = {"content": None, "type": 3 if is_img else 0, "local_id": lid}
+                    revoked[sid] = rec
+                    changed = True
+            if rec is not None:
+                # 兼容旧缓存(存的是纯文本字符串)
+                if not isinstance(rec, dict):
+                    rec = {"content": rec, "type": 1}
+                t = rec.get("type")
+                lid = rec.get("local_id") or m.get("local_id")
+                if t == 3:                    # 撤回的是图片：本地 .dat 多半还在，仍可解密显示
+                    m["revoke_image"] = True
+                    m["revoke_local_id"] = lid
+                    m["revoke_original"] = "[图片]"
+                elif t == 43:                 # 撤回的是视频
+                    m["revoke_video"] = True
+                    m["revoke_local_id"] = lid
+                    m["revoke_original"] = "[视频]"
+                elif rec.get("content"):      # 撤回的是文字
+                    m["content"] = m["content"] + "：" + rec["content"]
+                    m["revoke_original"] = rec["content"]
+        else:                                  # 真实消息：记进快照，供之后被撤回时取原文/媒体
             con = m.get("content")
-            if con and not str(con).startswith("["):
-                snap[sid] = {"content": con, "sender_name": m.get("sender_name"),
+            t = m.get("type")
+            if (con and not str(con).startswith("[")) or t in (3, 43, 34):
+                snap[sid] = {"content": con, "type": t, "local_id": m.get("local_id"),
+                             "sender_name": m.get("sender_name"),
                              "time": m.get("create_time") or 0}
                 changed = True
+                # 图片且够新(撤回窗口~2分钟,只缓存近期的)：先解密缓存一份，防撤回后微信删本地图
+                if (t == 3 and m.get("local_id")
+                        and (m.get("create_time") or 0) > time.time() - 300):
+                    try:
+                        from core import imgdec
+                        imgdec.cache_image(chat, m["local_id"])
+                    except Exception:  # noqa: BLE001
+                        pass
 
     if len(snap) > _CACHE_MAX:
         for sid in sorted(snap, key=lambda s: snap[s]["time"])[:len(snap) - _CACHE_MAX]:

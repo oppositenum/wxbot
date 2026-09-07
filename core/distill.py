@@ -26,6 +26,146 @@ ANALYZER_SYSTEM = """你是聊天风格分析师。下面是某人在一个微�
 输出要求：直接写“你是<名字>，你说话……”这样的第二人称人设,150-300字,不要分析套话,要具体到能被模仿。"""
 
 
+# 升级版：双线(性格/风格 + 能力/知识)结构化多层人设
+STRUCT_SYSTEM = """你是人物画像分析师。下面是某人的大量微信历史发言。请做【双线分析】并输出结构化人设：
+一、性格/风格线；二、能力/知识线。严格输出 JSON（不要多余文字、不要markdown代码块）：
+{
+  "identity": "身份定位：TA是个怎样的人、在群里/关系里的角色(一两句)",
+  "values": "价值观/在意什么/表达出的立场与态度倾向",
+  "style": "说话风格：句长、标点、emoji、口头禅、中英混用、语气、连发还是一次说完(要具体可模仿)",
+  "knowledge": "能力/知识领域：擅长什么、常聊的专业话题、认知水平",
+  "quirks": "癖好/独特习惯：独特用词、梗、固定回应模式、边界(什么不会说)",
+  "catchphrases": ["高频口头禅/固定表达，最多8个"]
+}
+每个字段要具体、来自证据、能指导模仿；没有素材的字段给空串或空数组。"""
+
+
+def _analyze_structured(name, stats, corpus, corrections=None):
+    """双线结构化分析，返回 layers dict。失败时退回把单段人设塞进 style。"""
+    extra = ""
+    if corrections:
+        extra = "\n\n【用户已给的纠正，务必遵守】\n" + "\n".join("- " + c for c in corrections)
+    cfg = dict(llm.load_cfg())
+    cfg["max_tokens"] = max(1800, cfg.get("max_tokens", 0))   # 结构化JSON较长，别被截断
+    user = (f"名字：{name}\n统计：{json.dumps(stats, ensure_ascii=False)}\n"
+            f"历史发言（每行一条）：\n{corpus}{extra}")
+    for _ in range(2):                    # 模型偶尔不吐纯 JSON，重试一次
+        try:
+            raw = llm.chat(STRUCT_SYSTEM, [{"role": "user", "content": user}], cfg)
+            raw = raw.replace("```json", "").replace("```", "")
+            raw = raw[raw.find("{"): raw.rfind("}") + 1]
+            d = json.loads(raw)
+            return {k: d.get(k, "" if k != "catchphrases" else [])
+                    for k in ("identity", "values", "style", "knowledge",
+                              "quirks", "catchphrases")}
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def _render_persona(name, layers, corrections=None):
+    """把结构化多层渲染成第二人称、可直接当 system prompt 的人设文本。"""
+    L = layers or {}
+    parts = [f"你是{name}。请始终以第一人称、用下述人设的口吻聊天。"]
+    if L.get("identity"):
+        parts.append(f"【身份】{L['identity']}")
+    if L.get("values"):
+        parts.append(f"【价值观】{L['values']}")
+    if L.get("style"):
+        parts.append(f"【说话风格】{L['style']}")
+    if L.get("catchphrases"):
+        parts.append("【口头禅】" + "、".join(L["catchphrases"][:8]))
+    if L.get("knowledge"):
+        parts.append(f"【擅长/常聊】{L['knowledge']}")
+    if L.get("quirks"):
+        parts.append(f"【癖好/边界】{L['quirks']}")
+    if corrections:
+        parts.append("【特别注意(用户纠正)】" + "；".join(corrections))
+    return "\n".join(parts)
+
+
+def _sample_pool(texts, n=150):
+    """从语料里挑代表性样例池(供检索式 few-shot)：去重、去噪、时间均匀采样。"""
+    seen, cleaned = set(), []
+    for t in texts:
+        t = (t or "").strip()
+        if len(t) < 2 or t in seen:      # 去重、丢过短
+            continue
+        seen.add(t)
+        cleaned.append(t)
+    if len(cleaned) <= n:
+        return cleaned
+    step = len(cleaned) / float(n)       # 时间均匀采样(texts 已按时间序)
+    return [cleaned[int(i * step)] for i in range(n)]
+
+
+def _build_persona(name, wxid, group, texts, stats, corrections=None):
+    """核心：双线结构化分析→多层人设+渲染文本+代表样例库。LLM 不可用则退回单段。"""
+    # 分析用样本：时间均匀采样，最多 ~320 条控制 token
+    if len(texts) > 320:
+        step = len(texts) / 320.0
+        asample = [texts[int(i * step)] for i in range(320)]
+    else:
+        asample = texts
+    corpus = "\n".join(asample)
+    layers = _analyze_structured(name, stats, corpus, corrections)
+    if layers:
+        persona = _render_persona(name, layers, corrections)
+    else:                                # 退回旧的单段人设
+        layers = {}
+        persona = llm.chat(ANALYZER_SYSTEM, [{"role": "user", "content":
+            f"名字：{name}\n统计：{json.dumps(stats, ensure_ascii=False)}\n"
+            f"历史发言（每行一条）：\n{corpus}"}])
+    return {"slug": re.sub(r"[^0-9a-zA-Z一-鿿]+", "-", name).strip("-") or (wxid or "persona"),
+            "name": name, "wxid": wxid, "group": group, "stats": stats,
+            "persona": persona, "layers": layers,
+            "samples": _sample_pool(texts, 150),
+            "corrections": corrections or []}
+
+
+def _save_persona(data):
+    os.makedirs(config.personas_dir(), exist_ok=True)
+    with open(os.path.join(config.personas_dir(), data["slug"] + ".json"),
+              "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def pick_samples(persona, query, k=10):
+    """检索式 few-shot：从样例库里挑与当前话题最像的历史原话(n-gram 重叠打分)。"""
+    from core import knowledge
+    samples = persona.get("samples") or []
+    if not samples:
+        return []
+    toks = knowledge._ngramize(query or "").split()
+    if not toks:
+        return samples[-k:]
+    scored = []
+    for s in samples:
+        sg = knowledge._ngramize(s)
+        hit = sum(sg.count(t) for t in toks)
+        if hit:
+            scored.append((hit, s))
+    scored.sort(key=lambda x: -x[0])
+    top = [s for _, s in scored[:k]]
+    return top or samples[-k:]           # 无匹配则退回最近若干条
+
+
+def correct(slug, feedback):
+    """纠正精修：把用户反馈并入 corrections 并重渲染人设文本(不必重跑蒸馏)。"""
+    p = load_persona(slug)
+    if not p:
+        return None
+    corr = p.get("corrections") or []
+    corr.append(feedback.strip())
+    p["corrections"] = corr
+    if p.get("layers"):
+        p["persona"] = _render_persona(p["name"], p["layers"], corr)
+    else:                                # 老人设无 layers：把纠正附加到文本尾
+        p["persona"] = (p.get("persona") or "") + "\n【特别注意(用户纠正)】" + "；".join(corr)
+    _save_persona(p)
+    return p
+
+
 def _person_msgs(group_username, wxid, limit=2000):
     """取某人在群里的发言文本 + 统计。"""
     table = "Msg_" + hashlib.md5(group_username.encode()).hexdigest()
@@ -144,31 +284,16 @@ def _self_msgs(limit=8000):
 
 
 def run_self(name=None):
-    """蒸馏"自己"：汇总所有会话里自己发的话，产出自己的说话风格人设。"""
+    """蒸馏"自己"：汇总所有会话里自己发的话，产出多层结构化人设。"""
     texts, stats = _self_msgs()
     if stats.get("count", 0) < 20:
         return None, f"你自己的发言太少({stats.get('count',0)}条),不足以蒸馏"
     me = config.wxid()
     name = name or "我"
-    # 均匀采样(跨全部会话，最多 ~400 条控制 token)
-    if len(texts) > 400:
-        step = len(texts) / 400.0
-        sample = [texts[int(i * step)] for i in range(400)]
-    else:
-        sample = texts
-    corpus = "\n".join(sample)
-    persona = llm.chat(
-        ANALYZER_SYSTEM,
-        [{"role": "user", "content":
-          f"名字：{name}(这是我本人在各个群聊/私聊里的历史发言)\n"
-          f"统计：{json.dumps(stats, ensure_ascii=False)}\n"
-          f"历史发言（每行一条）：\n{corpus}"}])
-    slug = re.sub(r"[^0-9a-zA-Z一-鿿]+", "-", name).strip("-") or "self"
-    os.makedirs(config.personas_dir(), exist_ok=True)
-    data = {"slug": slug, "name": name, "wxid": me, "group": "(自己·全部会话)",
-            "stats": stats, "persona": persona, "samples": sample[-40:]}
-    with open(os.path.join(config.personas_dir(), slug + ".json"), "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    data = _build_persona(name, me, "(自己·全部会话)", texts, stats)
+    if not data["slug"] or data["slug"] == me:
+        data["slug"] = "self"
+    _save_persona(data)
     return data, "ok"
 
 
@@ -204,19 +329,8 @@ def run(group_username, wxid, name=None):
         return None, f"该人发言太少({stats.get('count',0)}条),不足以蒸馏"
     members = {m["wxid"]: m for m in contacts.group_members(group_username)}
     name = name or (members.get(wxid) or {}).get("name") or wxid
-    # 取样本(均匀采样,最多 400 条,控制 token)
-    sample = texts[-400:] if len(texts) > 400 else texts
-    corpus = "\n".join(sample[-300:])
-    persona = llm.chat(ANALYZER_SYSTEM,
-                       [{"role": "user", "content":
-                         f"名字：{name}\n统计：{json.dumps(stats, ensure_ascii=False)}\n"
-                         f"历史发言（每行一条）：\n{corpus}"}])
-    slug = re.sub(r"[^0-9a-zA-Z一-鿿]+", "-", name).strip("-") or wxid
-    os.makedirs(config.personas_dir(), exist_ok=True)
-    data = {"slug": slug, "name": name, "wxid": wxid, "group": group_username,
-            "stats": stats, "persona": persona, "samples": sample[-40:]}
-    with open(os.path.join(config.personas_dir(), slug + ".json"), "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    data = _build_persona(name, wxid, group_username, texts, stats)
+    _save_persona(data)
     return data, "ok"
 
 

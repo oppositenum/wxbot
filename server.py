@@ -246,6 +246,18 @@ def api_persona_delete():
     return jsonify({"ok": distill.delete_persona(slug)})
 
 
+@app.post("/api/personas/<slug>/correct")
+def api_persona_correct(slug):
+    """纠正精修：把用户反馈并入人设并重渲染(不必重跑蒸馏)。"""
+    fb = (request.get_json(force=True, silent=True) or {}).get("feedback", "").strip()
+    if not fb:
+        return jsonify({"ok": False, "error": "缺少 feedback"}), 400
+    p = distill.correct(slug, fb)
+    if not p:
+        return jsonify({"ok": False, "error": "人设不存在"}), 404
+    return jsonify({"ok": True, "persona": p.get("persona")})
+
+
 @app.post("/api/bot/watch")
 def api_bot_watch():
     """设置机器人监听的会话列表(群+私聊)。"""

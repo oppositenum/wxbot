@@ -459,8 +459,15 @@ async function renderAI(){
   });
   if(llm.provider) $("#llmProv").value=llm.provider;
   document.querySelectorAll(".pView").forEach(b=>b.onclick=async()=>{
-    const d=await(await fetch("/api/personas/"+encodeURIComponent(b.dataset.s))).json();
-    $("#personaView").innerHTML=`<div style="background:#f7f8fa;border-radius:8px;padding:10px;font-size:13px;line-height:1.6"><b>${escape_(d.name)} 的说话风格</b><br>${escape_(d.persona||'').replace(/\\n/g,'<br>')}<br><br><span class="sub">统计：${d.stats?.count}条 · 平均${d.stats?.avg_len}字 · 高频词 ${(d.stats?.top_words||[]).slice(0,8).join('、')}</span></div>`;
+    const slug=b.dataset.s;
+    const d=await(await fetch("/api/personas/"+encodeURIComponent(slug))).json();
+    const corr=(d.corrections||[]).length?('<br><span class="sub">已纠正：'+(d.corrections||[]).map(escape_).join('；')+'</span>'):'';
+    $("#personaView").innerHTML=`<div style="background:#f7f8fa;border-radius:8px;padding:10px;font-size:13px;line-height:1.6"><b>${escape_(d.name)} 的人设</b><br>${escape_(d.persona||'').replace(/\\n/g,'<br>')}<br><br><span class="sub">统计：${d.stats?.count}条 · 平均${d.stats?.avg_len}字 · 样例库${(d.samples||[]).length}条 · 高频词 ${(d.stats?.top_words||[]).slice(0,8).join('、')}</span>${corr}<div style="margin-top:8px;display:flex;gap:6px"><input id="corrIn" placeholder="纠正，如：TA从不用感叹号" style="flex:1;padding:5px"><button id="corrBtn">纠正</button></div></div>`;
+    $("#corrBtn").onclick=async()=>{
+      const feedback=$("#corrIn").value.trim(); if(!feedback){ toast("填纠正内容"); return; }
+      const r=await(await fetch("/api/personas/"+encodeURIComponent(slug)+"/correct",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({feedback})})).json();
+      toast(r.ok?"已精修人设":"失败"); if(r.ok){ document.querySelector('.pView[data-s="'+slug+'"]').click(); }
+    };
   });
   document.querySelectorAll(".pUse").forEach(b=>b.onclick=async()=>{
     const r=await(await fetch("/api/bot/persona",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({slug:b.dataset.s})})).json();

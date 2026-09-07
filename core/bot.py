@@ -180,8 +180,6 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None):
               "\n\n【模仿要求】结合下面的对话上下文来回应,像真人聊天。"
               "只输出回复内容,1~2句、口语化、简短自然,贴合上面风格;"
               "不要解释、不要加引号、不要逐句复述对方的话、不要重复问候。")
-    if persona.get("samples"):
-        system += "\n\n【口吻样例】\n" + "\n".join(persona["samples"][-12:])
     # 注入对方长期画像(记得住人)
     prof = memory.profile_context(msg.get("sender")) if msg.get("sender") else ""
     if prof:
@@ -218,6 +216,13 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None):
         ask = f"\n\n{asker} 说：{said[-1]}\n请以你的风格回 1~2 句："
     else:
         ask = f"\n\n{asker} @了你。请结合上文、以你的风格接 1~2 句："
+
+    # 检索式 few-shot：按当前话题从样例库挑最像的历史原话，比固定取最近若干条更贴本人
+    if persona.get("samples"):
+        query = direct or (said[-1] if said else "") or (lines[-1] if lines else "")
+        few = distill.pick_samples(persona, query, k=10)
+        if few:
+            system += "\n\n【与当前话题最接近的本人历史原话(模仿口吻，别照抄)】\n" + "\n".join(few)
 
     acfg = agent.agent_config(rules)
     if acfg["enabled"]:

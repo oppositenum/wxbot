@@ -356,6 +356,7 @@ def run_follow(rules, state, log=print):
             log(f"[跟发] 发送失败 {chat}: {e}")
             continue
         done[chat] = key                # 发完立即标记，避免下轮重复
+        docker_wx.note_open(chat)       # 发送后微信停在此会话
         log(f"[跟发] {chat} {people}人接龙 -> {target}: {content!r} => {res}")
 
 

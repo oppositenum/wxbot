@@ -269,9 +269,30 @@ def api_bot_watch():
     return jsonify({"ok": True, "watch": rules["watch"]})
 
 
+@app.post("/api/focus")
+def api_focus():
+    """把网页正在看的会话在微信里也打开并保持——新图到达时微信会自动下清晰版(_b.dat)，
+    这样即使秒撤也已拿到清晰图。仅在"保持会话打开"开关开启时生效；后台执行不阻塞。"""
+    if not botmod.load_rules().get("fullres_capture"):
+        return jsonify({"ok": True, "skipped": "off"})
+    b = request.get_json(force=True, silent=True) or {}
+    chat = b.get("chat")
+    if not chat or docker_wx.current_open() == chat:
+        return jsonify({"ok": True, "skipped": "already"})
+    name = b.get("name") or (botmod.send_name_for(chat) if chat else None)
+
+    def _do():
+        try:
+            sender.focus_chat(name, chat)
+        except Exception:  # noqa: BLE001
+            pass
+    threading.Thread(target=_do, daemon=True).start()
+    return jsonify({"ok": True, "focusing": chat})
+
+
 @app.get("/api/bot/fullres")
 def api_fullres_get():
-    """读取"撤回图片抓全图"开关。"""
+    """读取"保持会话打开(抓清晰图)"开关。"""
     try:
         return jsonify({"enabled": bool(botmod.load_rules().get("fullres_capture"))})
     except Exception:  # noqa: BLE001

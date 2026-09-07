@@ -68,7 +68,7 @@
   <button id="watchBtn">监听设置</button>
   <button id="followBtn">跟发设置</button>
   <label class="pill" style="cursor:pointer" title="打开有图/视频的会话时,自动驱动微信解密其媒体"><input type="checkbox" id="autoDecrypt" checked style="vertical-align:middle"> 自动解密媒体</label>
-  <label class="pill" style="cursor:pointer" title="新图片到达时后台驱动微信打开它下载全高清图,这样即使被撤回也清晰(会让微信偶尔翻动)"><input type="checkbox" id="fullresCap" style="vertical-align:middle"> 撤回图抓全图</label>
+  <label class="pill" style="cursor:pointer" title="打开会话时让微信也停在该会话,新图到达微信会自动下清晰版,即使秒撤也已拿到清晰图(微信视图会跟着你看的会话走)"><input type="checkbox" id="fullresCap" style="vertical-align:middle"> 保持会话打开(撤回图清晰)</label>
 </header>
 <main>
   <div class="side">
@@ -180,6 +180,9 @@ async function openChat(chat){
   render();
   await loadMessages();
   maybeAutoDecrypt(chat.username);
+  // 保持会话打开：让微信也停在这个会话，新图到达时自动下清晰版(秒撤也来得及)
+  fetch("/api/focus",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({chat:chat.username, name:chat.name||chat.username})}).catch(()=>{});
 }
 
 async function maybeAutoDecrypt(username){
@@ -614,7 +617,7 @@ $("#botBtn").onclick=async()=>{
 
 // 撤回图抓全图开关：加载状态 + 切换持久化
 (async()=>{ try{ const r=await(await fetch("/api/bot/fullres")).json(); $("#fullresCap").checked=!!r.enabled; }catch(e){} })();
-$("#fullresCap").onchange=async()=>{ await fetch("/api/bot/fullres",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:$("#fullresCap").checked})}); toast($("#fullresCap").checked?"已开启:新图会后台抓全图(微信会偶尔翻动)":"已关闭抓全图"); };
+$("#fullresCap").onchange=async()=>{ await fetch("/api/bot/fullres",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:$("#fullresCap").checked})}); toast($("#fullresCap").checked?"已开启:微信会跟随你看的会话保持打开,新图自动下清晰版":"已关闭"); if($("#fullresCap").checked&&current){ fetch("/api/focus",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat:current.username,name:current.name||current.username})}).catch(()=>{}); } };
 loadStatus(); loadTab("sessions"); loadBot();
 setInterval(loadStatus, 8000); setInterval(loadBot, 8000);
 // 自动刷新：当前会话消息 2.5s（贴近实时，配合后台撤回快照）、会话列表 12s

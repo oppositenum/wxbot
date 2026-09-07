@@ -124,15 +124,13 @@ def _resolve_revokes(chat, out):
                              "sender_name": m.get("sender_name"),
                              "time": m.get("create_time") or 0}
                 changed = True
-                # 图片且够新(撤回窗口~2分钟,只处理近期的)：先解密缓存一份，防撤回后微信删本地图；
-                # 若只有缩略图，后台去抓全图升级缓存，让"撤回的图"也清晰(而非模糊缩略图)。
+                # 图片且够新(撤回窗口~2分钟)：先解密缓存一份，防撤回后微信删本地图。
+                # 清晰度靠"保持会话打开"(微信自动下清晰 _b.dat)，这里缓存已能取到最清晰版。
                 if (t == 3 and m.get("local_id")
                         and (m.get("create_time") or 0) > time.time() - 300):
                     try:
                         from core import imgdec
-                        ok, is_thumb = imgdec.cache_image(chat, m["local_id"])
-                        if is_thumb:
-                            imgdec.schedule_fullres(chat, m["local_id"])
+                        imgdec.cache_image(chat, m["local_id"])
                     except Exception:  # noqa: BLE001
                         pass
 

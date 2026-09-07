@@ -45,6 +45,23 @@ def priority_pending():
     return _send_pending > 0
 
 
+# 当前微信里打开着哪个会话(wxid)。用于"保持监控会话打开"→新图自动被微信下成清晰版
+# (对当前打开会话，微信收到图会自动下清晰 _b.dat，无需点开、秒撤也来得及)。
+_open_chat = {"chat": None}
+
+
+def note_open(chat_username):
+    _open_chat["chat"] = chat_username
+
+
+def clear_open():
+    _open_chat["chat"] = None
+
+
+def current_open():
+    return _open_chat["chat"]
+
+
 def _docker(*args, timeout=60):
     return subprocess.run(["docker", *args], capture_output=True, text=True,
                           timeout=timeout)

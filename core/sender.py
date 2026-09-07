@@ -119,9 +119,26 @@ def _vision_open(display_name, chat_username=None):
         if y > 120:
             docker_wx.click(LIST_X, y)
             time.sleep(1.2)
+            if chat_username:
+                docker_wx.note_open(chat_username)     # 记住当前打开的会话
             return True
         time.sleep(0.4)
     return False
+
+
+_focus_lock = threading.Lock()
+
+
+def focus_chat(display_name, chat_username):
+    """保持"监控会话"在微信里打开：图一到微信就自动下清晰版(_b.dat)，秒撤也来得及。
+    若已经开在该会话就跳过(微信会一直停在这直到发送/翻图切走)。"""
+    if not chat_username:
+        return False
+    with _focus_lock:
+        if docker_wx.current_open() == chat_username:
+            return True                               # 已开在这，无需再动
+        ok = _vision_open(display_name, chat_username)
+        return ok
 
 
 def _latest_self_id(chat_username):

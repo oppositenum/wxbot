@@ -26,6 +26,38 @@ def load_cfg():
     return {}
 
 
+def _default_model(provider):
+    return "claude-sonnet-5" if provider == "claude" else "gpt-4o"
+
+
+def creds(cfg, provider):
+    """取某 provider 的凭据 (base_url, api_key, model)。
+
+    支持【两套独立中转】：cfg 里 cfg['claude']/cfg['gpt'] 各含 base_url/api_key/model。
+    没有独立配置时退回扁平旧字段(单中转)：base_url/api_key/(model 或 gpt_model)。
+    """
+    sub = cfg.get(provider)
+    if isinstance(sub, dict) and (sub.get("api_key") or sub.get("base_url")):
+        base = (sub.get("base_url") or cfg.get("base_url") or "").rstrip("/")
+        key = sub.get("api_key") or os.environ.get("WXBOT_LLM_KEY", "")
+        model = sub.get("model") or _default_model(provider)
+        return base, key, model
+    base = (cfg.get("base_url") or "").rstrip("/")
+    key = cfg.get("api_key") or os.environ.get("WXBOT_LLM_KEY", "")
+    if provider == "claude":
+        model = cfg.get("model", "claude-sonnet-5")
+    else:
+        model = cfg.get("gpt_model") or cfg.get("model") or "gpt-4o"
+    return base, key, model
+
+
+def _has_provider(cfg, provider):
+    sub = cfg.get(provider)
+    if isinstance(sub, dict) and sub.get("api_key"):
+        return True
+    return bool(cfg.get("api_key")) and cfg.get("provider", "claude") == provider
+
+
 def _opener(proxy):
     if proxy:
         h = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
@@ -72,20 +104,18 @@ def _endpoint(base, tail):
 
 
 def chat(system, messages, cfg=None):
-    """messages: [{"role":"user"/"assistant","content":str}]，返回回复文本。"""
+    """messages: [{"role":"user"/"assistant","content":str}]，返回回复文本。
+    provider 决定用 claude 还是 gpt 那套独立中转(见 creds)。"""
     cfg = cfg or load_cfg()
     provider = cfg.get("provider", "claude")
-    key = cfg.get("api_key") or os.environ.get("WXBOT_LLM_KEY", "")
     proxy = cfg.get("proxy") or None          # 空=直连(不隐式走系统代理)
     max_tokens = cfg.get("max_tokens", 600)
     temperature = cfg.get("temperature", 0.9)
+    base, key, model = creds(cfg, provider)
     if not key:
-        raise RuntimeError("未配置 LLM api_key（编辑 llm_config.json）")
-
-    base = (cfg.get("base_url") or "").rstrip("/")
+        raise RuntimeError(f"未配置 {provider} 的 api_key（在 AI 设置里填该套中转）")
 
     if provider == "claude":
-        model = cfg.get("model", "claude-sonnet-5")
         body = {"model": model, "max_tokens": max_tokens,
                 "system": system, "messages": messages}
         if temperature is not None and cfg.get("send_temperature"):
@@ -99,7 +129,6 @@ def chat(system, messages, cfg=None):
         return "".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
 
     # OpenAI / GPT 兼容
-    model = cfg.get("gpt_model", cfg.get("model", "gpt-4o"))
     url = _endpoint(base or "https://api.openai.com/v1", "chat/completions")
     msgs = ([{"role": "system", "content": system}] if system else []) + messages
     body = {"model": model, "max_tokens": max_tokens, "messages": msgs}
@@ -118,14 +147,13 @@ def chat_tools(system, messages, tools, dispatch, cfg=None, max_rounds=6):
     非 Claude provider 时退回无工具的 chat()（中转对 Claude tools 已验证可用）。
     """
     cfg = cfg or load_cfg()
-    if cfg.get("provider", "claude") != "claude":
+    # 工具调用走 claude 那套(有独立 claude 中转就用它，即使主 provider 是 gpt)
+    if cfg.get("provider", "claude") != "claude" and not _has_provider(cfg, "claude"):
         return chat(system, messages, cfg)
-    key = cfg.get("api_key") or os.environ.get("WXBOT_LLM_KEY", "")
     proxy = cfg.get("proxy") or None
-    base = (cfg.get("base_url") or "").rstrip("/")
-    model = cfg.get("model", "claude-sonnet-5")
+    base, key, model = creds(cfg, "claude")
     if not key:
-        raise RuntimeError("未配置 LLM api_key")
+        return chat(system, messages, cfg)
     headers = {"content-type": "application/json", "x-api-key": key,
                "authorization": f"Bearer {key}",
                "anthropic-version": "2023-06-01", "user-agent": UA}
@@ -183,19 +211,19 @@ def embed(texts, cfg=None):
 def describe_image(img_bytes, media_type="image/jpeg",
                    prompt="用一句中文简短、客观地描述这张图片的主要内容（是什么/在做什么），不要评论、不要猜测。",
                    cfg=None):
-    """让多模态模型看图并返回一句中文描述。支持 Claude / OpenAI 视觉。"""
+    """让多模态模型看图并返回一句中文描述。支持 Claude / OpenAI 视觉。
+    视觉用哪套中转：cfg['vision_provider'] 指定，缺省跟随主 provider。"""
     import base64
     cfg = cfg or load_cfg()
-    provider = cfg.get("provider", "claude")
-    key = cfg.get("api_key") or os.environ.get("WXBOT_LLM_KEY", "")
+    provider = cfg.get("vision_provider") or cfg.get("provider", "claude")
     proxy = cfg.get("proxy") or None
-    base = (cfg.get("base_url") or "").rstrip("/")
+    base, key, model0 = creds(cfg, provider)
     if not key:
         return None
     b64 = base64.b64encode(img_bytes).decode()
     try:
         if provider == "claude":
-            model = cfg.get("vision_model") or cfg.get("model", "claude-sonnet-5")
+            model = cfg.get("vision_model") or model0
             body = {"model": model, "max_tokens": 300, "messages": [{"role": "user",
                     "content": [{"type": "text", "text": prompt},
                                 {"type": "image", "source": {"type": "base64",
@@ -208,7 +236,7 @@ def describe_image(img_bytes, media_type="image/jpeg",
             return "".join(p.get("text", "") for p in r.get("content", [])
                            if p.get("type") == "text").strip() or None
         # OpenAI 视觉
-        model = cfg.get("vision_model") or cfg.get("gpt_model", "gpt-4o")
+        model = cfg.get("vision_model") or model0
         url = _endpoint(base or "https://api.openai.com/v1", "chat/completions")
         body = {"model": model, "max_tokens": 300, "messages": [{"role": "user",
                 "content": [{"type": "text", "text": prompt},
@@ -256,7 +284,8 @@ def transcribe(audio_bytes, filename="voice.mp3", content_type="audio/mpeg", cfg
 
 def available():
     cfg = load_cfg()
-    return bool(cfg.get("api_key") or os.environ.get("WXBOT_LLM_KEY"))
+    return bool(cfg.get("api_key") or os.environ.get("WXBOT_LLM_KEY")
+                or _has_provider(cfg, "claude") or _has_provider(cfg, "gpt"))
 
 
 if __name__ == "__main__":

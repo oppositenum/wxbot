@@ -48,7 +48,8 @@ def save_tasks(tasks):
 
 # ---------------- 名字解析 ----------------
 def _norm(s):
-    return re.sub(r"\s|　| ", "", (s or "")).lower()
+    s = re.sub(r"\s|　| ", "", (s or "")).lower()
+    return re.sub(r"(群聊|群)$", "", s)      # 去掉末尾群字,容忍 test-001群
 
 
 def resolve_target(name):
@@ -288,8 +289,10 @@ def remove_task(id=None, match=None):
             hit = True
         elif match:
             m = _norm(match)
-            if m and (m in _norm(t.get("title")) or m in _norm(t.get("target"))
-                      or m in _norm(t.get("prompt"))):
+            hay = _norm(t.get("title")) + " " + _norm(t.get("target")) + " " + _norm(t.get("prompt"))
+            if m and (m in hay
+                      # 宽松:匹配串的任意 2-gram 命中即算(容忍"周报提醒"↔"提醒交周报"词序不同)
+                      or any(m[i:i+2] in hay for i in range(len(m) - 1) if len(m) >= 2)):
                 hit = True
         if hit:
             removed += 1
@@ -313,8 +316,8 @@ _NL_SYSTEM = """你把用户对"定时任务"的自然语言指令解析成 JSON
 {
   "action": "create|cancel|list",     // 新建/取消/列出
   "title": "简短标题(<=16字)",
-  "target": "发给谁 或 哪个群(原话里的名字)",
-  "mention": "群里要@的人名(私聊或无需@则空串)",
+  "target": "发给谁 或 哪个群——【原样完整照抄名字,含数字/连字符,如 test-001 不要写成 test】",
+  "mention": "群里要@的人名(原样完整照抄;私聊或无需@则空串)",
   "cron": "分 时 日 月 周 (标准5字段cron)，非周期性任务给空串",
   "once_at": "YYYY-MM-DD HH:MM (一次性任务的绝对时间)，周期性给空串",
   "prompt": "到点要做/要说的内容",

@@ -424,14 +424,28 @@ async function renderAI(){
   let activePersona="";
   try{ const botr=await(await fetch("/api/bot")).json(); const rr=(botr.rules&&botr.rules.rules||[]).find(r=>r.action&&r.action.type==="reply_ai"); activePersona=(rr&&rr.action.persona)||""; }catch(e){}
   p.innerHTML=`
-    <h3>AI 设置</h3>
-    <div class="sub" style="margin-bottom:6px">大模型：${llm.configured?('已配置 ✅ '+(llm.provider||'')):'未配置'}</div>
-    <select id="llmProv" style="width:100%;padding:5px;margin-bottom:6px"><option value="claude">Claude</option><option value="gpt">GPT</option></select>
-    <input id="llmKey" placeholder="API key(留空=不改)" style="width:100%;margin-bottom:6px;padding:5px">
-    <input id="llmModel" placeholder="模型(可选,如 claude-sonnet-5 / gpt-4o)" style="width:100%;margin-bottom:6px;padding:5px">
-    <input id="llmBase" placeholder="Base URL(可选,中转网关)" style="width:100%;margin-bottom:6px;padding:5px" value="${llm.base_url||''}">
-    <input id="llmProxy" placeholder="代理(可选,如 http://127.0.0.1:7890,留空=不走代理)" style="width:100%;margin-bottom:6px;padding:5px" value="${llm.proxy||''}">
+    <h3>AI 设置 <span class="sub" style="font-weight:normal">Claude / GPT 两套独立中转</span></h3>
+    <div class="sub" style="margin-bottom:6px">状态：${llm.configured?'已配置 ✅':'未配置'} · Claude ${llm.claude&&llm.claude.has_key?'🔑':'—'} · GPT ${llm.gpt&&llm.gpt.has_key?'🔑':'—'}</div>
+    <label class="sub">主用(chat/工具/视觉默认走它)</label>
+    <select id="llmProv" style="width:100%;padding:5px;margin:2px 0 6px"><option value="claude">Claude</option><option value="gpt">GPT</option></select>
+    <label class="sub">视觉用(留空=跟随主用)</label>
+    <select id="llmVis" style="width:100%;padding:5px;margin:2px 0 8px"><option value="">跟随主用</option><option value="claude">Claude</option><option value="gpt">GPT</option></select>
+    <div style="background:#f7f8fa;border-radius:6px;padding:8px;margin-bottom:6px">
+      <b style="font-size:13px">Claude 中转</b>
+      <input id="cBase" placeholder="Base URL" style="width:100%;margin:4px 0;padding:5px" value="${(llm.claude&&llm.claude.base_url)||''}">
+      <input id="cKey" placeholder="Claude API key(留空=不改)" style="width:100%;margin-bottom:4px;padding:5px">
+      <input id="cModel" placeholder="模型 如 claude-sonnet-5" style="width:100%;padding:5px" value="${(llm.claude&&llm.claude.model)||''}">
+    </div>
+    <div style="background:#f7f8fa;border-radius:6px;padding:8px;margin-bottom:6px">
+      <b style="font-size:13px">GPT 中转</b>
+      <input id="gBase" placeholder="Base URL" style="width:100%;margin:4px 0;padding:5px" value="${(llm.gpt&&llm.gpt.base_url)||''}">
+      <input id="gKey" placeholder="GPT API key(留空=不改)" style="width:100%;margin-bottom:4px;padding:5px">
+      <input id="gModel" placeholder="模型 如 gpt-6-astra" style="width:100%;padding:5px" value="${(llm.gpt&&llm.gpt.model)||''}">
+    </div>
+    <input id="llmProxy" placeholder="代理(可选,留空=不走代理)" style="width:100%;margin-bottom:6px;padding:5px" value="${llm.proxy||''}">
     <button id="llmSave" class="primary">保存 AI 配置</button>
+    <button id="llmTest">测试两套</button>
+    <div id="llmTestMsg" class="sub" style="margin-top:4px"></div>
     <hr style="margin:12px 0;border:none;border-top:1px solid #eee">
     <h3>Agent 模式 <span class="sub" style="font-weight:normal">(机器人可联网/查历史/查画像/查知识库后再答)</span></h3>
     <label style="display:block;margin-bottom:6px;cursor:pointer"><input type="checkbox" id="agEnabled" ${ag.enabled?'checked':''}> 开启 Agent 工具调用</label>
@@ -510,6 +524,7 @@ async function renderAI(){
     toast("已删除"); renderAI();
   });
   if(llm.provider) $("#llmProv").value=llm.provider;
+  if(llm.vision_provider!==undefined) $("#llmVis").value=llm.vision_provider||"";
   document.querySelectorAll(".pView").forEach(b=>b.onclick=async()=>{
     const slug=b.dataset.s;
     const d=await(await fetch("/api/personas/"+encodeURIComponent(slug))).json();
@@ -526,11 +541,16 @@ async function renderAI(){
     toast(r.ok?("机器人回复人设已设为 "+b.dataset.s):"设置失败"); renderAI();
   });
   $("#llmSave").onclick=async()=>{
-    const body={provider:$("#llmProv").value, base_url:$("#llmBase").value.trim(), proxy:$("#llmProxy").value.trim()};
-    if($("#llmKey").value) body.api_key=$("#llmKey").value;
-    if($("#llmModel").value){ if(body.provider==="gpt") body.gpt_model=$("#llmModel").value; else body.model=$("#llmModel").value; }
+    const body={provider:$("#llmProv").value, vision_provider:$("#llmVis").value, proxy:$("#llmProxy").value.trim(),
+      claude:{base_url:$("#cBase").value.trim(), model:$("#cModel").value.trim(), api_key:$("#cKey").value.trim()},
+      gpt:{base_url:$("#gBase").value.trim(), model:$("#gModel").value.trim(), api_key:$("#gKey").value.trim()}};
     const r=await(await fetch("/api/llm/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
     toast(r.configured?"AI 已配置 ✅":"已保存"); renderAI();
+  };
+  $("#llmTest").onclick=async()=>{
+    $("#llmTestMsg").textContent="测试中…";
+    const r=await(await fetch("/api/llm/test",{method:"POST"})).json();
+    $("#llmTestMsg").innerHTML="Claude: "+(r.claude||'?')+"<br>GPT: "+(r.gpt||'?')+"<br>视觉: "+(r.vision||'?');
   };
   $("#distPrivBtn").onclick=async()=>{
     const sel=$("#distPriv"); const uname=sel.value; if(!uname){ toast("没有可蒸馏的私聊"); return; }

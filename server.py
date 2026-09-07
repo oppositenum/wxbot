@@ -240,19 +240,74 @@ from core import distill, llm  # noqa: E402
 @app.get("/api/llm")
 def api_llm_status():
     cfg = llm.load_cfg()
-    return jsonify({"configured": llm.available(), "provider": cfg.get("provider"),
-                    "model": cfg.get("model"), "gpt_model": cfg.get("gpt_model"),
-                    "base_url": cfg.get("base_url", ""), "proxy": cfg.get("proxy", "")})
+
+    def one(p):
+        base, key, model = llm.creds(cfg, p)
+        return {"base_url": base, "model": model, "has_key": bool(key)}
+    return jsonify({"configured": llm.available(),
+                    "provider": cfg.get("provider", "claude"),
+                    "vision_provider": cfg.get("vision_provider", ""),
+                    "proxy": cfg.get("proxy", ""),
+                    "claude": one("claude"), "gpt": one("gpt")})
+
+
+@app.post("/api/llm/test")
+def api_llm_test():
+    """分别实测 Claude / GPT 两套中转 + 视觉是否可用。"""
+    cfg = llm.load_cfg()
+    out = {}
+    for p in ("claude", "gpt"):
+        base, key, model = llm.creds(cfg, p)
+        if not key:
+            out[p] = "未配置"
+            continue
+        try:
+            c = dict(cfg)
+            c["provider"] = p
+            r = llm.chat("只回OK两个字", [{"role": "user", "content": "OK"}], c)
+            out[p] = f"✅ 通 ({model})" if r else "⚠️ 空响应"
+        except Exception as e:  # noqa: BLE001
+            out[p] = "❌ " + str(e)[:80]
+    # 视觉(按 vision_provider 或主 provider)
+    try:
+        import io as _io
+        vp = cfg.get("vision_provider") or cfg.get("provider", "claude")
+        png = _io.BytesIO()
+        try:
+            from PIL import Image
+            Image.new("RGB", (32, 32), (200, 100, 50)).save(png, "PNG")
+            data = png.getvalue()
+        except Exception:  # noqa: BLE001
+            data = None
+        if data:
+            d = llm.describe_image(data, media_type="image/png", prompt="一句话这是什么颜色", cfg=cfg)
+            out["vision"] = (f"✅ 通 ({vp})" if d else "❌ 无响应")
+        else:
+            out["vision"] = "跳过(无PIL)"
+    except Exception as e:  # noqa: BLE001
+        out["vision"] = "❌ " + str(e)[:80]
+    return jsonify(out)
 
 
 @app.post("/api/llm/config")
 def api_llm_config():
     body = request.get_json(force=True, silent=True) or {}
     cfg = llm.load_cfg()
-    for k in ("provider", "api_key", "model", "gpt_model", "proxy",
-              "max_tokens", "temperature", "base_url"):
+    for k in ("provider", "vision_provider", "proxy", "max_tokens", "temperature"):
         if k in body:
             cfg[k] = body[k]
+    # 两套独立中转：claude / gpt 各存 base_url/api_key/model；key 留空则不覆盖旧值
+    for p in ("claude", "gpt"):
+        sub = body.get(p)
+        if isinstance(sub, dict):
+            cur = cfg.get(p) if isinstance(cfg.get(p), dict) else {}
+            if sub.get("base_url") is not None:
+                cur["base_url"] = sub["base_url"].strip()
+            if sub.get("model"):
+                cur["model"] = sub["model"].strip()
+            if sub.get("api_key"):           # 只有填了才更新，留空保留原 key
+                cur["api_key"] = sub["api_key"].strip()
+            cfg[p] = cur
     with open(llm.CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
     return jsonify({"ok": True, "configured": llm.available()})

@@ -120,6 +120,8 @@ def _click(x, y):
 
 def _key(k, times=1, delay=0.4):
     for _ in range(times):
+        if docker_wx.priority_pending():       # 有发送在等→立刻停手让位
+            return
         _x("xdotool", "key", k)
         time.sleep(delay)
 
@@ -172,9 +174,13 @@ def _vision_open(name, log):
         time.sleep(1.4)
 
     for attempt in range(5):
+        if docker_wx.priority_pending():       # 发送优先：别再翻了
+            return False
         scroll_top()
         found_y = -1
         for sweep in range(5):                 # 顶→下逐屏找该行
+            if docker_wx.priority_pending():
+                return False
             try:
                 m = re.search(r"-?\d+", llm.describe_image(
                     _vision_shot_bytes(), media_type="image/png", prompt=locate) or "")
@@ -251,6 +257,10 @@ def _harvest_locked(display_name, nav, log):
 
     opened = False
     for attempt in range(10):                 # 视觉找一张真实照片→点开→进查看器
+        if docker_wx.priority_pending():       # 有发送在等→提前收手，把 UI 让给发送
+            log("检测到发送请求，harvest 让位")
+            _x("xdotool", "key", "Escape")
+            return _temp_count() - before
         pts = _vision_find_photos(log)         # 视觉判定"真实照片"坐标(排除表情/头像/文字)
         if not pts:
             try:                               # 视觉没给→退回像素检测器兜底

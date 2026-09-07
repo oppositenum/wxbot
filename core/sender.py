@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config  # noqa: E402,F401
 from core import docker_wx  # noqa: E402
 
-VERIFY_WINDOW = 6.0        # 发后最多等这么多秒确认消息落库
+VERIFY_WINDOW = 10.0       # 发后最多等这么多秒确认消息落库(宽一点，避免误判失败→重发变刷屏)
 POLL_STEP = 0.6
 _TITLE_TMP = "/tmp/wxbot_title.png"
 
@@ -151,6 +151,21 @@ def _verify_text(chat_username, text, baseline_id, deadline):
     return False
 
 
+def _delivered_text(chat_username, text, baseline_id):
+    """一次性检查(不轮询)：目标文本是否已作为自己发的新消息出现——用于重发前防重复。"""
+    from core import decrypt, messages
+    want = _norm(text)
+    try:
+        decrypt.run(force=True, only=["message"])
+        for m in messages.get_messages(chat_username, limit=30):
+            if (m.get("is_self") and (m.get("local_id") or -1) > baseline_id
+                    and m.get("type") == 1 and _norm(m.get("content")) == want):
+                return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
 def _verify_image(chat_username, baseline_id, deadline):
     """图片没法比内容，只确认出现一条 is_self 的新图片消息(type=3)。"""
     from core import decrypt, messages
@@ -168,15 +183,22 @@ def _verify_image(chat_username, baseline_id, deadline):
     return False
 
 
-def _guarded_send(display_name, chat_username, do_paste, verify_fn, retries):
+def _guarded_send(display_name, chat_username, do_paste, verify_fn, retries,
+                  predelivered=None):
     """打开会话 → (能核对就)截图核对标题 → 发送 → 发后校验落库。
 
     关键防误发：能视觉核对标题时，标题不匹配【绝不发送】(避免发错会话被刷屏)，
     只重开重试。视觉不可用时退回"原子打开+发送"，靠发后落库校验兜底(不会误报成功)。
+    防重发：baseline 只取一次；重试前先看"是不是上一次其实已经发出去了"(predelivered)，
+    是就直接判成功，绝不重复发。
     """
+    baseline = _latest_self_id(chat_username)        # 只取一次，作为全程基线
     last = {"ok": False, "error": "未发送"}
     for attempt in range(1, retries + 2):
-        baseline = _latest_self_id(chat_username)
+        # 重试前先核对：上一次可能其实已送达(只是当时校验窗口没等到)——避免重复发
+        if attempt > 1 and predelivered and predelivered(baseline):
+            return {"ok": True, "verified": True, "attempts": attempt - 1,
+                    "note": "已送达(上次)"}
         if not _vision_open(display_name, chat_username):
             last = {"ok": False, "error": "打开会话失败", "attempts": attempt}
             time.sleep(0.8)
@@ -205,30 +227,40 @@ def send_text(display_name, text, chat_username=None, retries=2, verify=True):
     """发文本：打开会话→核对标题(防误发)→发送→发后落库校验+重试。
 
     有 chat_username 时逐次校验、失败重试；无则退回原始发送(ok 依赖 xdotool 回显)。
+    发送享有 UI 优先级：让正在翻图解密(harvest)的后台活立刻让出微信窗口。
     """
-    if not (verify and chat_username):
-        r = docker_wx.send_text(display_name, text)
-        r.setdefault("verified", False)
-        return r
-    return _guarded_send(
-        display_name, chat_username,
-        do_paste=lambda: docker_wx.paste_text(text),
-        verify_fn=lambda base: _verify_text(chat_username, text, base,
-                                            time.time() + VERIFY_WINDOW),
-        retries=retries)
+    docker_wx.request_priority()             # 抢占：harvest 会立刻让位
+    try:
+        if not (verify and chat_username):
+            r = docker_wx.send_text(display_name, text)
+            r.setdefault("verified", False)
+            return r
+        return _guarded_send(
+            display_name, chat_username,
+            do_paste=lambda: docker_wx.paste_text(text),
+            verify_fn=lambda base: _verify_text(chat_username, text, base,
+                                                time.time() + VERIFY_WINDOW),
+            retries=retries,
+            predelivered=lambda base: _delivered_text(chat_username, text, base))
+    finally:
+        docker_wx.release_priority()
 
 
 def send_image(display_name, host_path, chat_username=None, retries=1, verify=True):
     """发图片：打开会话→核对标题(防误发)→发送→发后校验(出现新 is_self 图片)+重试。"""
     if not os.path.exists(host_path):
         return {"ok": False, "error": f"图片不存在: {host_path}", "verified": False}
-    if not (verify and chat_username):
-        r = docker_wx.send_image(display_name, host_path)
-        r.setdefault("verified", False)
-        return r
-    return _guarded_send(
-        display_name, chat_username,
-        do_paste=lambda: docker_wx.paste_image_open(host_path),
-        verify_fn=lambda base: _verify_image(chat_username, base,
-                                             time.time() + VERIFY_WINDOW),
-        retries=retries)
+    docker_wx.request_priority()
+    try:
+        if not (verify and chat_username):
+            r = docker_wx.send_image(display_name, host_path)
+            r.setdefault("verified", False)
+            return r
+        return _guarded_send(
+            display_name, chat_username,
+            do_paste=lambda: docker_wx.paste_image_open(host_path),
+            verify_fn=lambda base: _verify_image(chat_username, base,
+                                                 time.time() + VERIFY_WINDOW),
+            retries=retries)
+    finally:
+        docker_wx.release_priority()

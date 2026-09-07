@@ -22,6 +22,28 @@ LOCAL_XWECHAT = os.environ.get("WXBOT_XWECHAT_ROOT", "/root/xwechat_files")
 # 必须串行，否则互相插入按键会彼此搞乱。两边都用这把锁。
 UI_LOCK = threading.RLock()
 
+# 发送优先：翻图解密(harvest)是长耗时后台活，会长时间占着微信 UI。发送必须能立刻插队，
+# 否则用户点发送会一直卡"发送中"。发送前 request_priority()，harvest 每轮检查 priority_pending()
+# 若有发送在等就立刻让位(提前结束、松锁)。
+_send_pending = 0
+_send_pending_lock = threading.Lock()
+
+
+def request_priority():
+    global _send_pending
+    with _send_pending_lock:
+        _send_pending += 1
+
+
+def release_priority():
+    global _send_pending
+    with _send_pending_lock:
+        _send_pending = max(0, _send_pending - 1)
+
+
+def priority_pending():
+    return _send_pending > 0
+
 
 def _docker(*args, timeout=60):
     return subprocess.run(["docker", *args], capture_output=True, text=True,

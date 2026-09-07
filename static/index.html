@@ -287,14 +287,26 @@ async function send(kind, payload, localUrl){
   try{
     const r=await fetch("/api/send",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     const res=await r.json();
-    if(res.ok){
-      toast("已发送");
-      if(kind==="text") $("#msgInput").value="";
-      if(kind==="image" && localUrl){ (sentImg[current.username]=sentImg[current.username]||[]).push({url:localUrl, ts:Date.now()/1000}); }
-      loadMessages(); setTimeout(loadMessages,2500);
-    } else toast("发送失败："+(res.error||""));
-  }catch(e){ toast("发送出错"); }
-  finally{ setSending(false); }
+    if(!res.ok){ toast("发送失败："+(res.error||"")); setSending(false); return; }
+    // 异步：后台在做"视觉核对会话+发送+发后校验"(十几秒)。先乐观清空输入、开始轮询消息，
+    // 消息一落库就会显示；同时轮询任务状态给最终结果。不阻塞界面。
+    toast("发送中…(后台核对会话并确认送达)");
+    if(kind==="text") $("#msgInput").value="";
+    if(kind==="image" && localUrl){ (sentImg[current.username]=sentImg[current.username]||[]).push({url:localUrl, ts:Date.now()/1000}); }
+    setSending(false);
+    loadMessages();
+    if(res.queued && res.job){ pollSend(res.job); }
+    else { setTimeout(loadMessages,2500); }
+  }catch(e){ toast("发送出错"); setSending(false); }
+}
+async function pollSend(job){
+  for(let i=0;i<12;i++){                     // 最多轮询 ~24s
+    await new Promise(r=>setTimeout(r,2000));
+    loadMessages();                          // 消息落库就会显示
+    let s; try{ s=await(await fetch("/api/send/status?job="+encodeURIComponent(job))).json(); }catch(e){ continue; }
+    if(s.status==="done"){ toast(s.verified?"✅ 已送达(已核对会话)":"已发送"); loadMessages(); return; }
+    if(s.status==="error"){ toast("发送失败："+(s.error||s.wrong_chat?"打开的会话不对，已阻止":"未确认")); return; }
+  }
 }
 
 // 事件

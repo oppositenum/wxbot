@@ -124,13 +124,23 @@ def _resolve_revokes(chat, out):
                              "sender_name": m.get("sender_name"),
                              "time": m.get("create_time") or 0}
                 changed = True
-                # 图片且够新(撤回窗口~2分钟)：先解密缓存一份，防撤回后微信删本地图。
-                # 清晰度靠"保持会话打开"(微信自动下清晰 _b.dat)，这里缓存已能取到最清晰版。
+                # 图片且够新(撤回窗口~2分钟)：每轮都用 upgrade 缓存——微信下清晰 _b.dat 需~1秒，
+                # 首轮可能只缓存到缩略图，后续轮次一旦 _b.dat 就位就升级成清晰版。撤回后微信会
+                # 删掉资源映射(hash查不到)，所以必须在撤回前把清晰版缓存下来。
                 if (t == 3 and m.get("local_id")
                         and (m.get("create_time") or 0) > time.time() - 300):
                     try:
                         from core import imgdec
-                        imgdec.cache_image(chat, m["local_id"])
+                        cp = imgdec._revoke_cache_path(chat, m["local_id"])
+                        # 已缓存且已是清晰版就不再重复解密；否则尝试升级
+                        need = True
+                        if os.path.exists(cp):
+                            try:
+                                need = imgdec._looks_thumb(open(cp, "rb").read())
+                            except Exception:  # noqa: BLE001
+                                need = False
+                        if need:
+                            imgdec.cache_image(chat, m["local_id"], upgrade=True)
                     except Exception:  # noqa: BLE001
                         pass
 

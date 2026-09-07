@@ -36,6 +36,39 @@ def _msg_db_mtime():
         return 0.0
 
 
+# 焦点会话看护：持久地把"要盯防撤回的会话"钉在微信里打开(被切走就重开)，并快轮询该会话
+# →get_messages 触发 _resolve_revokes 缓存清晰图。这样新图到达微信瞬间自动下清晰 _b.dat，
+# 秒撤前就缓存到清晰版。仅在"保持会话打开"开关开启时工作。
+_focus = {"chat": None, "name": None, "thread": None}
+
+
+def _focus_loop():
+    from core import decrypt as _dec, messages as _msg, sender as _snd
+    while True:
+        chat = _focus["chat"]
+        name = _focus["name"]
+        try:
+            if not chat or not botmod.load_rules().get("fullres_capture"):
+                time.sleep(1.5)
+                continue
+            # 被切走(发送/翻图/别的会话)就重开，保持钉住
+            if not docker_wx.priority_pending() and docker_wx.current_open() != chat:
+                _snd.focus_chat(name, chat)
+            # 快轮询该会话：get_messages 内部会缓存(升级)清晰图
+            _dec.run(force=False, only=["message"])
+            _msg.get_messages(chat, limit=15)
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(1.2)
+
+
+def _ensure_focus_loop():
+    if _focus["thread"] is None or not _focus["thread"].is_alive():
+        t = threading.Thread(target=_focus_loop, daemon=True)
+        t.start()
+        _focus["thread"] = t
+
+
 def _bot_loop():
     _bot["state"] = botmod.load_state()
 
@@ -271,23 +304,16 @@ def api_bot_watch():
 
 @app.post("/api/focus")
 def api_focus():
-    """把网页正在看的会话在微信里也打开并保持——新图到达时微信会自动下清晰版(_b.dat)，
-    这样即使秒撤也已拿到清晰图。仅在"保持会话打开"开关开启时生效；后台执行不阻塞。"""
-    if not botmod.load_rules().get("fullres_capture"):
-        return jsonify({"ok": True, "skipped": "off"})
+    """把网页正在看的会话设为"焦点会话"——后台看护线程会持续把它钉在微信里打开并快轮询，
+    新图到达微信自动下清晰版(_b.dat)，秒撤前就缓存到清晰图。仅在"保持会话打开"开关开启时生效。"""
     b = request.get_json(force=True, silent=True) or {}
     chat = b.get("chat")
-    if not chat or docker_wx.current_open() == chat:
-        return jsonify({"ok": True, "skipped": "already"})
     name = b.get("name") or (botmod.send_name_for(chat) if chat else None)
-
-    def _do():
-        try:
-            sender.focus_chat(name, chat)
-        except Exception:  # noqa: BLE001
-            pass
-    threading.Thread(target=_do, daemon=True).start()
-    return jsonify({"ok": True, "focusing": chat})
+    _focus["chat"] = chat
+    _focus["name"] = name
+    if botmod.load_rules().get("fullres_capture"):
+        _ensure_focus_loop()
+    return jsonify({"ok": True, "focus": chat})
 
 
 @app.get("/api/bot/fullres")
@@ -306,6 +332,8 @@ def api_fullres_set():
     rules["fullres_capture"] = bool(body.get("enabled"))
     with open(botmod.rules_file(), "w", encoding="utf-8") as f:
         json.dump(rules, f, ensure_ascii=False, indent=2)
+    if rules["fullres_capture"]:
+        _ensure_focus_loop()
     return jsonify({"ok": True, "enabled": rules["fullres_capture"]})
 
 

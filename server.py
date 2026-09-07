@@ -70,6 +70,57 @@ def _ensure_focus_loop():
         _focus["thread"] = t
 
 
+# 图片存档：后台把监听会话/焦点会话里收到的图解密成高清图永久存档,并(限速)读图内容。
+# 清晰度依赖是否已下全图(配合"保持会话打开"/路线A注入);拿不到高清就先存现有版,以后升级。
+_arch = {"thread": None, "seen": set()}
+
+
+def _archiver_loop():
+    from core import imgarchive, decrypt as _dec, messages as _msg
+    import time as _t
+    while True:
+        try:
+            rules = botmod.load_rules()
+            chats = list(dict.fromkeys(list(rules.get("watch", []))
+                                       + ([_focus["chat"]] if _focus.get("chat") else [])))
+            _dec.run(force=False, only=["message"])
+            described = 0
+            for chat in chats:
+                if not chat or chat == "*":
+                    continue
+                try:
+                    ms = _msg.get_messages(chat, limit=25)
+                except Exception:  # noqa: BLE001
+                    continue
+                now = _t.time()
+                for m in ms:
+                    if m.get("type") != 3 or not m.get("local_id"):
+                        continue
+                    if (m.get("create_time") or 0) < now - 86400:   # 只存近一天的新图
+                        continue
+                    key = (chat, m["local_id"])
+                    is_arch = imgarchive.is_archived(chat, m["local_id"])
+                    if key in _arch["seen"] and is_arch:
+                        continue
+                    r = imgarchive.archive_image(chat, m["local_id"], meta=m)
+                    if r.get("ok"):
+                        _arch["seen"].add(key)
+                        # 高清图且还没读过内容 → 限速读一张(让以后能知道图片内容)
+                        if not r.get("thumb") and described < 2:
+                            if imgarchive.describe(chat, m["local_id"]):
+                                described += 1
+        except Exception:  # noqa: BLE001
+            pass
+        _t.sleep(25)
+
+
+def _ensure_archiver():
+    if _arch["thread"] is None or not _arch["thread"].is_alive():
+        t = threading.Thread(target=_archiver_loop, daemon=True)
+        t.start()
+        _arch["thread"] = t
+
+
 def _bot_loop():
     _bot["state"] = botmod.load_state()
 
@@ -536,6 +587,34 @@ def api_agent_config_set():
     return jsonify({"ok": True, "agent": rules["agent"]})
 
 
+# ---------------- 图片高清存档 ----------------
+@app.get("/api/archive")
+def api_archive_list():
+    from core import imgarchive
+    return jsonify({"stats": imgarchive.stats(),
+                    **imgarchive.list_archive(limit=int(request.args.get("limit", 200)))})
+
+
+@app.get("/api/archive/img")
+def api_archive_img():
+    from core import imgarchive
+    chat = request.args.get("chat", "")
+    lid = request.args.get("id")
+    if not chat or not lid:
+        return Response(status=400)
+    data = imgarchive.archived_bytes(chat, int(lid))
+    if not data:
+        return Response(status=404)
+    return send_file(io.BytesIO(data), mimetype="image/jpeg")
+
+
+@app.get("/api/archive/search")
+def api_archive_search():
+    from core import imgarchive
+    return jsonify({"hits": imgarchive.search(request.args.get("q", ""),
+                                              int(request.args.get("k", 20)))})
+
+
 # ---------------- 定时任务(自然语言) ----------------
 @app.get("/api/schedule")
 def api_schedule_list():
@@ -901,6 +980,10 @@ def main():
         schedule.start_loop()             # 定时任务调度线程随后台自启
     except Exception as e:  # noqa: BLE001
         print("定时任务调度自启失败:", e)
+    try:
+        _ensure_archiver()                # 图片高清存档线程随后台自启
+    except Exception as e:  # noqa: BLE001
+        print("图片存档自启失败:", e)
     bind = os.environ.get("WXBOT_BIND", "127.0.0.1")  # 容器内设 0.0.0.0，宿主默认只本地
     print(f"wxbot 后台启动： http://localhost:{config.PORT} (bind {bind})")
     app.run(host=bind, port=config.PORT, debug=False, threaded=True)

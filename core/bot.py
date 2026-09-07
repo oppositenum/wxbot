@@ -394,6 +394,8 @@ def _handle_schedule_msg(chat, m, is_group, log):
     except Exception as e:  # noqa: BLE001
         log(f"[定时] 处理出错: {e}")
         return False
+    if r.get("action") == "none":         # LLM 判定不是定时指令→交回普通闲聊
+        return False
     if r.get("action") == "list":
         ts = r.get("tasks", [])
         msg = ("当前定时任务：\n" + "\n".join(

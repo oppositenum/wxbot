@@ -332,14 +332,15 @@ def list_view(creator_wxid=None):
 _NL_SYSTEM = """你把用户对"定时任务"的自然语言指令解析成 JSON。任务到点会把结果发给某人:私聊直发,群聊@他。
 严格只输出 JSON,字段:
 {
-  "action": "create|cancel|list",     // 新建/取消/列出
+  "action": "create|cancel|list|none",  // 新建/取消/列出; none=这根本不是定时任务指令(只是普通聊天)
   "title": "简短标题(<=16字)",
   "target": "发给谁 或 哪个群——【原样完整照抄名字,含数字/连字符,如 test-001 不要写成 test】",
   "mention": "群里要@的人名(原样完整照抄;私聊或无需@则空串)",
   "cron": "分 时 日 月 周 (标准5字段cron)，非周期性任务给空串",
   "once_at": "YYYY-MM-DD HH:MM (一次性任务的绝对时间)，周期性给空串",
   "prompt": "到点要做/要说的内容",
-  "use_llm": true/false,              // 内容需要AI临时生成(如"总结今天新闻")=true; 固定话术(如"提醒交周报")=false
+  "use_llm": true/false,              // 内容需要AI临时生成(如"总结新闻""随便说点什么")=true; 固定话术(如"提醒交周报")=false
+  "persona": "指定用谁的口吻/人设说(如指令提到'让夏以昼说',填 夏以昼;否则空串)",
   "cancel_match": "取消/删除时用来匹配已有任务的关键词(action=cancel时给)"
 }
 规则:
@@ -347,7 +348,9 @@ _NL_SYSTEM = """你把用户对"定时任务"的自然语言指令解析成 JSON
 - 指令里明确写"@某人提醒..."的那个"某人"才是 mention(要@提醒的对象),原样照抄他的名字。
 - "每天9点"→cron "0 9 * * *"; "每周一10:30"→"30 10 * * 1"; "每小时"→"0 * * * *"; "每30分钟"→"*/30 * * * *"。
 - "明天下午3点"这种一次性→用 once_at 绝对时间(基于下面给的当前时间推算)。
+- "每隔一小时随便找我说点什么"这种→周期任务:cron "0 */1 * * *",use_llm=true,prompt照抄要求。
 - 只有取消意图→action=cancel,填 cancel_match;只有查看意图→action=list。
+- 如果这句话【不是】在设置/取消/查看定时任务(只是普通闲聊)→action=none,其它字段可空。
 - 不确定的字段给空串。不要输出 JSON 以外任何字。"""
 
 
@@ -360,18 +363,20 @@ def parse_nl(text):
     return json.loads(raw)
 
 
-_SCHED_VERB = re.compile(r"提醒|定时|闹钟|催我|叫我|通知我")
+_SCHED_VERB = re.compile(r"提醒|定时|闹钟|催我|叫我|通知我|找我|发我|跟我说|给我说|说点什么|唠")
 _SCHED_TIME = re.compile(
     r"每[天周月日]|每隔|每小时|每分钟|每\d|明天|后天|今天|上午|下午|晚上|早上|凌晨|"
     r"周[一二三四五六日天]|礼拜|\d+\s*点|\d{1,2}:\d{2}|过\d+分|一分钟|半小时")
+# 周期时间(每隔/每天/每小时…)单独出现就足以怀疑是定时任务,交给 LLM 兜底判定
+_SCHED_RECUR = re.compile(r"每隔|每小时|每分钟|每天|每周|每月|每\d+\s*(分钟|小时|天)|每[一二三四五六日天]")
 _SCHED_MANAGE = re.compile(r"(取消|删除|关掉|停掉|列出|查看|有哪些|看看).{0,8}(任务|提醒|定时|闹钟)")
 
 
 def looks_schedule(text):
-    """粗判一句话是不是"定时任务"指令(用于机器人聊天里识别,避免每句都调LLM)。"""
+    """粗判一句话是不是"定时任务"候选(机器人聊天里初筛;最终由 LLM 判定,见 parse_nl 的 none)。"""
     if not text:
         return False
-    if _SCHED_MANAGE.search(text):
+    if _SCHED_MANAGE.search(text) or _SCHED_RECUR.search(text):
         return True
     return bool(_SCHED_VERB.search(text) and _SCHED_TIME.search(text))
 
@@ -392,6 +397,8 @@ def handle_nl(text, ctx=None):
     # 数据隔离：来自聊天(ctx 有 requester_wxid)时,只能看/删自己建的;网页(无ctx)=主人看全部
     creator = ctx.get("requester_wxid") if ctx else None
     action = (d.get("action") or "create").lower()
+    if action == "none":                 # LLM 判定这不是定时指令→交回普通聊天处理
+        return {"ok": False, "action": "none", "message": "(非定时任务指令)"}
     if action == "list":
         return {"ok": True, "action": "list", "tasks": list_view(creator_wxid=creator)}
     if action == "cancel":
@@ -413,6 +420,7 @@ def handle_nl(text, ctx=None):
         cron=(d.get("cron") or "").strip() or None,
         once_at=(d.get("once_at") or "").strip() or None,
         mention=mention, use_llm=bool(d.get("use_llm")),
+        persona=(d.get("persona") or "").strip() or None,
         creator_wxid=creator,
         creator_name=(ctx.get("requester_name") if ctx else None))
     if err:

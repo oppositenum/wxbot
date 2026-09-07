@@ -68,6 +68,7 @@
   <button id="watchBtn">监听设置</button>
   <button id="followBtn">跟发设置</button>
   <label class="pill" style="cursor:pointer" title="打开有图/视频的会话时,自动驱动微信解密其媒体"><input type="checkbox" id="autoDecrypt" checked style="vertical-align:middle"> 自动解密媒体</label>
+  <label class="pill" style="cursor:pointer" title="新图片到达时后台驱动微信打开它下载全高清图,这样即使被撤回也清晰(会让微信偶尔翻动)"><input type="checkbox" id="fullresCap" style="vertical-align:middle"> 撤回图抓全图</label>
 </header>
 <main>
   <div class="side">
@@ -611,6 +612,9 @@ $("#botBtn").onclick=async()=>{
   await loadBot(); toast(botRunning?"机器人已启动":"机器人已停止");
 };
 
+// 撤回图抓全图开关：加载状态 + 切换持久化
+(async()=>{ try{ const r=await(await fetch("/api/bot/fullres")).json(); $("#fullresCap").checked=!!r.enabled; }catch(e){} })();
+$("#fullresCap").onchange=async()=>{ await fetch("/api/bot/fullres",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:$("#fullresCap").checked})}); toast($("#fullresCap").checked?"已开启:新图会后台抓全图(微信会偶尔翻动)":"已关闭抓全图"); };
 loadStatus(); loadTab("sessions"); loadBot();
 setInterval(loadStatus, 8000); setInterval(loadBot, 8000);
 // 自动刷新：当前会话消息 2.5s（贴近实时，配合后台撤回快照）、会话列表 12s

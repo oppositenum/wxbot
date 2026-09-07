@@ -269,6 +269,25 @@ def api_bot_watch():
     return jsonify({"ok": True, "watch": rules["watch"]})
 
 
+@app.get("/api/bot/fullres")
+def api_fullres_get():
+    """读取"撤回图片抓全图"开关。"""
+    try:
+        return jsonify({"enabled": bool(botmod.load_rules().get("fullres_capture"))})
+    except Exception:  # noqa: BLE001
+        return jsonify({"enabled": False})
+
+
+@app.post("/api/bot/fullres")
+def api_fullres_set():
+    body = request.get_json(force=True, silent=True) or {}
+    rules = botmod.load_rules()
+    rules["fullres_capture"] = bool(body.get("enabled"))
+    with open(botmod.rules_file(), "w", encoding="utf-8") as f:
+        json.dump(rules, f, ensure_ascii=False, indent=2)
+    return jsonify({"ok": True, "enabled": rules["fullres_capture"]})
+
+
 @app.get("/api/bot/follow")
 def api_bot_follow_get():
     """读取群消息跟发(接龙/+1)配置。"""

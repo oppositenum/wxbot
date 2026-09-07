@@ -200,22 +200,117 @@ def _decrypt_from_dat(chat_username, local_id):
     return None
 
 
-def cache_image(chat_username, local_id):
-    """收到图片时先解密缓存一份到 revokecache/，这样即便之后被撤回、微信删了本地 .dat，
-    仍能显示。已缓存则跳过(便宜的文件判断)。返回是否已就绪。"""
-    p = _revoke_cache_path(chat_username, local_id)
-    if os.path.exists(p):
+def _looks_thumb(data):
+    """粗判是否只是缩略图(小)：优先按像素尺寸，缺 PIL 时按字节数。"""
+    if not data:
         return True
-    img = _decrypt_from_dat(chat_username, local_id)
+    try:
+        from PIL import Image
+        import io
+        w, h = Image.open(io.BytesIO(data)).size
+        return max(w, h) < 400            # 微信正常图短边~500+，<400 基本是缩略图
+    except Exception:  # noqa: BLE001
+        return len(data) < 20000          # 无 PIL：<20KB 视为缩略图
+
+
+def cache_image(chat_username, local_id, upgrade=False):
+    """收到图片时先解密缓存一份到 revokecache/，即便之后被撤回、微信删了本地 .dat 仍能显示。
+    已缓存则跳过；upgrade=True 时若现在能拿到更清晰(更大)的版本则覆盖旧缓存。
+    返回 (是否已就绪, 是否仍是缩略图)。"""
+    p = _revoke_cache_path(chat_username, local_id)
+    existing = None
+    if os.path.exists(p):
+        if not upgrade:
+            try:
+                return True, _looks_thumb(open(p, "rb").read())
+            except Exception:  # noqa: BLE001
+                return True, False
+        try:
+            existing = open(p, "rb").read()
+        except Exception:  # noqa: BLE001
+            existing = None
+    img = _decrypt_from_dat(chat_username, local_id)      # 优先 _b.dat(全分辨率)
     if not img:
-        return False
+        return (existing is not None), _looks_thumb(existing) if existing else True
+    # 已有缓存且新解出的不比旧的大，就别覆盖(避免用缩略图盖掉已缓存的大图)
+    if existing is not None and len(img) <= len(existing):
+        return True, _looks_thumb(existing)
     try:
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "wb") as f:
             f.write(img)
-        return True
+        return True, _looks_thumb(img)
+    except Exception:  # noqa: BLE001
+        return (existing is not None), True
+
+
+import threading  # noqa: E402
+
+# 全分辨率抓取：微信收到图只先下缩略图，全图要"打开看"才下载。为让"撤回的图"也清晰，
+# 在图还没被撤回时，后台驱动微信打开该会话最近的图→触发下载全图→再升级缓存。
+# 每会话去抖，避免频繁翻动微信 UI。
+_fr_lock = threading.Lock()
+_fr_last = {}              # chat -> 上次抓全图时间
+_fr_recent = {}           # chat -> [(lid), ...] 待升级的近期缩略图
+_FR_DEBOUNCE = 25.0
+
+
+def _display_name(chat_username):
+    try:
+        from core import contacts
+        if chat_username.endswith("@chatroom"):
+            for g in contacts.list_groups():
+                if g["username"] == chat_username:
+                    return g.get("name") or chat_username
+        else:
+            for c in contacts.list_contacts():
+                if c["username"] == chat_username:
+                    return c.get("name") or chat_username
+    except Exception:  # noqa: BLE001
+        pass
+    return chat_username
+
+
+def _fullres_worker(chat_username):
+    import time as _t
+    try:
+        from core import harvest
+        name = _display_name(chat_username)
+        harvest.harvest(name, nav=8, log=lambda *_: None)   # 打开最近的图→微信下全图
+        _t.sleep(0.5)
+        with _fr_lock:
+            lids = list(dict.fromkeys(_fr_recent.pop(chat_username, [])))
+        for lid in lids:                                    # 用全图升级缓存
+            try:
+                cache_image(chat_username, lid, upgrade=True)
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _fullres_enabled():
+    """是否开启"撤回图片抓全图"(默认关：它会驱动微信翻图,noVNC 里会有滚动)。
+    在 bot_rules.json 里设 {"fullres_capture": true} 开启。"""
+    try:
+        import json
+        f = os.path.join(config.account_dir(), "bot_rules.json")
+        return bool(json.load(open(f, encoding="utf-8")).get("fullres_capture"))
     except Exception:  # noqa: BLE001
         return False
+
+
+def schedule_fullres(chat_username, local_id):
+    """登记一张缩略图、去抖地后台抓全图并升级缓存(供撤回后仍清晰)。默认关，见 _fullres_enabled。"""
+    import time as _t
+    if not _fullres_enabled():
+        return
+    with _fr_lock:
+        _fr_recent.setdefault(chat_username, []).append(local_id)
+        if _t.time() - _fr_last.get(chat_username, 0) < _FR_DEBOUNCE:
+            return
+        _fr_last[chat_username] = _t.time()
+    threading.Thread(target=_fullres_worker, args=(chat_username,), daemon=True).start()
 
 
 def images_available():

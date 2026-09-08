@@ -82,7 +82,8 @@ def _resolve_revokes(chat, out):
                 prev = snap.get(sid)          # 同一行撤回前的快照(含类型/local_id)
                 if prev and (prev.get("content") or prev.get("type") in (3, 43, 34)):
                     rec = {"content": prev.get("content"), "type": prev.get("type"),
-                           "local_id": prev.get("local_id")}
+                           "local_id": prev.get("local_id"),
+                           "img_hash": prev.get("img_hash")}   # 预存的图片文件hash(撤回后DB映射被清仍可定位)
                     revoked[sid] = rec
                     changed = True
                 else:
@@ -131,6 +132,12 @@ def _resolve_revokes(chat, out):
                         and (m.get("create_time") or 0) > time.time() - 300):
                     try:
                         from core import imgdec
+                        # 预存图片文件hash:撤回会清掉DB里的资源映射(事后 _resource_basehash 返回None),
+                        # 先记下hash,晚到的.dat(下载慢~1s)在撤回后仍能按hash定位、解密显示。
+                        if not snap[sid].get("img_hash"):
+                            h = imgdec._resource_basehash(chat, m["local_id"])
+                            if h:
+                                snap[sid]["img_hash"] = h
                         cp = imgdec._revoke_cache_path(chat, m["local_id"])
                         # 已缓存且已是清晰版就不再重复解密；否则尝试升级
                         need = True
@@ -152,6 +159,17 @@ def _resolve_revokes(chat, out):
             del revoked[sid]
     if changed:
         _save_cache()
+
+
+def revoked_img_hash(chat, local_id):
+    """取某条(常为已撤回)图片消息在撤回前预存的本地文件hash。
+    撤回后微信清掉 DB 资源映射→_resource_basehash 返回 None,靠这个兜底定位 .dat/temp。"""
+    _load_cache()
+    for store in (_REVOKED.get(chat, {}), _LASTSEEN.get(chat, {})):
+        for rec in store.values():
+            if isinstance(rec, dict) and rec.get("local_id") == local_id and rec.get("img_hash"):
+                return rec["img_hash"]
+    return None
 
 
 def _contact_names():

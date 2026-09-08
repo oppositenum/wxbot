@@ -128,6 +128,17 @@ def _dat_filename(md5):
     return None
 
 
+def _effective_basehash(chat_username, local_id):
+    """图片本地文件hash：先查实时 DB 资源映射；撤回后映射被清则退回撤回前预存的 hash。"""
+    h = _resource_basehash(chat_username, local_id)
+    if h:
+        return h
+    try:
+        return messages.revoked_img_hash(chat_username, local_id)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _resource_basehash(chat_username, local_id):
     """从 message_resource.db 的 MessageResourceInfo 取该图的本地文件名 hash。
     这是最全的映射(覆盖 1000+ 媒体消息)，远超 hardlink(仅百余条)。"""
@@ -189,7 +200,7 @@ def is_image_msg(chat_username, local_id):
     try:
         if os.path.exists(_revoke_cache_path(chat_username, local_id)):
             return True
-        h = _resource_basehash(chat_username, local_id)
+        h = _effective_basehash(chat_username, local_id)
         return bool(h and _find_dat_by_hash(h))
     except Exception:  # noqa: BLE001
         return False
@@ -207,7 +218,7 @@ def _decrypt_from_dat(chat_username, local_id):
     key = img_key()
     if not key:
         return None
-    path = _find_dat_by_hash(_resource_basehash(chat_username, local_id))
+    path = _find_dat_by_hash(_effective_basehash(chat_username, local_id))
     if not path:
         md5 = _msg_img_md5(chat_username, local_id)
         if md5:
@@ -226,7 +237,7 @@ def _best_image(chat_username, local_id):
     取其中最大(最清晰)的；仅当完全没有明文时才退回 .dat 离线解密(可能色偏)。
     temp 按 资源hash(fefee..) 命名, 故要按 资源basehash + md5basehash + md5 都查一遍。"""
     md5 = _msg_img_md5(chat_username, local_id)
-    rb = _resource_basehash(chat_username, local_id)
+    rb = _effective_basehash(chat_username, local_id)
     temps = []
     for name in (rb, _basehash(md5) if md5 else None, md5):
         p = _temp_jpg(name) if name else None
@@ -421,7 +432,7 @@ def get_msg_image(chat_username, local_id):
     该 V2 变体的 body 除文件头外并非纯 AES-ECB, 格式尚未完全攻克, 故降级为最后兜底;
     正常显示/存档一律走微信自己解出的明文(保持会话打开→微信自动解到 temp)。
     """
-    rb = _resource_basehash(chat_username, local_id)
+    rb = _effective_basehash(chat_username, local_id)
     md5 = _msg_img_md5(chat_username, local_id)
     # 1: 微信已解密到 temp/ImageUtils 的明文图(最保真; temp 按 资源hash(fefee..) 命名)
     for name in (rb, _basehash(md5) if md5 else None, md5):

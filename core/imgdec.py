@@ -41,30 +41,51 @@ def _key_bytes(key):
     return key.encode()          # 16 字节 ASCII
 
 
+# 各图片格式的明文末字节(用于反推单字节 XOR 密钥)
+_FMT_TAIL = {
+    b"\xff\xd8\xff": 0xD9,        # JPEG (尾 FF D9)
+    b"\x89PNG": 0x82,            # PNG  (尾 IEND CRC ...60 82)
+    b"GIF8": 0x3B,              # GIF  (尾 0x3B)
+}
+
+
+def _tail_byte(head):
+    for sig, tail in _FMT_TAIL.items():
+        if head.startswith(sig):
+            return tail
+    return 0xD9                                          # 默认按 JPEG
+
+
 def decrypt_dat(data, key):
     """V2 结构(实测,经注入微信解密例程逆向确认):
       [6B magic][u32 aes_size][u32 xor_size][1B]  ← 共 15 字节头
-      + AES段(从偏移 15 起, aes_size 字节, AES-128-ECB 全局图片密钥, 含 JPEG 头)
-      + 明文中段
-      + XOR段(末 xor_size 字节, 每字节 ^ xor_key; xor_key = 末字节 ^ 0xD9, 即 JPEG 尾 0xD9)
+      + AES段(AES-128-ECB 全局图片密钥, 含文件头)
+      + XOR段(末 xor_size 字节, 每字节 ^ xor_key)
+    关键(2026-09 修正): **AES 段 = body 里除去 XOR 尾的全部** = len(body)-xor_size,
+    而非 header 里的 aes_size 字段(实测 aes_size=1024 但真正加密到 1040=1024+16;
+    那多出的 16 字节之前被误当明文中段, 破坏了色度→整图发白/偏青)。
+    XOR 密钥按解出的文件头格式反推(JPEG 尾 0xD9 / PNG 尾 0x82 / GIF 尾 0x3B),
+    旧代码硬编码 ^0xD9 只对 JPEG 成立, 会把 PNG 高清图(_h.dat)解坏。
     密钥为账号级 16 字节(实测是 ASCII 串), 由注入抓取一次后存 keys.json。
     """
     if data[:6] != SIG:
         return None
-    aes_size = int.from_bytes(data[6:10], "little")
     xor_size = int.from_bytes(data[10:14], "little")
     body = data[15:]                                    # AES 段从文件偏移 15 开始
-    n = (aes_size // 16) * 16
+    aes_region = len(body) - xor_size                   # XOR 尾之前全部都是 AES 段
+    if aes_region < 0:
+        return None
+    n = (aes_region // 16) * 16
     k = _key_bytes(key)
     try:
         dec = AES.new(k, AES.MODE_ECB).decrypt(body[:n])
     except ValueError:
         return None
-    out = bytearray(dec[:aes_size])
-    out += body[aes_size:len(body) - xor_size]          # 明文中段
+    out = bytearray(dec)
+    out += body[n:aes_region]                            # 非整块余数(若有)按明文
     if xor_size:
-        xk = data[-1] ^ 0xD9
-        out += bytes(b ^ xk for b in body[len(body) - xor_size:])
+        xk = data[-1] ^ _tail_byte(out[:8])
+        out += bytes(b ^ xk for b in body[aes_region:])
     return bytes(out)
 
 

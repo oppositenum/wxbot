@@ -75,16 +75,22 @@ def _ensure_focus_loop():
 _arch = {"thread": None, "seen": set()}
 
 
+_arch_lastfetch = {}          # chat -> 上次为它做UI抓全图的时间(去抖)
+
+
 def _archiver_loop():
-    from core import imgarchive, decrypt as _dec, messages as _msg
+    from core import imgarchive, imgdec, decrypt as _dec, messages as _msg, harvest
     import time as _t
     while True:
         try:
             rules = botmod.load_rules()
-            chats = list(dict.fromkeys(list(rules.get("watch", []))
+            fullres_on = bool(rules.get("fullres_capture"))   # 开关:允许自动开会话抓全图
+            chats = list(dict.fromkeys(_bexpand(rules.get("watch", []))
                                        + ([_focus["chat"]] if _focus.get("chat") else [])))
             _dec.run(force=False, only=["message"])
             described = 0
+            need_fullres = []      # [(chat, display)] 有缩略图-only 新图、需UI补全图的会话
+            now = _t.time()
             for chat in chats:
                 if not chat or chat == "*":
                     continue
@@ -92,26 +98,51 @@ def _archiver_loop():
                     ms = _msg.get_messages(chat, limit=25)
                 except Exception:  # noqa: BLE001
                     continue
-                now = _t.time()
+                chat_needs = False
                 for m in ms:
                     if m.get("type") != 3 or not m.get("local_id"):
                         continue
-                    if (m.get("create_time") or 0) < now - 86400:   # 只存近一天的新图
+                    if (m.get("create_time") or 0) < now - 86400:   # 只处理近一天的图
                         continue
                     key = (chat, m["local_id"])
-                    is_arch = imgarchive.is_archived(chat, m["local_id"])
-                    if key in _arch["seen"] and is_arch:
-                        continue
                     r = imgarchive.archive_image(chat, m["local_id"], meta=m)
                     if r.get("ok"):
-                        _arch["seen"].add(key)
-                        # 高清图且还没读过内容 → 限速读一张(让以后能知道图片内容)
-                        if not r.get("thumb") and described < 2:
-                            if imgarchive.describe(chat, m["local_id"]):
-                                described += 1
+                        if r.get("thumb"):
+                            chat_needs = True         # 还只是缩略图→标记需补全图
+                        elif key not in _arch["seen"]:
+                            _arch["seen"].add(key)
+                            if described < 2 and imgarchive.describe(chat, m["local_id"]):
+                                described += 1        # 高清图→限速读内容存 desc
+                if chat_needs:
+                    need_fullres.append((chat, imgdec._display_name(chat)))
+            # 事件驱动补全图:每轮挑一个"有缩略图新图"的会话,自动开它让微信下全图(串行、去抖、
+            # 让位发送)。这样很多群/私聊也能自动轮到,不用手点。开关关闭时只存现有清晰度。
+            if fullres_on and need_fullres:
+                cand = sorted(need_fullres, key=lambda c: _arch_lastfetch.get(c[0], 0))
+                for chat, disp in cand[:1]:           # 每轮补一个会话(下一轮换下一个)
+                    if _t.time() - _arch_lastfetch.get(chat, 0) < 45:
+                        continue
+                    _arch_lastfetch[chat] = _t.time()
+                    try:
+                        harvest.pull_latest_fullres(disp, log=lambda *_: None)
+                        _t.sleep(0.5)
+                        for m in _msg.get_messages(chat, limit=25):
+                            if m.get("type") == 3 and m.get("local_id") \
+                                    and (m.get("create_time") or 0) > now - 86400:
+                                imgarchive.archive_image(chat, m["local_id"], meta=m)
+                    except Exception:  # noqa: BLE001
+                        pass
         except Exception:  # noqa: BLE001
             pass
-        _t.sleep(25)
+        _t.sleep(20)
+
+
+def _bexpand(watch):
+    """展开 watch 里的 '*' 为所有群(复用 bot 的展开)。"""
+    try:
+        return botmod._expand_watch(watch)
+    except Exception:  # noqa: BLE001
+        return [w for w in watch if w != "*"]
 
 
 def _ensure_archiver():

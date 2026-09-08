@@ -222,24 +222,24 @@ def _decrypt_from_dat(chat_username, local_id):
 
 
 def _best_image(chat_username, local_id):
-    """取本地能拿到的【最大(最清晰)】版本：比较 .dat 解密结果 与 微信已解密到 temp 的明文图。
-    "打开图"后全图常落在 temp/ImageUtils(明文)，未必生成 _b.dat，故要一并比较取最大。"""
-    cands = []
-    d = _decrypt_from_dat(chat_username, local_id)
-    if d:
-        cands.append(d)
+    """取本地【最保真】版本：**微信自解明文(temp/ImageUtils) 优先**(颜色正确),
+    取其中最大(最清晰)的；仅当完全没有明文时才退回 .dat 离线解密(可能色偏)。
+    temp 按 资源hash(fefee..) 命名, 故要按 资源basehash + md5basehash + md5 都查一遍。"""
     md5 = _msg_img_md5(chat_username, local_id)
-    if md5:
-        for name in (_basehash(md5), md5):
-            p = _temp_jpg(name)
-            if p:
-                try:
-                    data = open(p, "rb").read()
-                    if data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n":
-                        cands.append(data)
-                except Exception:  # noqa: BLE001
-                    pass
-    return max(cands, key=len) if cands else None
+    rb = _resource_basehash(chat_username, local_id)
+    temps = []
+    for name in (rb, _basehash(md5) if md5 else None, md5):
+        p = _temp_jpg(name) if name else None
+        if p:
+            try:
+                data = open(p, "rb").read()
+                if data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n":
+                    temps.append(data)
+            except Exception:  # noqa: BLE001
+                pass
+    if temps:
+        return max(temps, key=len)
+    return _decrypt_from_dat(chat_username, local_id)     # 无明文才用离线解密(兜底)
 
 
 def _looks_thumb(data):
@@ -407,42 +407,53 @@ def _temp_jpg(name):
     return None
 
 
+def _valid_img(data):
+    return bool(data) and (data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n"
+                           or data[:4] in (b"GIF8", b"RIFF"))
+
+
 def get_msg_image(chat_username, local_id):
     """返回 (bytes, mime) 或 (None, reason)。
 
-    主路径：用账号级图片密钥直接离线解密 .dat（AES-128-ECB 段 + XOR 段），
-    对任意收到的图都可用、实时、无需在微信里看过、无需注入。
-    兜底：微信已解密到 temp/ImageUtils 的明文图。
+    优先级(2026-09 调整)：**微信自解明文(temp/ImageUtils, 颜色最保真) > 永久存档 >
+    撤回预缓存 > .dat 离线解密**。
+    离线 .dat 解密对这批图片(源自 wxgf)有色彩损坏(整图发白/偏青或色度丢失、发暗发绿)——
+    该 V2 变体的 body 除文件头外并非纯 AES-ECB, 格式尚未完全攻克, 故降级为最后兜底;
+    正常显示/存档一律走微信自己解出的明文(保持会话打开→微信自动解到 temp)。
     """
-    # 主路径：离线解密 .dat（message_resource 映射覆盖最全，其次 hardlink/md5）
-    key = img_key()
-    if key:
-        path = _find_dat_by_hash(_resource_basehash(chat_username, local_id))
-        if not path:
-            md5 = _msg_img_md5(chat_username, local_id)
-            if md5:
-                path = _find_dat(md5)
-        if path:
-            img = decrypt_dat(open(path, "rb").read(), key)
-            if img and (img[:3] == b"\xff\xd8\xff" or img[:8] == b"\x89PNG\r\n\x1a\n"
-                        or img[:4] in (b"GIF8", b"RIFF")):
-                return img, _mime(img)
-    # 兜底1：撤回前预缓存的明文图(微信可能已删本地 .dat)
+    rb = _resource_basehash(chat_username, local_id)
+    md5 = _msg_img_md5(chat_username, local_id)
+    # 1: 微信已解密到 temp/ImageUtils 的明文图(最保真; temp 按 资源hash(fefee..) 命名)
+    for name in (rb, _basehash(md5) if md5 else None, md5):
+        p = _temp_jpg(name) if name else None
+        if p:
+            data = open(p, "rb").read()
+            if _valid_img(data):
+                return data, _mime(data)
+    # 2: 永久存档(revoke-proof, 存的是历史最清晰版)
+    try:
+        from core import imgarchive
+        ab = imgarchive.archived_bytes(chat_username, local_id)
+        if _valid_img(ab):
+            return ab, _mime(ab)
+    except Exception:  # noqa: BLE001
+        pass
+    # 3: 撤回前预缓存的明文图(微信可能已删本地 .dat)
     cp = _revoke_cache_path(chat_username, local_id)
     if os.path.exists(cp):
         data = open(cp, "rb").read()
-        if data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n":
+        if _valid_img(data):
             return data, _mime(data)
-    # 兜底2：微信已解密的明文图
-    md5 = _msg_img_md5(chat_username, local_id)
-    if not md5:
+    # 4: .dat 离线解密(兜底; 颜色可能有偏差, 仅在明文全无时用, 保证撤回也有图可看)
+    key = img_key()
+    if key:
+        path = (_find_dat_by_hash(rb) if rb else None) or (_find_dat(md5) if md5 else None)
+        if path:
+            img = decrypt_dat(open(path, "rb").read(), key)
+            if _valid_img(img):
+                return img, _mime(img)
+    if not md5 and not rb:
         return None, "no-md5"
-    for name in (_basehash(md5), md5):
-        p = _temp_jpg(name)
-        if p:
-            data = open(p, "rb").read()
-            if data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n":
-                return data, _mime(data)
     return None, ("no-img-key(点刷新密钥重新抓取)" if not key else "no-dat(该图未下载到本地)")
 
 

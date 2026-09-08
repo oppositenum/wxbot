@@ -88,7 +88,6 @@ def _archiver_loop():
             chats = list(dict.fromkeys(_bexpand(rules.get("watch", []))
                                        + ([_focus["chat"]] if _focus.get("chat") else [])))
             _dec.run(force=False, only=["message"])
-            described = 0
             need_fullres = []      # [(chat, display)] 有缩略图-only 新图、需UI补全图的会话
             now = _t.time()
             for chat in chats:
@@ -109,10 +108,9 @@ def _archiver_loop():
                     if r.get("ok"):
                         if r.get("thumb"):
                             chat_needs = True         # 还只是缩略图→标记需补全图
-                        elif key not in _arch["seen"]:
-                            _arch["seen"].add(key)
-                            if described < 2 and imgarchive.describe(chat, m["local_id"]):
-                                described += 1        # 高清图→限速读内容存 desc
+                        else:
+                            _arch["seen"].add(key)    # 只存字节(便宜,revoke-proof);
+                            # 视觉读图(desc)不再每收图就调,改为按需(检索/点"读图内容"/机器人回复时)
                 if chat_needs:
                     need_fullres.append((chat, imgdec._display_name(chat)))
             # 事件驱动补全图:每轮挑一个"有缩略图新图"的会话,自动开它让微信下全图(串行、去抖、
@@ -639,11 +637,31 @@ def api_archive_img():
     return send_file(io.BytesIO(data), mimetype="image/jpeg")
 
 
+@app.post("/api/archive/describe")
+def api_archive_describe():
+    """按需用视觉模型读存档图内容(不再每收图就调)。
+    传 {chat,id} 读单张；传 {all:true,limit:N} 补齐最近 N 张未读的。"""
+    from core import imgarchive
+    body = request.get_json(silent=True) or {}
+    if body.get("all"):
+        n = imgarchive.describe_undescribed(limit=int(body.get("limit", 12)))
+        return jsonify({"ok": True, "described": n})
+    chat = body.get("chat", "")
+    lid = body.get("id")
+    if not chat or lid is None:
+        return jsonify({"ok": False, "error": "need chat+id"}), 400
+    d = imgarchive.describe(chat, int(lid), force=bool(body.get("force")))
+    return jsonify({"ok": bool(d), "desc": d})
+
+
 @app.get("/api/archive/search")
 def api_archive_search():
     from core import imgarchive
-    return jsonify({"hits": imgarchive.search(request.args.get("q", ""),
-                                              int(request.args.get("k", 20)))})
+    q = request.args.get("q", "")
+    # 检索即"需要"→对最近未读图按需补 desc(有上限,避免一次性全量调用)
+    if q and request.args.get("describe", "1") != "0":
+        imgarchive.describe_undescribed(limit=int(request.args.get("dmax", 12)))
+    return jsonify({"hits": imgarchive.search(q, int(request.args.get("k", 20)))})
 
 
 # ---------------- 定时任务(自然语言) ----------------

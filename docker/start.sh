@@ -41,6 +41,18 @@ done
 echo "[start] wechat bin = ${WX:-NOT FOUND}"
 ( "$WX" --no-sandbox >/var/log/wechat.log 2>&1 || "$WX" >/var/log/wechat.log 2>&1 ) &
 
+# 收图秒抢：Frida 常驻看护(rename→硬链接抢图，撤回删原图也不丢)。脚本在 /root(挂载持久)。
+CAP=""
+for c in /root/frida_capture_supervisor.py /app/docker/frida_capture_supervisor.py; do
+  [ -f "$c" ] && CAP="$c" && break
+done
+if [ -n "$CAP" ]; then
+  echo "[start] frida capture supervisor = $CAP"
+  ( sleep 15; python3 "$CAP" >/var/log/frida_capture.log 2>&1 ) &
+else
+  echo "[start] frida capture supervisor NOT FOUND (跳过)"
+fi
+
 # 后端(Flask)：与微信同容器，本地驱动 xdotool/解密
 echo "[start] backend -> :5100"
 mkdir -p /app/accounts

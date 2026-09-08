@@ -131,6 +131,25 @@ def describe(chat, local_id, force=False):
     return d
 
 
+def describe_undescribed(limit=12):
+    """按需补齐最近若干张【尚无 desc】的存档图的视觉描述(有上限,避免一次性全量调用)。
+    返回本次成功描述的张数。供检索/UI"读图内容"触发,而非每收图就调。"""
+    from core import llm
+    if not llm.available():
+        return 0
+    idx = _load_index()
+    todo = [e for e in idx.values() if not e.get("desc")]
+    todo.sort(key=lambda e: e.get("ts", 0), reverse=True)
+    n = 0
+    for e in todo[:max(0, limit)]:
+        try:
+            if describe(e["chat"], e["local_id"]):
+                n += 1
+        except Exception:  # noqa: BLE001
+            pass
+    return n
+
+
 def list_archive(limit=300, with_desc=False):
     idx = _load_index()
     items = sorted(idx.values(), key=lambda e: e.get("ts", 0), reverse=True)[:limit]

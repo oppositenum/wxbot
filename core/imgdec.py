@@ -61,18 +61,21 @@ def decrypt_dat(data, key):
       [6B magic][u32 aes_size][u32 xor_size][1B]  ← 共 15 字节头
       + AES段(AES-128-ECB 全局图片密钥, 含文件头)
       + XOR段(末 xor_size 字节, 每字节 ^ xor_key)
-    关键(2026-09 修正): **AES 段 = body 里除去 XOR 尾的全部** = len(body)-xor_size,
-    而非 header 里的 aes_size 字段(实测 aes_size=1024 但真正加密到 1040=1024+16;
-    那多出的 16 字节之前被误当明文中段, 破坏了色度→整图发白/偏青)。
+    关键(2026-09 修正, 经 a70be188 明文对拍确认): AES 段是 **PKCS7 填充** 的——
+    真实明文长度 = header 里的 `aes_size`(如 1024 / 577), 但密文被补齐到 16 的倍数
+    (1024→1040=1024+16 整块填充, 577→592=577+15)。解出后必须 **裁掉末尾 0x10/0x0F...
+    填充**, 只保留前 aes_size 字节; 否则那多出的填充字节被当成图像流塞进 JPEG/PNG
+    偏移 1024 处, 会打乱后续熵解码 → 整图色度损坏(发白/偏青)、高清 PNG 解坏。
     XOR 密钥按解出的文件头格式反推(JPEG 尾 0xD9 / PNG 尾 0x82 / GIF 尾 0x3B),
     旧代码硬编码 ^0xD9 只对 JPEG 成立, 会把 PNG 高清图(_h.dat)解坏。
     密钥为账号级 16 字节(实测是 ASCII 串), 由注入抓取一次后存 keys.json。
     """
     if data[:6] != SIG:
         return None
+    aes_size = int.from_bytes(data[6:10], "little")     # AES 段真实明文长度(去填充)
     xor_size = int.from_bytes(data[10:14], "little")
     body = data[15:]                                    # AES 段从文件偏移 15 开始
-    aes_region = len(body) - xor_size                   # XOR 尾之前全部都是 AES 段
+    aes_region = len(body) - xor_size                   # XOR 尾之前=含 PKCS7 填充的密文段
     if aes_region < 0:
         return None
     n = (aes_region // 16) * 16
@@ -83,6 +86,8 @@ def decrypt_dat(data, key):
         return None
     out = bytearray(dec)
     out += body[n:aes_region]                            # 非整块余数(若有)按明文
+    if 0 < aes_size <= len(out):                         # 裁掉 PKCS7 填充, 只留真实明文
+        del out[aes_size:]
     if xor_size:
         xk = data[-1] ^ _tail_byte(out[:8])
         out += bytes(b ^ xk for b in body[aes_region:])
@@ -167,6 +172,48 @@ def _resource_basehash(chat_username, local_id):
         con.close()
 
 
+def _capture_dir():
+    """Frida 秒抢目录：容器内 /root/wxbot_capture/<wxid>，宿主 = docker/wxdata/wxbot_capture/<wxid>。
+    与账号数据同根(account_dir = <root>/xwechat_files/<wxid>)，故 capture = <root>/wxbot_capture/<wxid>。"""
+    acc = account_dir()
+    if not acc:
+        return None
+    wxid = os.path.basename(acc)                    # wxid_xxx_yyyy
+    root = os.path.dirname(os.path.dirname(acc))    # 去掉 xwechat_files/<wxid>
+    return os.path.join(root, "wxbot_capture", wxid)
+
+
+def _capture_lookup(h):
+    """按本地文件名 hash 在秒抢目录找。返回 (bytes, mime) 或 None。
+    优先明文 .jpg/.png(色彩正确, = 微信自解); 无明文再解密抢到的 .dat(撤回删原图也不丢字节)。"""
+    d = _capture_dir()
+    if not d or not h or not os.path.isdir(d):
+        return None
+    # 明文优先(微信自己解出的 temp 明文被硬链走一份)
+    for ext in (".jpg", ".png", ".jpeg"):
+        p = os.path.join(d, h + ext)
+        if os.path.isfile(p):
+            try:
+                data = open(p, "rb").read()
+                if _valid_img(data):
+                    return data, _mime(data)
+            except Exception:  # noqa: BLE001
+                pass
+    # 明文无 → 解密抢到的加密 .dat(高清优先: _h 全分辨率PNG > _b 500px预览 > 原图 > 缩略)
+    key = img_key()
+    if key:
+        for suf in ("_h.dat", "_b.dat", ".dat", "_t.dat"):
+            p = os.path.join(d, h + suf)
+            if os.path.isfile(p):
+                try:
+                    img = decrypt_dat(open(p, "rb").read(), key)
+                    if _valid_img(img):
+                        return img, _mime(img)
+                except Exception:  # noqa: BLE001
+                    pass
+    return None
+
+
 def _find_dat_by_hash(h):
     """按本地文件名 hash 找加密 .dat。优先大图 _b.dat，其次缩略图 _t.dat。"""
     acc = account_dir()
@@ -201,7 +248,10 @@ def is_image_msg(chat_username, local_id):
         if os.path.exists(_revoke_cache_path(chat_username, local_id)):
             return True
         h = _effective_basehash(chat_username, local_id)
-        return bool(h and _find_dat_by_hash(h))
+        if h and (_find_dat_by_hash(h) or _capture_lookup(h)):
+            return True
+        md5 = _msg_img_md5(chat_username, local_id)
+        return bool(md5 and _capture_lookup(_basehash(md5) or md5))
     except Exception:  # noqa: BLE001
         return False
 
@@ -250,6 +300,12 @@ def _best_image(chat_username, local_id):
                 pass
     if temps:
         return max(temps, key=len)
+    # Frida 秒抢目录(明文优先, 否则解密抢到的 .dat) —— revoke-proof
+    for name in (rb, _basehash(md5) if md5 else None, md5):
+        if name:
+            cap = _capture_lookup(name)
+            if cap:
+                return cap[0]
     return _decrypt_from_dat(chat_username, local_id)     # 无明文才用离线解密(兜底)
 
 
@@ -441,6 +497,12 @@ def get_msg_image(chat_username, local_id):
             data = open(p, "rb").read()
             if _valid_img(data):
                 return data, _mime(data)
+    # 1b: Frida 秒抢目录(revoke-proof；明文优先, 否则解密抢到的 .dat)
+    for name in (rb, _basehash(md5) if md5 else None, md5):
+        if name:
+            cap = _capture_lookup(name)
+            if cap:
+                return cap
     # 2: 永久存档(revoke-proof, 存的是历史最清晰版)
     try:
         from core import imgarchive

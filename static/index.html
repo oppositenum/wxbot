@@ -202,7 +202,7 @@ async function openChat(chat){
   $("#membersBtn").style.display = chat.is_group ? "" : "none";
   $("#harvestBtn").style.display = "";
   render();
-  await loadMessages();
+  await loadMessages(true);   // 打开会话：强制滚到最新(底部)
   maybeAutoDecrypt(chat.username);
   // 保持会话打开：让微信也停在这个会话，新图到达时自动下清晰版(秒撤也来得及)
   fetch("/api/focus",{method:"POST",headers:{"Content-Type":"application/json"},
@@ -235,10 +235,10 @@ $("#harvestBtn").onclick=async()=>{
   btn.disabled=false; btn.textContent=old;
 };
 
-async function loadMessages(){
+async function loadMessages(force){
   if(!current) return;
   const box = $("#msgs");
-  const atBottom = box.scrollHeight-box.scrollTop-box.clientHeight < 60;
+  const atBottom = force || (box.scrollHeight-box.scrollTop-box.clientHeight < 60);
   const r = await fetch("/api/messages?chat="+encodeURIComponent(current.username)+"&limit=60");
   if(!r.ok){ const e=await r.json(); box.innerHTML=`<div class="empty">${e.error||"加载失败"}</div>`; return; }
   const msgs = await r.json();
@@ -306,7 +306,17 @@ async function loadMessages(){
     box.appendChild(div);
   }
   // 在底部才自动滚到底(否则保持用户浏览位置,避免刷新时乱跳)
-  if(atBottom) box.scrollTop=box.scrollHeight; else box.scrollTop=prevTop;
+  if(atBottom){
+    const toBottom=()=>{ box.scrollTop=box.scrollHeight; };
+    toBottom();
+    requestAnimationFrame(toBottom);
+    // 图片/视频异步加载会改变高度，加载完再滚一次，确保停在最新消息
+    box.querySelectorAll("img,video").forEach(el=>{
+      el.addEventListener("load", toBottom, {once:true});
+      el.addEventListener("loadeddata", toBottom, {once:true});
+    });
+    setTimeout(toBottom, 200);
+  } else box.scrollTop=prevTop;
 }
 
 let sending=false;

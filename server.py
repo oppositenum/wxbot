@@ -195,13 +195,25 @@ def do_sync(force=False):
 
 
 def poller():
+    """事件驱动同步：盯着消息库(-wal)的 mtime，微信一写(任何会话的文字/图片/撤回)
+    就【立刻】增量解密刷新解密库(≈0.3s 内),让网页/机器人/按需接口都能马上读到最新
+    消息——而不是死等固定间隔。另设 8s 兜底最大间隔(catch 联系人/会话库等非消息库变动,
+    并防 mtime 偶发漏检)。decrypt.run(force=False) 是增量的(解密库比源新就跳过),无变动
+    时几乎零成本,故可 0.3s 高频探测。配合 Frida 秒抢图片字节 = 文字秒到 + 图片撤回不丢。"""
+    last_mtime = -1.0
+    last_full = 0.0
     while True:
         try:
             if os.path.exists(config.keys_json()):
-                do_sync(force=False)
+                now = time.time()
+                m = _msg_db_mtime()
+                if m != last_mtime or (now - last_full) >= 8:
+                    do_sync(force=False)
+                    last_mtime = m
+                    last_full = now
         except Exception as e:  # noqa: BLE001
             print("poller error:", e)
-        time.sleep(10)
+        time.sleep(0.3)
 
 
 # ---------------- API ----------------

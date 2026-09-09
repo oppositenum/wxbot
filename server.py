@@ -310,6 +310,13 @@ def api_bot_status():
                     "log": _bot["log"][-30:]})
 
 
+@app.get("/api/categories")
+def api_categories():
+    """消息分类字典(slug->中文)。供按类型配置规则/前端筛选用。"""
+    from core import msgclass
+    return jsonify({"categories": msgclass.CATEGORIES})
+
+
 @app.post("/api/bot/start")
 def api_bot_start():
     if not _bot["running"]:

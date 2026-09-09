@@ -91,6 +91,18 @@ def match_rule(rule, msg, is_group=True):
     text = msg.get("content") or ""
     if t == "any":
         return {}
+    if t in ("category", "types"):     # 按消息类型匹配(文字/图片/红包/转账/文件/链接…)
+        want = v
+        if isinstance(want, str):
+            want = [w.strip() for w in re.split(r"[,\s，、]+", want) if w.strip()]
+        cats = set(want or [])
+        cat = msg.get("category")
+        if cat not in cats:
+            return None
+        kw = m.get("value_keyword") or m.get("keyword")   # 可选:类型+关键词双重条件
+        if kw and kw not in text:
+            return None
+        return {"category": cat}
     if t == "keyword":
         return {} if v in text else None
     if t == "regex":
@@ -436,16 +448,21 @@ def run_once(rules, state, log=print):
         fresh = [m for m in msgs if m["local_id"] > last]
         for m in sorted(fresh, key=lambda x: x["local_id"]):
             state[chat] = max(state[chat], m["local_id"])
-            if m["type"] not in (1, 49):
-                continue
             if m["is_self"] and not include_self:
                 continue
-            # 定时任务指令：私聊任意 / 群里@我 时，若像"提醒/定时"就直接建任务并回执(不走闲聊)
-            engage = (not is_group) or m.get("at_me") or m.get("quote_me")
-            if engage and schedule.looks_schedule(m.get("content") or ""):
-                if _handle_schedule_msg(chat, m, is_group, log):
-                    break
+            # 文字/appmsg(引用等)走传统文字规则;图片/红包/转账/文件等非文字类只交给"按类型"规则
+            text_like = m["type"] in (1, 49)
+            # 定时任务指令(仅文字/appmsg)：私聊任意 / 群里@我 时,像"提醒/定时"就直接建任务
+            if text_like:
+                engage = (not is_group) or m.get("at_me") or m.get("quote_me")
+                if engage and schedule.looks_schedule(m.get("content") or ""):
+                    if _handle_schedule_msg(chat, m, is_group, log):
+                        break
             for rule in rules.get("rules", []):
+                mt = (rule.get("match") or {}).get("type")
+                is_cat_rule = mt in ("category", "types")
+                if not is_cat_rule and not text_like:
+                    continue           # 传统文字规则不作用于非文字消息(保持旧行为)
                 g = match_rule(rule, m, is_group)
                 if g is None:
                     continue

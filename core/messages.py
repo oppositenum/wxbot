@@ -12,6 +12,7 @@ import zstandard
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config  # noqa: E402
 from core import db  # noqa: E402
+from core import msgclass  # noqa: E402
 
 _ncache = {"t": 0, "m": {}}
 
@@ -459,6 +460,12 @@ def get_messages(username, limit=50, before=None):
             "at_all": at_all,
             "quote_me": False,
         }
+        # 分类(稳定 slug + 中文名 + meta),供规则按类型匹配/展示徽章
+        cat, cat_name, cat_meta = msgclass.classify(real_type, body)
+        item["category"] = cat
+        item["category_name"] = cat_name
+        if cat_meta:
+            item["meta"] = cat_meta
         if real_type == 49:
             title, refer = _parse_refer(body)
             if refer:

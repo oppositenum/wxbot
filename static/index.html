@@ -294,6 +294,14 @@ async function loadMessages(force){
     }
     if(text!==null) inner+=`<div style="white-space:pre-wrap">${escape_(text)}</div>`;
     if(m.refer) inner+=`<div class="refer">${escape_(m.refer.displayname||"")}: ${escape_(m.refer.content||"")}</div>`;
+    // 分类徽章(非纯文字才显示,让分类结果一眼可见;红包/转账带金额)
+    if(m.category && m.category!=="text"){
+      let tag=m.category_name||m.category;
+      if(m.meta&&m.meta.amount) tag+=` ¥${m.meta.amount}`;
+      const hot=(m.category==="red_packet"||m.category==="transfer");
+      inner+=`<span style="display:inline-block;font-size:11px;padding:1px 6px;border-radius:8px;margin-top:3px;`
+        +`background:${hot?"#ffece0":"#eef0f3"};color:${hot?"#d4380d":"#8a94a6"}">${escape_(tag)}</span>`;
+    }
     inner+=`<div class="time">${fmtTime(m.create_time)}</div>`;
     div.innerHTML=`<div class="bubble">${inner}</div>`;
     box.appendChild(div);

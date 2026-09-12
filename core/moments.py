@@ -267,10 +267,16 @@ def save_settings(patch, revision):
                 raise ValueError('免打扰时间应为 HH:MM')
         if value['quiet_start'] == value['quiet_end']:
             raise ValueError('免打扰开始和结束时间不能相同')
-        if value['auto_publish']:
+        # Only reject when the user actively moves the publish time INTO the quiet
+        # window. Sliding the quiet window over an unchanged publish_time must not
+        # fail the whole save (that made 免打扰 edits appear to "reset" — the form
+        # posts every field at once, so one rejected field discards them all). The
+        # scheduler already skips auto-publish during quiet hours, so a publish_time
+        # that later falls inside quiet stays consistent at runtime.
+        if value['auto_publish'] and value['publish_time'] != previous['publish_time']:
             a,b,t=value['quiet_start'],value['quiet_end'],value['publish_time']
             if (a<=t<b if a<b else t>=a or t<b):
-                raise Conflict('发布时间处于免打扰时段，请调整时间后保存')
+                raise Conflict('发布时间处于免打扰时段，请调整发布时间后保存')
         friends = value['friend_allowlist']
         if not isinstance(friends, list) or len(friends) > 200 or any(not isinstance(x, str) for x in friends):
             raise ValueError('好友范围无效')

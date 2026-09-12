@@ -79,6 +79,28 @@ class Fetch(unittest.TestCase):
         with patch.object(moments_media._opener, 'open', return_value=self._resp(b'not-an-image')):
             self.assertIsNone(moments_media.fetch_image(dict(url='https://shmmsns.qpic.cn/full', key='')))
 
+    def test_token_and_idx_appended_to_url(self):
+        seen = {}
+        def fake_open(req, timeout=None):
+            seen['url'] = req.full_url
+            return self._resp(_png())
+        with patch.object(moments_media._opener, 'open', side_effect=fake_open):
+            moments_media.fetch_image(dict(url='https://shmmsns.qpic.cn/full', key='k1',
+                                           token='tok/en+val', idx='1'))
+        self.assertIn('token=tok%2Fen%2Bval', seen['url'])
+        self.assertIn('idx=1', seen['url'])
+
+    def test_encrypted_payload_degrades_to_none(self):
+        class R:
+            headers = {'x-Enc': '1'}
+            def __enter__(self_): return self_
+            def __exit__(self_, *a): return False
+            def read(self_, n): return _png()  # valid bytes, but flagged encrypted
+        with patch.object(moments_media._opener, 'open', return_value=R()):
+            # x-Enc:1 means the bytes are an ISAAC-64 stream we can't yet undo, so
+            # fetch must not hand the (still-encrypted) payload off as a real image.
+            self.assertIsNone(moments_media.fetch_image(dict(url='https://shmmsns.qpic.cn/full', key='9', token='t', idx='1')))
+
 
 class Describe(unittest.TestCase):
     setUp = fixtures.Moments.setUp

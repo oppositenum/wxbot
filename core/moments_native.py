@@ -196,9 +196,20 @@ class Native:
             self.put_clip(sentinel); self.click(x, y, 3)
             screen = self.shot()
             box = (max(0,x-10), max(0,y-10), min(screen.width,x+190), min(screen.height,y+190))
-            hit = self.label('复制', box)
-            self.click(hit['x'], hit['y'])
+            # The right-click menu stacks 复制/搜一搜/回复/删除 on separate rows.
+            # OCR often fuses the copy glyph into the label ("全复制"/"作复制"), so
+            # match 复制 by substring and collapse rows sharing a line (same y is
+            # the same menu entry read twice), rather than requiring an exact hit.
+            rows=[r for r in self.ocr(box) if '复制' in norm(r['text'])]
+            rows=[r for i,r in enumerate(rows) if not any(abs(r['y']-q['y'])<12 for q in rows[:i])]
+            if len(rows)!=1:raise NativeError('复制菜单项无法唯一识别')
+            self.click(rows[0]['x'], rows[0]['y'])
+            # WeChat writes the clipboard asynchronously after the click; poll
+            # briefly so we read the copied text rather than the stale sentinel.
             result = self.clip()
+            for _ in range(10):
+                if result != sentinel:break
+                time.sleep(.1); result = self.clip()
             return '' if result == sentinel else result
         except NativeError:
             self.key('Escape'); return ''

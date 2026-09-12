@@ -3,6 +3,13 @@
 不发真实微信消息、不调付费模型(全部 mock)。
 跑： python3 tests/test_sched_msg.py
 """
+if __name__ != '__main__' and __import__('os').environ.get('WXBOT_SCRIPT_TEST_CHILD') != '1':
+    import os as _os, subprocess as _subprocess, sys as _sys, pytest as _pytest
+    _r = _subprocess.run([_sys.executable, __file__], env=dict(_os.environ, WXBOT_SCRIPT_TEST_CHILD='1'), text=True, capture_output=True)
+    print(_r.stdout, end='')
+    if _r.stderr: print(_r.stderr, end='', file=_sys.stderr)
+    assert _r.returncode == 0, 'schedule script test failed'
+    _pytest.skip('script test executed in isolated child process', allow_module_level=True)
 import json
 import os
 import sys

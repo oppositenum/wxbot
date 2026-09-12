@@ -122,6 +122,20 @@ def generate(jid):
         sessions.check(data['session'])
         if not isinstance(safe,dict) or safe.get('safe') is not True:
             return dict(skip=True,reason='文案未通过公开检查')
-        emotion=answer.get('emotion')
-        return dict(text=text,emotion=emotion if emotion in ('开心','感叹','愤怒','趣味') else '感悟')
+        emotion=answer.get('emotion') if answer.get('emotion') in ('开心','感叹','愤怒','趣味') else '感悟'
+        return dict(text=text,emotion=emotion,image_prompt=_mood_image_prompt(emotion))
     finally:moments_ai._generating.release()
+
+
+# Abstract mood imagery only — derived from the emotion label, never from the chat,
+# so a picture cannot leak anything the text checks already stripped.
+_MOOD_IMAGE={
+    '开心':'温暖明亮的抽象意境插画，愉悦轻快的氛围，柔和光线，不含文字、不含具体人物',
+    '感叹':'安静辽阔的抽象意境插画，若有所思的氛围，淡淡光影，不含文字、不含具体人物',
+    '愤怒':'冷峻有张力的抽象意境插画，压抑克制的情绪，暗色调，不含文字、不含具体人物',
+    '趣味':'俏皮活泼的抽象意境插画，轻松有趣的氛围，明快配色，不含文字、不含具体人物',
+}
+
+
+def _mood_image_prompt(emotion):
+    return _MOOD_IMAGE.get(emotion,'')

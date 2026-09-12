@@ -125,6 +125,15 @@ class Jobs(unittest.TestCase):
         with self.assertRaises(m.Conflict):m.save_settings(dict(auto_publish=True,publish_time='23:00'),0)
         self.assertFalse(m.settings()['auto_publish'])
 
+    def test_moving_quiet_over_unchanged_publish_time_is_allowed(self):
+        # Regression: the daily publish_time (default 12:30) stays put while the user
+        # shifts 免打扰 to a daytime window that covers it. This must save, not bounce —
+        # otherwise the whole settings patch is rejected and every field "resets".
+        self.ready()
+        s=m.save_settings(dict(auto_publish=True),0)
+        s=m.save_settings(dict(quiet_start='09:00',quiet_end='18:00'),s['revision'])
+        self.assertEqual((s['quiet_start'],s['quiet_end'],s['publish_time']),('09:00','18:00','12:30'))
+
     def test_button_template_rejects_disabled_or_wrong_button(self):
         from PIL import Image
         from pathlib import Path

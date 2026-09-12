@@ -81,7 +81,12 @@ def image_sources(xml_str):
             url = node.text.strip()
             if not _host_ok(url):
                 continue
-            out.append(dict(id=mid or url, url=url, key=(node.get('key') or '').strip()))
+            # Encrypted feeds carry a per-media token/enc_idx; without the token the
+            # CDN answers 400, so they must ride along on the download request.
+            out.append(dict(id=mid or url, url=url,
+                            key=(node.get('key') or '').strip(),
+                            token=(node.get('token') or '').strip(),
+                            idx=(node.get('enc_idx') or '').strip()))
             break
     return out
 
@@ -99,31 +104,18 @@ def _valid_image(data):
     return None
 
 
-def _aes_try(data, key):
-    """Best-effort SNS decrypt when the CDN bytes are not already a plain image.
+def _sns_decrypt(data, source):
+    """Decrypt an encrypted SNS payload (x-Enc:1) → (bytes, mime) or (None, None).
 
-    The exact SNS scheme is confirmed against real data during rollout; until then
-    this attempts AES-CBC with the url key and only returns bytes that decode as a
-    real image, so a wrong guess degrades to "unread" rather than garbage.
+    Reverse-engineering (kanxue "微信4.0朋友圈媒体解密全解析") shows Tencent streams
+    encrypted moments media as `ciphertext XOR ISAAC-64(media.key)` — NOT AES. The
+    exact ISAAC-64 seeding used by the client is not yet reproduced here, so for now
+    an encrypted image degrades to "unread" instead of feeding garbage to the vision
+    model. Plaintext feeds (key="0", no x-Enc) are the common case and already work.
+
+    TODO: seed ISAAC-64 from int(source['key']), XOR the (first 128KB of the)
+    payload, and gate on _valid_image so only a correct decrypt is ever returned.
     """
-    if not key:
-        return None, None
-    try:
-        from Crypto.Cipher import AES
-        raw = key.encode('utf-8', 'ignore')
-        k = (raw + b'\0' * 16)[:16]
-        for iv in (k, b'\0' * 16):
-            if len(data) % 16:
-                break
-            try:
-                out = AES.new(k, AES.MODE_CBC, iv).decrypt(data)
-            except (ValueError, KeyError):
-                continue
-            mime = _valid_image(out)
-            if mime:
-                return out, mime
-    except Exception:
-        pass
     return None, None
 
 
@@ -132,18 +124,27 @@ def fetch_image(source):
     url = source.get('url', '')
     if not _host_ok(url):
         return None
+    # Encrypted feeds require the token (and enc_idx) as query params or the CDN 400s.
+    token = source.get('token', '')
+    if token:
+        sep = '&' if '?' in url else '?'
+        url = '%s%stoken=%s&idx=%s' % (url, sep, urllib.parse.quote(token, safe=''),
+                                       source.get('idx') or '1')
     req = urllib.request.Request(url, headers={'User-Agent': _UA})
     try:
         with _opener.open(req, timeout=_TIMEOUT) as resp:
             data = resp.read(MAX_IMAGE_BYTES + 1)
+            headers = getattr(resp, 'headers', None)
+            encrypted = bool(headers) and str(headers.get('x-Enc', '')).strip() == '1'
     except Exception:
         return None
     if not data or len(data) > MAX_IMAGE_BYTES:
         return None
-    mime = _valid_image(data)
-    if mime:
-        return data, mime
-    data, mime = _aes_try(data, source.get('key', ''))
+    if not encrypted:
+        mime = _valid_image(data)
+        if mime:
+            return data, mime
+    data, mime = _sns_decrypt(data, source)
     if mime:
         return data, mime
     return None

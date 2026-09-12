@@ -1,10 +1,18 @@
 """离线测试：纯图片触发回复(延长去抖) + 对方沉默后的主动跟进(1-2次,不扰)。
 全 mock,不发真实消息、不调付费模型。 跑: python3 tests/test_media_nudge.py
 """
+if __name__ != '__main__' and __import__('os').environ.get('WXBOT_SCRIPT_TEST_CHILD') != '1':
+    import os as _os, subprocess as _subprocess, sys as _sys, pytest as _pytest
+    _r = _subprocess.run([_sys.executable, __file__], env=dict(_os.environ, WXBOT_SCRIPT_TEST_CHILD='1'), text=True, capture_output=True)
+    print(_r.stdout, end='')
+    if _r.stderr: print(_r.stderr, end='', file=_sys.stderr)
+    assert _r.returncode == 0, 'media nudge script test failed'
+    _pytest.skip('script test executed in isolated child process', allow_module_level=True)
 import os
 import sys
 import tempfile
 import time
+from concurrent.futures import TimeoutError
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config  # noqa: E402
@@ -16,7 +24,7 @@ config.wxid = lambda: 'offline-test'
 os.makedirs(os.path.join(_TMP, 'offline-test'), exist_ok=True)
 config.account_dir = lambda: os.path.join(_TMP, 'offline-test')
 
-from core import bot, llm, sender, distill, messages, schedule, decrypt, agent, conversation_state  # noqa: E402
+from core import bot, llm, sender, distill, messages, schedule, decrypt, agent, conversation_state, personalization  # noqa: E402
 
 passed, failed = 0, []
 
@@ -34,6 +42,7 @@ CHAT = "wxid_friend01"
 NOW = time.mktime((2026, 9, 9, 14, 0, 0, 0, 0, -1))
 
 RULES = {"include_self": False, "watch": [CHAT], "poll_interval": 5,
+         "proactive": {"enabled": True},
          "rules": [{"name": "style-reply", "match": {"type": "auto"},
                     "action": {"type": "reply_ai", "persona": "P"}}]}
 
@@ -48,6 +57,7 @@ distill.load_persona = lambda slug: ({"name": "P", "persona": "你是助手",
                                       "samples": []} if slug else None)
 distill.pick_samples = lambda *a, **k: []
 agent.agent_config = lambda r=None: {"enabled": False, "tools": []}
+personalization.update(CHAT, {'conversation_control_enabled': True}, 0)
 bot.send_name_for = lambda u: "朋友"
 bot._sender_name = lambda w: "朋友"
 bot._enrich_media = lambda c, m: (m.get("content") or "")
@@ -57,9 +67,21 @@ schedule.is_scheduled_msg = lambda m, chat=None: bool(
     m.get("is_self") and (m.get("content") or "").startswith("【定时提醒】"))
 
 
-conversation_state.latest = lambda chat, after=0: messages.get_messages(chat, limit=1000)
+# The nudge cases pass their complete observed conversation explicitly.  Keep
+# the refresh read empty so it verifies the ticket without inventing a second
+# message source or waiting on a database poll.
+conversation_state.latest = lambda chat, after=0: []
 
 def run():
+    def run_once_wait(rules, state):
+        futures = bot.run_once(rules, state, log=lambda *_: None) or []
+        for future in futures:
+            try:
+                future.result(timeout=5)
+            except TimeoutError as exc:
+                raise AssertionError("_process_worker timed out") from exc
+        return futures
+
     # ---- 1. _settle_for：含文字批=普通去抖;纯媒体批=更长窗 ----
     check("settle-text", bot._settle_for([{"type": 3}, {"type": 1}]) == bot.SETTLE)
     check("settle-media", bot._settle_for([{"type": 3}]) == bot.MEDIA_SETTLE)
@@ -73,21 +95,23 @@ def run():
     state = bot.load_state()
     bot.load_pending()
     bot._pending.clear()
-    bot.run_once(RULES, state, log=lambda *_: None)   # 首见:只记指针
+    run_once_wait(RULES, state)   # 首见:只记指针
     msg_store["msgs"].append(
         {"local_id": 2, "server_id": 2, "type": 3, "is_self": False,
          "content": "[图片]", "create_time": NOW, "sender": CHAT})
-    bot.run_once(RULES, state, log=lambda *_: None)
+    run_once_wait(RULES, state)
     check("image-queued", CHAT in bot._pending
           and bot._pending[CHAT]["msgs"][0]["type"] == 3)
     # 8s(普通SETTLE)后不该回(纯媒体要等MEDIA_SETTLE)
     bot._pending[CHAT]["last_seen"] = time.time() - (bot.SETTLE + 2)
+    bot._pending[CHAT]["first_seen"] = bot._pending[CHAT]["last_seen"]
     sent.clear()
-    bot.run_once(RULES, state, log=lambda *_: None)
+    run_once_wait(RULES, state)
     check("media-waits-longer", CHAT in bot._pending and not sent)
     # 超过 MEDIA_SETTLE → 回复
     bot._pending[CHAT]["last_seen"] = time.time() - (bot.MEDIA_SETTLE + 2)
-    bot.run_once(RULES, state, log=lambda *_: None)
+    bot._pending[CHAT]["first_seen"] = bot._pending[CHAT]["last_seen"]
+    run_once_wait(RULES, state)
     check("media-replied", sent and sent[-1][0] == CHAT and CHAT not in bot._pending)
     # 图+文字混批:普通 SETTLE 就回
     msg_store["msgs"].append(
@@ -96,10 +120,11 @@ def run():
     msg_store["msgs"].append(
         {"local_id": 4, "server_id": 4, "type": 1, "is_self": False,
          "content": "看这个", "create_time": NOW + 62, "sender": CHAT})
-    bot.run_once(RULES, state, log=lambda *_: None)
+    run_once_wait(RULES, state)
     bot._pending[CHAT]["last_seen"] = time.time() - (bot.SETTLE + 1)
+    bot._pending[CHAT]["first_seen"] = bot._pending[CHAT]["last_seen"]
     sent.clear()
-    bot.run_once(RULES, state, log=lambda *_: None)
+    run_once_wait(RULES, state)
     check("mixed-normal-settle", sent and CHAT not in bot._pending)
 
     # ---- 3. 主动跟进状态机 ----

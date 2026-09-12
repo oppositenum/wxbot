@@ -32,7 +32,9 @@ class Isolated(unittest.TestCase):
         self.account = 'account-A'
         self.roles = {'P': {'name': '角色 P', 'persona': 'ROLE_P', 'samples': []},
                       'Q': {'name': '角色 Q', 'persona': 'ROLE_Q', 'samples': []}}
-        self.rules = {'watch': ['friend-A'], 'rules': [{'name': 'old', 'match': {'type': 'auto'}, 'action': {'type': 'reply_ai', 'persona': 'P'}}]}
+        self.rules = {'watch': ['friend-A'], 'proactive': {'enabled': True},
+                      'rules': [{'name': 'old', 'match': {'type': 'auto'},
+                                 'action': {'type': 'reply_ai', 'persona': 'P'}}]}
         for target, value in [('config.ACCOUNTS_DIR', self.tmp.name+'/accounts'), ('config.WORK_DIR', self.tmp.name+'/work'),
                               ('config.wxid', lambda: self.account), ('core.distill.load_persona', lambda slug: copy.deepcopy(self.roles.get(slug))),
                               ('core.bot.load_rules', lambda: copy.deepcopy(self.rules)), ('core.llm.load_cfg', lambda: {}),

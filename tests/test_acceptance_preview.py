@@ -1,4 +1,16 @@
 """Independent preview integration; only synthetic data and blocked transport."""
+if __name__ != '__main__' and __import__('os').environ.get('WXBOT_ACCEPTANCE_CHILD') != '1':
+    # The preview installs an intentionally process-global audit hook. Run the
+    # unchanged assertions in a real child so the hook cannot contaminate pytest.
+    import os as _os, subprocess as _subprocess, sys as _sys
+    _env = dict(_os.environ, WXBOT_ACCEPTANCE_CHILD='1')
+    _r = _subprocess.run([_sys.executable, __file__], env=_env, text=True,
+                         capture_output=True)
+    if _r.stdout: print(_r.stdout, end='')
+    if _r.stderr: print(_r.stderr, end='', file=_sys.stderr)
+    assert _r.returncode == 0, 'acceptance preview child failed'
+    import pytest as _pytest
+    _pytest.skip('acceptance preview executed in isolated child process', allow_module_level=True)
 import json
 import os
 from pathlib import Path

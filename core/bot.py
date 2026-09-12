@@ -1172,6 +1172,7 @@ def run_once(rules, state, log=print):
     push_on = bool(push_cfg.get("enabled")) and bool(_push_targets(push_cfg))
     push_self = push_cfg.get("include_self", include_self)
     watch_set = set(_expand_watch(rules.get("watch", [])))
+    process_futures = []
     # push.sources 缺省=监听列表本身;含 '*' 展开为所有群
     push_src = set(_expand_watch(push_cfg.get("sources") or list(watch_set))) if push_on else set()
     # 防回环:推送目标(微信好友/群)本身绝不作为推送来源——否则"推进去的消息"又被当新消息推出去→乱发
@@ -1290,7 +1291,7 @@ def run_once(rules, state, log=print):
             send_ledger.Ledger().hold_reply(chat, p)
             _pending.pop(chat, None)
             _processing.add(chat)
-            _process_pool.submit(_process_worker, chat, p, rules, log)
+            process_futures.append(_process_pool.submit(_process_worker, chat, p, rules, log))
     # 群消息跟发(接龙/+1)——与上面的回复逻辑并行独立，互不影响
     try:
         run_follow(rules, state, log)
@@ -1298,6 +1299,7 @@ def run_once(rules, state, log=print):
         log(f"[跟发] error: {e}")
     save_pending()
     save_state(state)
+    return process_futures
 
 
 def _process_worker(chat, p, rules, log):

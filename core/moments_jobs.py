@@ -167,6 +167,46 @@ def receipt(job, before, since):
     return matches[0]['id'] if len(matches)==1 else ''
 
 
+def make_publish_image(prompt):
+    """Text-to-image for an auto post; returns an asset id or None on any failure.
+
+    Never raises: a picture is a nice-to-have, so image trouble degrades the post
+    to text-only rather than losing it. Uses the same gen_image path as chat.
+    """
+    import io
+    from core import llm
+    value=m.settings()
+    if not value.get('publish_images') or not m.capabilities().get('image_publish'):
+        return None
+    if not isinstance(prompt,str) or not prompt.strip():
+        return None
+    try:
+        data=llm.gen_image(prompt.strip(),cfg=llm.load_cfg())
+        if not data:return None
+        return m.upload(io.BytesIO(data))['id']
+    except Exception:
+        return None
+
+
+# Chat traffic always preempts Moments. An automatic job that keeps losing the
+# WeChat window would otherwise re-locate (and visibly re-copy) every tick forever,
+# so each yield is counted and spaced out, and we give up after MAX_CHAT_YIELD.
+MAX_CHAT_YIELD = 6
+YIELD_BACKOFF = 90
+
+
+def yield_to_chat(job, message):
+    p=job['payload'];p['attempts']=p.get('attempts',0)+1
+    with db() as c:
+        if p['attempts']>=MAX_CHAT_YIELD:
+            c.execute("UPDATE moments_jobs SET state='failed',updated=?,payload=?,message=? WHERE id=?",
+                      (time.time(),m._json(p),'多次因聊天占用未能完成，已停止重试；未进入提交阶段',job['id']))
+        else:
+            p['retry_at']=time.time()+YIELD_BACKOFF
+            c.execute("UPDATE moments_jobs SET state='queued',updated=?,payload=?,message=? WHERE id=?",
+                      (time.time(),m._json(p),message,job['id']))
+
+
 def process_one():
     from core import docker_wx, moments_ai
     from core.moments_native import Native
@@ -175,7 +215,9 @@ def process_one():
         r=c.execute("SELECT * FROM moments_jobs WHERE state='queued' ORDER BY CASE origin WHEN 'manual' THEN 0 ELSE 1 END,created LIMIT 1").fetchone()
         if not r:return
         if json.loads(r['session'])!=sessions.check():return
-        job=row(r);c.execute("UPDATE moments_jobs SET state='preparing',updated=?,message='正在准备' WHERE id=?",(time.time(),job['id']))
+        job=row(r)
+        if job['payload'].get('retry_at',0)>time.time():return  # backing off after a chat-priority yield
+        c.execute("UPDATE moments_jobs SET state='preparing',updated=?,message='正在准备' WHERE id=?",(time.time(),job['id']))
     initiated=False;n=None
     try:
         why=policy(job,m.settings(),time.time())
@@ -189,16 +231,23 @@ def process_one():
                 from core import moments_reflection
                 result=moments_reflection.generate(job['id'])
                 if result.get('skip'):finish(job['id'],'skipped',result['reason']);return
-                p.update(text=result['text'],emotion=result['emotion'])
-            elif job['kind']=='publish':p['text']=moments_ai.generate_post(p['moods'])
+                p.update(text=result['text'],emotion=result['emotion'],image_prompt=result.get('image_prompt',''))
+            elif job['kind']=='publish':
+                result=moments_ai.generate_post(p['moods'])
+                p.update(text=result['text'],image_prompt=result.get('image_prompt',''))
             else:
                 item=m.detail(p['feed_id'])
                 result=moments_ai.generate(dict(feed_id=item['id'],feed_digest=item['digest'],reply_id=p['reply_id']),decide=True)
                 if result.get('skip'):finish(job['id'],'skipped',result['reason']);return
                 p.update(text=result['text'],reply_id=result['reply_id'],snapshot=dict(digest=result['feed_digest']))
             with db() as c:c.execute('UPDATE moments_jobs SET payload=? WHERE id=?',(m._json(p),job['id']))
+        if job['kind']=='publish' and job['origin']!='manual' and p.get('image_prompt') and not p.get('assets'):
+            aid=make_publish_image(p['image_prompt'])
+            if aid:
+                p['assets']=[aid]
+                with db() as c:c.execute('UPDATE moments_jobs SET payload=? WHERE id=?',(m._json(p),job['id']))
         if docker_wx.priority_pending() or not docker_wx.UI_LOCK.acquire(timeout=2):
-            with db() as c:c.execute("UPDATE moments_jobs SET state='queued',message='等待聊天操作完成' WHERE id=?",(job['id'],))
+            yield_to_chat(job,'等待聊天操作完成，稍后重试')
             return
         try:
             n=Native()
@@ -233,8 +282,7 @@ def process_one():
         # Chat traffic has priority over Moments. Keep the automatic job queued
         # so a temporary navigation timeout does not permanently lose a reply.
         if not initiated and ('聊天优先' in raw or '朋友圈定位超时' in raw):
-            with db() as c:
-                c.execute("UPDATE moments_jobs SET state='queued',updated=?,message='聊天操作占用微信，稍后重试' WHERE id=?",(time.time(),job['id']))
+            yield_to_chat(job,'聊天操作占用微信，稍后重试')
             return
         message=raw if isinstance(exc,(m.Conflict,m.Unavailable,ValueError)) else '客户端或模型操作异常'
         finish(job['id'],'uncertain' if initiated else 'failed',message+('；可能已发送，不会自动重发' if initiated else '；未进入提交阶段'))

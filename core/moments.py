@@ -29,6 +29,7 @@ DEFAULTS = dict(revision=0, sync_enabled=False, sync_interval_minutes=10,
                 auto_comment=False, auto_publish=False, chat_reflection=False, quiet_start='22:00', quiet_end='08:00',
                 daily_comment_limit=0, daily_publish_limit=1, min_interval_minutes=0,
                 friend_allowlist=[], publish_time='12:30', moods=['喜悦', '平静', '趣事'],
+                publish_images=True, publish_web_opinions=True,
                 comment_since=0, publish_since=0)
 
 
@@ -155,36 +156,60 @@ def parse_feed(tid, author, xml):
                 title=_text(t, 'ContentObject/title', 1000), comments=comments, likes=likes)
 
 
-def sync():
-    """Decrypt into a temporary snapshot; commit only after complete validation.
+@contextlib.contextmanager
+def _decrypted_timeline():
+    """Decrypt sns.db into a temporary snapshot and yield a read-only connection.
 
     No GUI navigation, model/network calls or key capture. Account root is pinned.
     """
+    with sessions.bind() as token:
+        base = config.db_storage_dir()
+        if not base or config._strip_folder_suffix(Path(base).parent.name) != token['account']:
+            raise Unavailable('当前账号的数据目录无法确认')
+        src = Path(base) / 'sns/sns.db'
+        if not src.is_file():
+            raise Unavailable('尚未发现朋友圈缓存，请先在微信中打开朋友圈')
+        from core.decrypt import decrypt_db
+        with open(config.keys_json()) as f:
+            key = json.load(f).get('sns/sns.db')
+        if not key:
+            raise Unavailable('当前账号缺少朋友圈读取密钥，请在已有密钥管理中处理')
+        with tempfile.TemporaryDirectory(prefix='wx-moments-') as d:
+            p = str(Path(d) / 'sns.db')
+            decrypt_db(str(src), key, p)
+            with contextlib.closing(sqlite3.connect('file:' + p + '?mode=ro', uri=True)) as c:
+                if c.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+                    raise Unavailable('微信正在同步，缓存快照不完整，请稍后重试')
+                yield c
+
+
+def sync():
+    """Commit the timeline snapshot only after complete validation."""
     if not _sync_lock.acquire(blocking=False):
         raise Conflict('朋友圈正在同步，请稍后刷新')
     try:
-        with sessions.bind() as token:
-            base = config.db_storage_dir()
-            if not base or config._strip_folder_suffix(Path(base).parent.name) != token['account']:
-                raise Unavailable('当前账号的数据目录无法确认')
-            src = Path(base) / 'sns/sns.db'
-            if not src.is_file():
-                raise Unavailable('尚未发现朋友圈缓存，请先在微信中打开朋友圈')
-            from core.decrypt import decrypt_db
-            with open(config.keys_json()) as f:
-                key = json.load(f).get('sns/sns.db')
-            if not key:
-                raise Unavailable('当前账号缺少朋友圈读取密钥，请在已有密钥管理中处理')
-            with tempfile.TemporaryDirectory(prefix='wx-moments-') as d:
-                p = str(Path(d) / 'sns.db')
-                decrypt_db(str(src), key, p)
-                with contextlib.closing(sqlite3.connect('file:' + p + '?mode=ro', uri=True)) as c:
-                    if c.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
-                        raise Unavailable('微信正在同步，缓存快照不完整，请稍后重试')
-                    rows = c.execute('SELECT tid,user_name,content FROM SnsTimeLine').fetchall()
-            return ingest(rows)
+        with _decrypted_timeline() as c:
+            rows = c.execute('SELECT tid,user_name,content FROM SnsTimeLine').fetchall()
+        return ingest(rows)
     finally:
         _sync_lock.release()
+
+
+def raw_content(feed_id):
+    """Just-in-time raw timeline XML for one feed (image url/key live only here).
+
+    Decrypts on demand and returns the single matching row's XML; the url/key it
+    contains are used transiently for media download and never persisted.
+    """
+    fid = _id(feed_id)
+    with _decrypted_timeline() as c:
+        for tid, _user, content in c.execute('SELECT tid,user_name,content FROM SnsTimeLine'):
+            try:
+                if _id(tid) == fid:
+                    return content
+            except (ValueError, TypeError):
+                continue
+    return None
 
 
 def ingest(rows):
@@ -230,7 +255,7 @@ def save_settings(patch, revision):
             raise Conflict('设置已更新，请重新加载后保存')
         previous = dict(value)
         value.update(patch)
-        for key in ['sync_enabled', 'auto_comment', 'auto_publish', 'chat_reflection']:
+        for key in ['sync_enabled', 'auto_comment', 'auto_publish', 'chat_reflection', 'publish_images', 'publish_web_opinions']:
             if type(value[key]) is not bool:
                 raise ValueError('开关必须是布尔值')
         for key, lo, hi in [('sync_interval_minutes', 5, 1440), ('daily_comment_limit', 0, 1000),

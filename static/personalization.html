@@ -1,0 +1,152 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>联系人画像与专属人设</title>
+<style>
+body{font:15px/1.6 system-ui,sans-serif;color:#23302a;background:#f8faf9;margin:0}main{max-width:1050px;margin:auto;padding:28px}h1{font-size:26px}h2{font-size:19px;margin-top:26px}section{border-top:1px solid #d5dfd8;padding:16px 0}input,select,button{font:inherit;padding:6px;margin:4px;border:1px solid #b9c9bf;border-radius:4px}button{background:#edf4ef;cursor:pointer}button:disabled{opacity:.5}label{display:inline-block;margin-right:10px}.muted{color:#60756a;font-size:13px}.error{color:#9b302d;white-space:pre-wrap}table{border-collapse:collapse;width:100%}td,th{text-align:left;border-bottom:1px solid #dde5df;padding:8px;vertical-align:top}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#edf2ee;padding:12px}#contacts{width:100%;max-width:600px}details{margin:8px 0}a{color:#176747}.evidence{font-size:12px;max-width:300px;overflow-wrap:anywhere}
+</style><main>
+<h1>联系人画像与专属人设</h1><p>画像帮助选择表达方式，人设决定机器人角色。事实记忆仍在原有画像中，本页不复制聊天或事实。</p>
+<label id="tokenLabel">管理员 Token <input id="token" type="password" autocomplete="off"></label><button id="unlock">加载管理数据</button>
+<p id="authHelp" class="muted">Token 只保留在本页内存。加载页面不扫描历史、不调用模型；本页所有操作都不会发送微信。只有明确批准模型分析批次会调用模型。</p><p id="error" class="error" role="alert"></p>
+<div id="workspace" hidden>
+<section><h2>全局人设与旧规则迁移</h2><p id="migration"></p><select id="global"></select><button id="saveGlobal">核对并保存全局</button><details><summary>旧规则清单与冲突</summary><pre id="legacy"></pre></details></section>
+<section id="templateSection" hidden><h2>默认人设与偏好模板</h2>
+<p class="muted">没有独立设置的好友自动使用默认模板。已有设置保持原样，可选择好友后点击“一键套用”。只复制角色与交流偏好，不复制事实、聊天、历史证据或主动消息设置；群和系统账号不继承。</p>
+<label>模板来源 <select id="templateSource"></select></label><label><input id="templateEnabled" type="checkbox">未配置好友自动继承</label>
+<button id="saveTemplate">用所选好友设置保存模板</button><pre id="templateSummary"></pre></section>
+<section><h2>联系人或群</h2><select id="contacts"></select><p class="muted">名称旁显示稳定 ID；同名联系人不会共用配置。群仅设置群角色，不读取私聊偏好。</p>
+<div id="detail" hidden><label>角色 <select id="persona"></select></label><p id="effective"></p><button id="applyTemplate" hidden>一键套用默认模板</button><p id="templateInherited" class="muted"></p>
+<label><input id="enabled" type="checkbox">启用表达风格适配</label><label><input id="auto" type="checkbox">允许自动更新交流偏好</label><label><input id="closure" type="checkbox">启用会话结束与不主动联系控制</label><button id="saveSettings">保存角色与开关</button>
+<p class="muted">新增开关默认关闭，保存后才对当前联系人生效；未设置专属角色时保留现有规则或继承已配置的全局人设。</p><p id="sufficiency"></p><table><thead><tr><th>交流偏好</th><th>值 / 锁定</th><th>来源与证据</th><th>操作</th></tr></thead><tbody id="prefs"></tbody></table><button id="clear">清空交流偏好</button>
+<p class="muted">修改会记录为管理员手动设置。锁定项不会被自动更新覆盖；删除不删除审计记录。可同时关闭自动更新以保持清空状态。未知表示资料不足。本版自动提取仅接受明确的长期反馈，不从短句推断性格。</p>
+<details><summary>版本与修改记录（最近 30 次）</summary><pre id="audit"></pre></details>
+<h2>本地上下文预览</h2><input id="query" placeholder="例如：请详细解释这道题" size="40"><button id="preview">预览脱敏组装（0 模型调用）</button><pre id="previewResult">尚未预览</pre></div></section>
+<section><h2>限量构建 / 增量更新</h2><p>选择最多 10 位私聊联系人；每位每批最多扫描 1000 条。只读取文本及来源，不提取机器人回复或系统消息。中断后从已提交的位置恢复，失败由你点击重试，不在后台自动运行。</p>
+<select id="batchContacts" multiple size="6" style="width:100%"></select><label>每位扫描条数 <input id="limit" type="number" min="1" max="1000" value="100"></label><button id="scan">仅预览扫描范围</button>
+<p class="muted">使用本地明确反馈提取规则：预计模型调用 0 次，模型费用 0。不会生成完整人格画像。</p><div id="ranges"></div><h2>任务进度</h2><button id="refreshJobs">刷新进度</button><div id="jobs"></div></section></div>
+<section id="modelDrafts" hidden>
+<h2>模型辅助画像草稿（需主动批准调用）</h2>
+<p>明确偏好规则仅在勾选允许自动更新后运行，不调用模型。下面的分析会调用当前配置的模型，结果只生成草稿，审核前不生效。表达习惯不等于接收偏好，尝试策略也不是确定偏好。</p>
+<p id="conversationStatus"></p>
+<label>开始 <input id="analysisStart" type="date"></label><label>结束（含当日） <input id="analysisEnd" type="date"></label>
+<label>时间片段 <input id="analysisSegments" type="number" min="2" max="12" value="6"></label>
+<label>本任务最多调用 <input id="analysisCalls" type="number" min="1" max="6" value="3"></label>
+<label>任务 token 估算预算 <input id="analysisBudget" type="number" min="2000" max="180000" value="60000"></label>
+<button id="analysisPreview">选择当前联系人并预览样本（不调用模型）</button>
+<p class="muted">每个时间片段取最多三条相邻用户文本，保留时间与片段编号；已存在的语音转写标明来源。不提供机器人旧消息，因为旧库无法可靠区分普通回复、定时、主动跟进和工具输出。每批至少需要跨片段证据，否则可以没有建议。Token 是保守近似，不是实际账单；未配置可靠价格时不显示费用金额。</p>
+<div id="analysisJobs"></div><div id="analysisView"></div>
+</section>
+
+</main><script>
+'use strict';
+const $=s=>document.querySelector(s); let catalog=null,detail=null,contact='';
+const defaults={length:'适中',tone:'温和',emoji:'少量',jokes:'接受',advice:'视情况',followup:'少追问',address:'朋友',language:'中文',avoid:'无'};
+const source={contact:'联系人指定',global:'继承全局',legacy_global:'继承现有唯一规则人设（待显式迁移）',legacy_rule_conflict:'旧规则冲突：角色随原触发规则变化，尚未迁移',fallback:'无效配置后的内置回退',builtin:'内置默认助手'};
+function text(tag,s){let e=document.createElement(tag);e.textContent=s;return e;}
+async function api(path,body){let opts={headers:{'X-Wxbot-Admin-Token':$('#token').value,'X-Wxbot-Local-Admin':'1'}};if(body!==undefined){opts.method='POST';opts.headers['Content-Type']='application/json';opts.body=JSON.stringify({...body,session:catalog.session});}const r=await fetch('/api/personalization'+path,opts);const d=await r.json();if(!r.ok)throw Error(d.error||'请求失败');if(d.session&&catalog&&(d.session.account!==catalog.session.account||d.session.generation!==catalog.session.generation)){$('#workspace').hidden=true;$('#modelDrafts').hidden=true;detail=null;contact='';analysisDetail=null;$('#analysisView').replaceChildren();throw Error('账号已变化，请点击加载管理数据重新进入，旧表单未保存。');}return d;}
+function run(fn){return async()=>{ $('#error').textContent='';try{await fn();}catch(e){$('#error').textContent=e.message;}};}
+function roles(select,value,global=false){select.replaceChildren(new Option(global?'内置默认助手':'使用全局人设（默认）',''));for(const p of catalog.personas)select.add(new Option(p.name,p.slug));if(value&&!catalog.personas.some(p=>p.slug===value))select.add(new Option('失效引用：'+value,value));select.value=value||'';}
+async function load(){catalog=null;detail=null;analysisDetail=null;$('#modelDrafts').hidden=true;$('#analysisView').replaceChildren();$('#workspace').hidden=true;catalog=await api('');$('#workspace').hidden=false;$('#legacy').textContent=JSON.stringify(catalog.legacy,null,2);$('#migration').textContent=catalog.global_config.revision?'已使用统一解析，旧规则不会覆盖联系人设置。':'尚未迁移：保留旧规则的实际角色。首次保存全局必须与当前唯一规则角色一致；冲突时拒绝自动迁移。';roles($('#global'),catalog.global_config.revision?catalog.global_config.persona_id:catalog.legacy.unique,true);$('#contacts').replaceChildren(new Option('请选择联系人或群',''));$('#batchContacts').replaceChildren();for(const c of catalog.contacts){const label=c.name+' · '+c.username;$('#contacts').add(new Option(label,c.username));if(!c.username.endsWith('@chatroom'))$('#batchContacts').add(new Option(label,c.username));}if(contact&&catalog.contacts.some(c=>c.username===contact)){$('#contacts').value=contact;await show();}renderTemplate();renderJobs();}
+async function show(){if(analysisDetail&&analysisDetail.job.contact!==$('#contacts').value){analysisDetail=null;$('#analysisView').replaceChildren();}contact=$('#contacts').value;$('#detail').hidden=!contact;if(!contact){$('#modelDrafts').hidden=true;return;}detail=await api('/contact?contact='+encodeURIComponent(contact));roles($('#persona'),detail.config.persona_id);$('#effective').textContent='实际生效：'+detail.effective.name+' · '+(source[detail.effective.source]||detail.effective.source)+(detail.effective.error?' · '+detail.effective.error:'');$('#enabled').checked=detail.config.personalization_enabled;$('#auto').checked=detail.config.auto_update;$('#closure').checked=detail.config.conversation_control_enabled===true;const group=contact.endsWith('@chatroom');$('#enabled').disabled=group;$('#auto').disabled=group;$('#closure').disabled=group;$('#clear').disabled=group;$('#sufficiency').textContent=group?'群聊不加载任何私聊交流画像。':Object.values(detail.config.preferences).some(p=>p.value!=='未知')?'以下是有记录的偏好；没有证据的其他方面仍未知。':'未填写的交流偏好使用系统默认值；填写后可随时覆盖。';$('#prefs').replaceChildren();for(const [field,values] of Object.entries(catalog.fields)){if(group)break;let p=detail.config.preferences[field]||{},row=document.createElement('tr');row.append(text('td',catalog.labels[field]));let cell=document.createElement('td'),input=values?document.createElement('select'):document.createElement('input');if(values)for(const value of values)input.add(new Option(value,value));input.value=p.value||defaults[field]||'适中';let lock=document.createElement('input');lock.type='checkbox';lock.checked=!!p.locked;let label=text('label','锁定');label.prepend(lock);cell.append(input,label);row.append(cell);let ev=text('td',p.source?({'user_explicit':'明确偏好 · 用户表达','admin_manual':'明确偏好 · 管理员设置','inferred':'暂定推断'}[p.source]||p.source)+'\n消息 ID：'+(p.evidence_ids||[]).join(', ')+'\n'+(p.source==='inferred'?'模型自评（非校准概率）：':'来源标注：')+p.confidence+'\n时间：'+new Date(p.updated*1000).toLocaleString()+'\n范围：'+p.scope:'系统默认值');ev.className='evidence';ev.style.whiteSpace='pre-wrap';row.append(ev);let actions=document.createElement('td'),save=text('button','保存'),del=text('button','删除');save.onclick=run(()=>savePatch({preferences:{[field]:{value:input.value,locked:lock.checked}}}));del.onclick=run(()=>savePatch({preferences:{[field]:null}}));actions.append(save,del);row.append(actions);$('#prefs').append(row);}$('#audit').textContent=JSON.stringify(detail.audit,null,2);$('#applyTemplate').hidden=!catalog.default_template?.revision||group;$('#templateInherited').textContent=detail.config.inherited_template?'当前继承默认模板；单独保存后成为独立配置。':'';refreshAnalysisPanel();}
+async function savePatch(patch){await api('/contact',{contact,patch,revision:detail.config.revision});await show();}
+function renderJobs(){const box=$('#jobs');box.replaceChildren();for(const j of catalog.jobs){const line=document.createElement('p');const labels={ready:'待继续',done:'完成',failed:'失败，进度保留'};line.append(text('span',j.contact+' · '+(j.kind==='live'?'实时明确反馈':'历史构建')+' · '+(labels[j.status]||j.status)+' · '+j.scanned+'/'+j.total+' 条 · ID '+j.id+(j.error?' · '+j.error:'')));if(j.status!=='done'){const b=text('button',j.status==='failed'?'重试下一批（最多 50 条）':'继续下一批（最多 50 条）');b.onclick=run(async()=>{b.disabled=true;try{await api('/history/step',{id:j.id});}finally{catalog=await api('');renderJobs();if(contact)await show();}});line.append(b);}box.append(line);}if(!catalog.jobs.length)box.append(text('p','尚无任务。'));}
+function renderTemplate(){
+  const t=catalog.default_template;$('#templateSection').hidden=!t;if(!t)return;
+  $('#templateSource').replaceChildren();
+  for(const c of catalog.contacts){if(c.username.endsWith('@chatroom')||c.username.startsWith('gh_')||['filehelper','newsapp','notifymessage','weixin',catalog.session.account].includes(c.username))continue;$('#templateSource').add(new Option(c.name+' · '+c.username,c.username));}
+  $('#templateSource').value=t.template_source||'wxid_vn2w1t3doieu22';$('#templateEnabled').checked=t.template_enabled===true;
+  $('#templateSummary').textContent=t.revision?JSON.stringify({人设:t.persona_id,自动继承:t.template_enabled,偏好:Object.fromEntries(Object.entries(t.preferences||{}).map(([k,v])=>[catalog.labels[k]||k,v.value]))},null,2):'尚未保存模板';
+}
+$('#saveTemplate').onclick=run(async()=>{if(!confirm('将所选好友的人设、偏好和画像开关保存为默认模板？未配置好友将按自动继承开关使用它。'))return;await api('/template',{contact:$('#templateSource').value,revision:catalog.default_template.revision,enabled:$('#templateEnabled').checked});await load();});
+$('#applyTemplate').onclick=run(async()=>{if(!contact)throw Error('请先选择好友');if(!confirm('用默认模板替换这位好友的人设和偏好？原配置保留在审计记录中。'))return;await api('/template/apply',{contact,revision:detail.config.revision,template_revision:catalog.default_template.revision});await show();});
+$('#unlock').onclick=run(load);$('#contacts').onchange=run(show);
+$('#saveSettings').onclick=run(()=>savePatch({persona_id:$('#persona').value||null,personalization_enabled:$('#enabled').checked,auto_update:$('#auto').checked,conversation_control_enabled:$('#closure').checked}));
+$('#clear').onclick=run(async()=>{if(!confirm('清空此联系人的交流偏好？事实记忆与角色不变，审计保留。'))return;await savePatch({preferences:Object.fromEntries(Object.keys(detail.config.preferences).map(k=>[k,null]))});});
+$('#saveGlobal').onclick=run(async()=>{if(!confirm('已核对旧规则清单？此操作显式确立全局人设；继承者随全局变化，显式绑定者不变。'))return;await api('/global',{persona_id:$('#global').value||null,revision:catalog.global_config.revision,accept_migration:true});await load();});
+$('#preview').onclick=run(async()=>{$('#previewResult').textContent=JSON.stringify(await api('/preview',{contact,query:$('#query').value}),null,2);});
+$('#scan').onclick=run(async()=>{const chosen=Array.from($('#batchContacts').selectedOptions).map(x=>x.value);const data=await api('/history/preview',{contacts:chosen,limit:Number($('#limit').value)});const box=$('#ranges');box.replaceChildren(text('p','联系人 '+data.contact_count+' 位；预计模型调用 '+data.model_calls+' 次'));for(const p of data.previews){const row=document.createElement('div');row.append(text('pre',JSON.stringify(p,null,2)));const b=text('button','确认范围并创建任务（暂不扫描执行）');b.disabled=p.total===0;b.onclick=run(async()=>{await api('/history/create',p);b.disabled=true;catalog=await api('');renderJobs();});row.append(b);box.append(row);}});
+$('#refreshJobs').onclick=run(async()=>{catalog=await api('');renderJobs();});
+let analysisDetail=null;
+const categoryLabels={expression:'观察到的表达习惯（不控制回复）',reception:'有依据的接收偏好',strategy:'可尝试回复策略（弱参考）'};
+function refreshAnalysisPanel(){
+  $('#modelDrafts').hidden=!(catalog&&catalog.model_drafts&&contact&&!contact.endsWith('@chatroom'));
+  if($('#modelDrafts').hidden)return;
+  const state=detail.conversation||{};
+  $('#conversationStatus').textContent='主动联系状态：'+(!detail.config.conversation_control_enabled?'未启用会话结束控制，沿用原主动跟进规则；已有结束记录不删除':state.no_proactive?'长期不主动联系（新入站不会撤销）':state.paused?'本次交流已结束，暂停主动跟进':'允许按现有规则判断主动跟进')+'。普通回复和独立定时任务不因此禁用。';
+  $('#analysisJobs').replaceChildren();
+  for(const job of detail.analysis_jobs||[]){
+    const button=text('button','查看分析 '+job.id.slice(0,8)+' · '+job.status+' · 已预留 '+job.calls_reserved+'/'+job.max_calls+' 次');
+    button.onclick=run(()=>loadAnalysis(job.id));$('#analysisJobs').append(button);
+  }
+}
+async function loadAnalysis(id){
+  const data=await api('/analysis/detail?id='+encodeURIComponent(id));
+  if(data.job.contact!==contact)throw Error('联系人已变化，请重新选择分析任务');
+  analysisDetail=data;renderAnalysis();
+}
+function renderAnalysis(){
+  const box=$('#analysisView');box.replaceChildren();const data=analysisDetail,job=data.job;
+  box.append(text('h3','分析任务 '+job.id.slice(0,8)));
+  box.append(text('pre',JSON.stringify({联系人数量:job.contact_count,用户消息数:job.message_count,时间范围:[new Date(job.start*1000).toLocaleString(),new Date(job.end*1000).toLocaleString()],选定片段:job.segments,有样本片段:job.sampled_segments,预计首次调用:job.expected_calls,单次请求输出上限:job.output_token_limit||1800,预计输入token:job.input_token_estimate,预留预算:job.tokens_reserved,预算上限:job.token_budget,调用上限:job.max_calls,已预留调用:job.calls_reserved,说明:job.token_estimation,价格:'未确定，不估算金额',路由:job.route},null,2)));
+  if(!data.batches.length)box.append(text('p','资料不足：没有可分析样本，不调用模型。'));
+  for(const batch of data.batches){
+    const section=document.createElement('details');section.append(text('summary','批次 '+batch.ordinal+' · '+batch.status+' · 已尝试 '+batch.attempts+' 次 · 查看将发给模型的证据片段'));
+    section.append(text('pre',JSON.stringify(batch.rows.map(m=>({证据ID:m.id,原消息ID:m.message_id,时间:new Date(m.time*1000).toLocaleString(),片段:m.snippet,来源:m.source,文本:m.text,是否截短:m.truncated})),null,2)));
+    section.append(text('p','所有消息仅作分析数据；姓名及稳定账号/联系人 ID 不发给模型。历史消息文本可能仍包含私人信息，请在调用前检查。'));
+    const button=text('button',batch.status==='done'?'本批已完成，不重复调用':batch.status==='ready'?'批准本批模型调用，生成草稿':'明确重新调用（上次可能已计费）');
+    button.disabled=batch.status==='done'||job.calls_reserved>=job.max_calls;
+    button.onclick=run(async()=>{
+      const unknown=batch.status!=='ready';
+      if(!confirm(unknown?'上次可能已调用并计费。是否在原预算内重新调用这一批？':'已检查本批私人文本、时间范围和模型路由，批准调用一次模型生成不生效的草稿？'))return;
+      button.disabled=true;
+      try{await api('/analysis/run',{id:job.id,ordinal:batch.ordinal,confirm_model_call:true,retry_unknown:unknown});}
+      finally{await loadAnalysis(job.id);}
+    });section.append(button);box.append(section);
+  }
+  box.append(text('h3','逐条审核（模型自评不是校准概率）'));
+  if(!data.items.length)box.append(text('p','暂无草稿建议；未执行、资料不足或输出未通过校验都不会创建生效画像。'));
+  for(const item of data.items){
+    const section=document.createElement('section');section.append(text('b',categoryLabels[item.category]+' · '+item.dimension+' · '+item.status));
+    const bucket={expression:'observations',reception:'preferences',strategy:'strategies'}[item.category];
+    const current=(data.current[bucket]||{})[item.dimension];
+    section.append(text('p','当前：'+(current?current.value:'未设置')+' → 草稿：'+item.value+(current&&current.locked?' · 当前项已锁定':'')));
+    section.append(text('p','依据：'+item.rationale+'；模型自评：'+item.confidence+'（非概率）；资料：'+(item.sufficient?'模型认为充分，仍需人工核对':'不足，不可直接应用')+'；'+(item.review_note||'')+(item.locked_conflict?'；与手动锁定项冲突':'')+'；范围：'+item.scope));
+    const evidence=document.createElement('details');evidence.append(text('summary','查看证据与反例'));
+    const rows=data.batches.flatMap(b=>b.rows), wanted=new Set([...item.evidence_ids,...item.conflict_ids]);
+    evidence.append(text('pre',JSON.stringify(rows.filter(m=>wanted.has(m.id)).map(m=>({id:m.id,反例:item.conflict_ids.includes(m.id),时间:m.time,片段:m.snippet,来源:m.source,文本:m.text})),null,2)));section.append(evidence);
+    if(item.status==='pending'){
+      const input=document.createElement('input');input.value=item.value;input.title='可修改建议值，类别与维度不可偷偷转换；服务端校验安全枚举';section.append(input);
+      const accept=text('button',item.category==='expression'?'接受为观察记录（不控制回复）':'接受为回复设置'),reject=text('button','拒绝并抑制同类建议');
+      accept.disabled=!item.sufficient||!!(current&&current.locked)||item.locked_conflict;
+      accept.onclick=run(async()=>{await api('/analysis/review',{item_id:item.id,action:'accept',revision:data.current.revision,value:input.value});await show();await loadAnalysis(job.id);});
+      reject.onclick=run(async()=>{await api('/analysis/review',{item_id:item.id,action:'reject',revision:data.current.revision});await show();await loadAnalysis(job.id);});
+      section.append(accept,reject);
+    }
+    if(item.status==='rejected'){
+      const reopen=text('button','显式重新评估本条（不调用模型）');
+      reopen.onclick=run(async()=>{await api('/analysis/review',{item_id:item.id,action:'reevaluate',revision:data.current.revision});await loadAnalysis(job.id);});section.append(reopen);
+    }
+    if(item.status==='accepted'){
+      const undo=text('button','撤销本次应用');undo.onclick=run(async()=>{await api('/analysis/undo',{application_id:item.application_id,revision:data.current.revision});await show();await loadAnalysis(job.id);});section.append(undo);
+    }
+    box.append(section);
+  }
+}
+$('#analysisPreview').onclick=run(async()=>{
+  if(!contact||contact.endsWith('@chatroom'))throw Error('请选择当前私聊联系人');
+  const start=new Date($('#analysisStart').value+'T00:00:00').getTime()/1000;
+  const end=new Date($('#analysisEnd').value+'T00:00:00');end.setDate(end.getDate()+1);
+  if(!Number.isFinite(start)||!Number.isFinite(end.getTime()))throw Error('请选择有效日期范围');
+  analysisDetail=await api('/analysis/preview',{contact,start,end:end.getTime()/1000,segments:Number($('#analysisSegments').value),max_calls:Number($('#analysisCalls').value),token_budget:Number($('#analysisBudget').value)});
+  if(analysisDetail.job.contact!==contact){analysisDetail=null;throw Error('联系人已变化，请重新预览');}
+  renderAnalysis();await show();
+});
+
+// Local deployment grants same-origin management access without exposing a token.
+// Only load the directory; no history scans, preference writes or model calls.
+fetch('/api/admin/access',{headers:{'X-Wxbot-Local-Admin':'1'}}).then(r=>r.json()).then(async access=>{
+  if(!access.local_admin)return;
+  $('#tokenLabel').hidden=true;
+  $('#unlock').textContent='刷新管理数据';
+  $('#authHelp').textContent='已连接本机账号。选择联系人即可管理角色和偏好；分析历史只在你明确批准后执行。';
+  await run(load)();
+}).catch(()=>{});
+</script></html>

@@ -57,40 +57,35 @@ def _tail_byte(head):
 
 
 def decrypt_dat(data, key):
-    """V2 结构(实测,经注入微信解密例程逆向确认):
-      [6B magic][u32 aes_size][u32 xor_size][1B]  ← 共 15 字节头
-      + AES段(AES-128-ECB 全局图片密钥, 含文件头)
-      + XOR段(末 xor_size 字节, 每字节 ^ xor_key)
-    关键(2026-09 修正, 经 a70be188 明文对拍确认): AES 段是 **PKCS7 填充** 的——
-    真实明文长度 = header 里的 `aes_size`(如 1024 / 577), 但密文被补齐到 16 的倍数
-    (1024→1040=1024+16 整块填充, 577→592=577+15)。解出后必须 **裁掉末尾 0x10/0x0F...
-    填充**, 只保留前 aes_size 字节; 否则那多出的填充字节被当成图像流塞进 JPEG/PNG
-    偏移 1024 处, 会打乱后续熵解码 → 整图色度损坏(发白/偏青)、高清 PNG 解坏。
-    XOR 密钥按解出的文件头格式反推(JPEG 尾 0xD9 / PNG 尾 0x82 / GIF 尾 0x3B),
-    旧代码硬编码 ^0xD9 只对 JPEG 成立, 会把 PNG 高清图(_h.dat)解坏。
-    密钥为账号级 16 字节(实测是 ASCII 串), 由注入抓取一次后存 keys.json。
+    """Decode V2's padded AES prefix, plaintext middle and XOR tail.
+
+    JPEG/PNG/GIF tail bytes determine the local per-file XOR byte. Unknown
+    codecs remain unavailable unless WeChat has already produced plaintext.
     """
     if data[:6] != SIG:
         return None
     aes_size = int.from_bytes(data[6:10], "little")     # AES 段真实明文长度(去填充)
     xor_size = int.from_bytes(data[10:14], "little")
     body = data[15:]                                    # AES 段从文件偏移 15 开始
-    aes_region = len(body) - xor_size                   # XOR 尾之前=含 PKCS7 填充的密文段
-    if aes_region < 0:
+    # Only the padded prefix is AES-encrypted. A potentially large middle
+    # section is plaintext and must survive intact (Agent Console uses the
+    # same three-section V2 layout). The XOR byte varies across local files.
+    n = (aes_size // 16 + 1) * 16
+    middle_end = len(body) - xor_size
+    if aes_size <= 0 or n > middle_end or xor_size > len(body):
         return None
-    n = (aes_region // 16) * 16
-    k = _key_bytes(key)
     try:
-        dec = AES.new(k, AES.MODE_ECB).decrypt(body[:n])
-    except ValueError:
+        dec = AES.new(_key_bytes(key), AES.MODE_ECB).decrypt(body[:n])
+    except (ValueError, TypeError):
         return None
-    out = bytearray(dec)
-    out += body[n:aes_region]                            # 非整块余数(若有)按明文
-    if 0 < aes_size <= len(out):                         # 裁掉 PKCS7 填充, 只留真实明文
-        del out[aes_size:]
+    pad = n - aes_size
+    if dec[aes_size:] != bytes([pad]) * pad:
+        return None
+    out = bytearray(dec[:aes_size])
+    out += body[n:middle_end]
     if xor_size:
         xk = data[-1] ^ _tail_byte(out[:8])
-        out += bytes(b ^ xk for b in body[aes_region:])
+        out += bytes(b ^ xk for b in body[middle_end:])
     return bytes(out)
 
 
@@ -214,21 +209,27 @@ def _capture_lookup(h):
     return None
 
 
-def _find_dat_by_hash(h):
+def _dat_paths(h):
     """按本地文件名 hash 找加密 .dat。优先大图 _b.dat，其次缩略图 _t.dat。"""
     acc = account_dir()
-    if not acc or not h:
-        return None
+    if not acc or not h or not re.fullmatch(r'[a-zA-Z0-9_-]{1,96}',h):
+        return []
+    paths=[]
     for pat in (
         "/cache/**/Bubble/" + h + "_b.dat",         # 大图(全分辨率)
         "/cache/**/Bubble/" + h + ".dat",
+        "/msg/attach/**/Img/" + h + "_h.dat",
+        "/msg/attach/**/Img/" + h + "_b.dat",
         "/msg/attach/**/Img/" + h + ".dat",         # 缩略图
         "/msg/attach/**/Img/" + h + "_t.dat",
     ):
-        hits = glob.glob(acc + pat, recursive=True)
-        if hits:
-            return hits[0]
-    return None
+        paths.extend(glob.glob(acc + pat, recursive=True))
+    return list(dict.fromkeys(paths))
+
+
+def _find_dat_by_hash(h):
+    paths=_dat_paths(h)
+    return max(paths,key=os.path.getsize) if paths else None
 
 
 def _find_dat(md5):
@@ -353,17 +354,6 @@ def cache_image(chat_username, local_id, upgrade=False):
         return (existing is not None), True
 
 
-import threading  # noqa: E402
-
-# 全分辨率抓取：微信收到图只先下缩略图，全图要"打开看"才下载。为让"撤回的图"也清晰，
-# 在图还没被撤回时，后台驱动微信打开该会话最近的图→触发下载全图→再升级缓存。
-# 每会话去抖，避免频繁翻动微信 UI。
-_fr_lock = threading.Lock()
-_fr_last = {}              # chat -> 上次抓全图时间
-_fr_recent = {}           # chat -> [(lid), ...] 待升级的近期缩略图
-_FR_DEBOUNCE = 25.0
-
-
 def _display_name(chat_username):
     try:
         from core import contacts
@@ -380,47 +370,13 @@ def _display_name(chat_username):
     return chat_username
 
 
-def _fullres_worker(chat_username):
-    import time as _t
-    try:
-        from core import harvest
-        name = _display_name(chat_username)
-        # 轻量：只点最新那张图触发下全图(不翻历史/不滚动)
-        harvest.pull_latest_fullres(name, log=lambda *_: None)
-        _t.sleep(0.5)
-        with _fr_lock:
-            lids = list(dict.fromkeys(_fr_recent.pop(chat_username, [])))
-        for lid in lids:                                    # 用全图升级缓存
-            try:
-                cache_image(chat_username, lid, upgrade=True)
-            except Exception:  # noqa: BLE001
-                pass
-    except Exception:  # noqa: BLE001
-        pass
-
-
 def _fullres_enabled():
-    """是否开启"撤回图片抓全图"(默认关：它会驱动微信翻图,noVNC 里会有滚动)。
-    在 bot_rules.json 里设 {"fullres_capture": true} 开启。"""
-    try:
-        import json
-        f = os.path.join(config.account_dir(), "bot_rules.json")
-        return bool(json.load(open(f, encoding="utf-8")).get("fullres_capture"))
-    except Exception:  # noqa: BLE001
-        return False
+    return False
 
 
 def schedule_fullres(chat_username, local_id):
-    """登记一张缩略图、去抖地后台抓全图并升级缓存(供撤回后仍清晰)。默认关，见 _fullres_enabled。"""
-    import time as _t
-    if not _fullres_enabled():
-        return
-    with _fr_lock:
-        _fr_recent.setdefault(chat_username, []).append(local_id)
-        if _t.time() - _fr_last.get(chat_username, 0) < _FR_DEBOUNCE:
-            return
-        _fr_last[chat_username] = _t.time()
-    threading.Thread(target=_fullres_worker, args=(chat_username,), daemon=True).start()
+    """Retired UI scheduler; new media is captured without navigating WeChat."""
+    return
 
 
 def images_available():
@@ -437,6 +393,10 @@ def images_available():
                 return True
     except Exception:  # noqa: BLE001
         pass
+    captured = _capture_dir()
+    if captured and os.path.isdir(captured):
+        return any(name.lower().endswith(('.jpg','.jpeg','.png','.gif','.webp'))
+                   for name in os.listdir(captured))
     return False
 
 
@@ -479,15 +439,8 @@ def _valid_img(data):
                            or data[:4] in (b"GIF8", b"RIFF"))
 
 
-def get_msg_image(chat_username, local_id):
-    """返回 (bytes, mime) 或 (None, reason)。
-
-    优先级(2026-09 调整)：**微信自解明文(temp/ImageUtils, 颜色最保真) > 永久存档 >
-    撤回预缓存 > .dat 离线解密**。
-    离线 .dat 解密对这批图片(源自 wxgf)有色彩损坏(整图发白/偏青或色度丢失、发暗发绿)——
-    该 V2 变体的 body 除文件头外并非纯 AES-ECB, 格式尚未完全攻克, 故降级为最后兜底;
-    正常显示/存档一律走微信自己解出的明文(保持会话打开→微信自动解到 temp)。
-    """
+def _stored_image(chat_username, local_id):
+    """Read existing plaintext, captured files, archives and encrypted fallback."""
     rb = _effective_basehash(chat_username, local_id)
     md5 = _msg_img_md5(chat_username, local_id)
     # 1: 微信已解密到 temp/ImageUtils 的明文图(最保真; temp 按 资源hash(fefee..) 命名)
@@ -522,12 +475,53 @@ def get_msg_image(chat_username, local_id):
     if key:
         path = (_find_dat_by_hash(rb) if rb else None) or (_find_dat(md5) if md5 else None)
         if path:
-            img = decrypt_dat(open(path, "rb").read(), key)
+            try:
+                img = decrypt_dat(open(path, "rb").read(), key)
+            except Exception:
+                return None, "decode-failed"
             if _valid_img(img):
                 return img, _mime(img)
+            return None, "decode-failed"
     if not md5 and not rb:
         return None, "no-md5"
     return None, ("no-img-key(点刷新密钥重新抓取)" if not key else "no-dat(该图未下载到本地)")
+
+
+def get_msg_image(chat_username, local_id):
+    """Choose the highest-resolution readable local candidate, without UI."""
+    import io
+    from PIL import Image
+    initial, reason=_stored_image(chat_username,local_id)
+    best=None; area=0
+    def consider(data):
+        nonlocal best, area
+        if not data or len(data)>64*1024*1024:return
+        try:
+            with Image.open(io.BytesIO(data)) as im:
+                im.load(); score=im.width*im.height
+                mime=Image.MIME.get(im.format)
+            if score>area and mime in ('image/jpeg','image/png','image/gif','image/webp'):
+                best=(data,mime);area=score
+        except Exception:pass
+    consider(initial)
+    hashes={_effective_basehash(chat_username,local_id), _msg_img_md5(chat_username,local_id)}
+    key=img_key(); paths=[]
+    for h in hashes:
+        if not h:continue
+        paths.extend(_dat_paths(h))
+        d=_capture_dir()
+        if d:
+            for suffix in ('.jpg','.png','.jpeg','.webp','.gif','_h.dat','_b.dat','.dat','_t.dat'):
+                path=os.path.join(d,h+suffix)
+                if os.path.isfile(path):paths.append(path)
+    for path in list(dict.fromkeys(paths))[:24]:
+        try:
+            if os.path.getsize(path)>64*1024*1024:continue
+            with open(path,'rb') as stream:data=stream.read()
+            consider(decrypt_dat(data,key) if path.endswith('.dat') and key else
+                     None if path.endswith('.dat') else data)
+        except (OSError,ValueError,TypeError):pass
+    return best or (None,reason if not initial else 'decode-failed')
 
 
 if __name__ == "__main__":

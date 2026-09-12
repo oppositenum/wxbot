@@ -2,3 +2,4 @@ pycryptodome>=3.20
 zstandard>=0.22
 flask>=3.0
 pilk>=0.2.4        # SILK v3 语音解码(type=34)；转码另需系统 ffmpeg(无则回退 WAV)
+Pillow>=10.0       # 验证完整图片可解码后才交给视觉接口

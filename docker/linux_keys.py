@@ -20,7 +20,8 @@ def wechat_pid():
             cmd = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")[0].decode()
         except OSError:
             continue
-        if cmd.endswith("/opt/wechat/wechat") or cmd == "/opt/wechat/wechat":
+        if (cmd == "wechat" or cmd.endswith("/opt/wechat/wechat") or cmd == "/opt/wechat/wechat"
+                or cmd.endswith("/usr/bin/wechat") or cmd == "/usr/bin/wechat"):
             return int(pid)
     return None
 

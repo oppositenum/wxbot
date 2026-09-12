@@ -14,6 +14,8 @@ import hmac
 import json
 import os
 import sys
+import threading
+import functools
 
 from Crypto.Cipher import AES
 
@@ -130,6 +132,20 @@ def load_keys():
         return json.load(f)
 
 
+_refresh_lock = threading.RLock()
+
+
+def _serialized(fn):
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        # Every caller shares the .tmp destination, including the background
+        # inbox reader, bot, web sync and media readers.
+        with _refresh_lock:
+            return fn(*args, **kwargs)
+    return wrapped
+
+
+@_serialized
 def run(force=False, only=None):
     """解密核心库（config.CORE_DBS）。only 可指定 key 子集。"""
     config.ensure_dirs()

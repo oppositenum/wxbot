@@ -82,6 +82,8 @@ cd docker && docker build --platform linux/arm64 -t wxbot-wechat . && cd ..
 | POST | `/api/send` `{to, type:text|image, content|path}` | 发送 |
 | POST | `/api/upload` (multipart) | 上传图片，返回宿主路径供 send 用 |
 
+完整字段、异步任务状态、图片上传和 curl 示例见 [docs/api-send.md](docs/api-send.md)。
+
 `to` 用**联系人备注/昵称或群名**（后台按名搜索并打开首个匹配的会话）。
 
 | GET  | `/api/bot` | 机器人状态 + 规则 + 日志 |
@@ -234,3 +236,24 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 `core/keys.py`（内存扫描）+ `core/sender.py`（Accessibility）+ `core/cc_catch.py`（lldb 断点 CommonCrypto 取密钥）
 是早期直接操作 Mac 微信 4.1.13 的方案。因 macOS 4.1.x 密钥混淆，取密钥需 lldb 抓 `CCCryptorCreate`；
 发送用屏幕自动化不够稳。**已被 Docker 方案取代**，代码保留备查。
+
+
+## 本轮修复后的路由、媒体与读取授权（代码待部署）
+
+- 普通 `chat` 使用主 `provider` 及该 provider 原有的模型字段。工具调用默认也使用该路由；存在另一套凭据不构成切换授权。
+- 可显式设置 `tools_provider` 和/或 `tools_model`，AI 设置页展示并保存这两个字段。`tools_provider` 留空跟随主 provider；`tools_model` 留空使用所选 provider 的模型。工具轮和工具后的最终回复固定在同一条路由。不改写任何中转模型名称。
+- 当前本地工具协议适配器支持 Claude Messages 和 GPT Chat Completions function calls。这只说明请求格式支持，不证明中转部署的具体模型有工具能力。未知适配器、缺凭据、接口拒绝或最终回复为空均报错，不静默跨 provider 回退。
+- `/api/llm` 的 `tool_route` 展示解析后的请求路由，`route_diagnostics` 保留最近 100 条请求阶段记录（`request_id/phase/provider/model`）。这些记录不含 URL、凭据、工具参数或聊天正文；不是底层真实模型认证。
+- 图片先取文件/解密，再由 Pillow 验证完整解码，之后才请求视觉接口；视觉响应必须是明确标注 success 且有非空 description 的 JSON；unreadable 或格式错误均不当成读图成功。状态区分缺密钥、文件不可用、解码失败、缺解码器、接口未配置、接口失败、结果无效、模型报告不可识别、功能未启用及成功。STT 保持原开关，不自动启用。
+- 纯媒体批全部读取失败时，直接告知未能读取并请对方重发或转文字，不调用回复模型编造。混合文字批保留文字并明确媒体内容未知。视频只分析封面，不代表看过整个视频。
+- 模型读取工具要求 `agent.run` 依据服务端会话签发的 `read_access.Access`。直接调用工具函数同样要求该授权；模型参数不能补齐账号、会话或成员。读取固定在签发账号的文件目录，返回前重新验证当前账号。
+- `get_member_profile` 只返回当前授权成员、当前 scope、active 且未过期的事实；不返回聚合 summary、取消/取代事实或跨 scope 内容。历史工具读取当前会话的普通文本，排除本账号已记录或带前缀的定时消息；不把媒体 XML 当成已解析内容。
+- 全量画像和知识库管理是独立的管理员入口：`/api/profiles*` 和 `/api/kb*` 要求环境变量 `WXBOT_ADMIN_READ_TOKEN` 对应的 `X-Wxbot-Admin-Token` 请求头。未配置/未提供则拒绝。AI 设置页可输入该凭据，仅保留在页面内存，刷新即失效。管理入口记录端点、方法、账号摘要和授权结果，不记录凭据或正文。此限制只覆盖这些管理入口，不代表其他后台 API 已完成鉴权。
+
+本轮不修改实际配置、不设置管理员凭据、不重启、不发送真实消息、不调用真实模型。后端行为需部署后才生效。静态页面可能被现有进程直接读取，因此新增设置按 `/api/llm` 的后端能力标记显示，旧后端不展示新增控件或提交新增字段。
+
+离线验证：`python3 -B tests/test_review_fixes.py`，以及原有三个 `tests/test_*` 脚本。新测试阻止网络、子进程和真实发送，使用临时账号文件和模拟接口；不能证明真实中转工具能力、识图/转写质量或微信 UI 发送可靠性。
+
+新闻显示修复及默认模板使用方法见 [新闻与默认模板](docs/news-and-default-template.md)。
+
+朋友圈监听、评论回复、文字/图片发布、自动互动和接口文档见 [朋友圈管理](docs/moments.md)。后台「朋友圈 → 设置」可开启自动评论和每日分享；默认关闭，按北京时间免打扰，并记录每次执行与微信回执。

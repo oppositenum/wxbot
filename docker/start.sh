@@ -41,12 +41,12 @@ done
 echo "[start] wechat bin = ${WX:-NOT FOUND}"
 ( "$WX" --no-sandbox >/var/log/wechat.log 2>&1 || "$WX" >/var/log/wechat.log 2>&1 ) &
 
-# 收图秒抢：Frida 常驻看护(rename→硬链接抢图，撤回删原图也不丢)。脚本在 /root(挂载持久)。
+# 媒体文件观察：账号隔离、本地捕获，不操作微信界面。
 CAP=""
-for c in /root/frida_capture_supervisor.py /app/docker/frida_capture_supervisor.py; do
+for c in /root/wxbot-hooks/current/frida_capture_supervisor.py /app/docker/frida_capture_supervisor.py; do
   [ -f "$c" ] && CAP="$c" && break
 done
-if [ -n "$CAP" ]; then
+if [ -n "$CAP" ] && [ "${WXBOT_MEDIA_CAPTURE:-1}" = "1" ]; then
   echo "[start] frida capture supervisor = $CAP"
   ( sleep 15; python3 "$CAP" >/var/log/frida_capture.log 2>&1 ) &
 else

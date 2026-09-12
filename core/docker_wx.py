@@ -1,6 +1,7 @@
 """与 Docker 容器里的 Linux 微信交互：状态 / 取密钥 / 发送 / 截图。"""
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -8,6 +9,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config  # noqa: E402
+from core import account_session as sessions
 
 CONTAINER = os.environ.get("WXBOT_CONTAINER", "wxbot")
 
@@ -20,7 +22,8 @@ LOCAL_XWECHAT = os.environ.get("WXBOT_XWECHAT_ROOT", "/root/xwechat_files")
 
 # 微信只有一个 UI 窗口：机器人发消息 与 图片解密(翻图) 都靠 xdotool 操作它，
 # 必须串行，否则互相插入按键会彼此搞乱。两边都用这把锁。
-UI_LOCK = threading.RLock()
+from core.ui_lock import UILock
+UI_LOCK = UILock() if LOCAL else threading.RLock()
 
 # 发送优先：翻图解密(harvest)是长耗时后台活，会长时间占着微信 UI。发送必须能立刻插队，
 # 否则用户点发送会一直卡"发送中"。发送前 request_priority()，harvest 每轮检查 priority_pending()
@@ -110,7 +113,13 @@ def logged_in():
     return container_wxid() is not None and wechat_running()
 
 
+@sessions.task
 def capture_img_key(log=lambda m: None, trigger=True):
+    with UI_LOCK:
+        return _capture_img_key_locked(log, trigger)
+
+
+def _capture_img_key_locked(log=lambda m: None, trigger=True):
     """注入微信抓账号级图片 AES 密钥(存 keys.json 的 _img_key)。切号后可重跑。
     需在抓取期间触发图片显示(冷缓存时打开会话即可)。返回 (ok, key_hex_or_msg)。"""
     import json
@@ -183,7 +192,13 @@ def _restore_img_key(dst, img):
         pass
 
 
+@sessions.task
 def refresh_keys():
+    with UI_LOCK:
+        return _refresh_keys_locked()
+
+
+def _refresh_keys_locked():
     """跑 linux_keys.py 提取密钥，写到本账号 keys.json。保留已存的 _img_key。"""
     wxid = container_wxid()
     if not wxid:
@@ -195,7 +210,11 @@ def refresh_keys():
         os.makedirs(os.path.dirname(out_keys), exist_ok=True)
     img = _preserve_img_key(config.keys_json())          # 刷新前记住图片密钥
     r = _exec("python3", "/usr/local/bin/linux_keys.py", dbs, out_keys, timeout=120)
-    ok = "命中" in (r.stdout + r.stderr)
+    # The extractor prints a summary even when it found zero keys.  Treat
+    # zero hits as failure; otherwise the UI claims success and later reports
+    # a misleading missing-session.db error.
+    summary = re.search(r"命中\s+(\d+)\s*/\s*(\d+)", r.stdout + r.stderr)
+    ok = bool(summary and int(summary.group(1)) > 0)
     if ok and not LOCAL:
         # 宿主模式：容器写到 /root/keys.json(=docker/wxdata/keys.json)，拷到本账号目录
         import shutil
@@ -209,13 +228,8 @@ def refresh_keys():
 
 
 def send_text(name, text):
-    with UI_LOCK:
-        r = _exec("python3", "/usr/local/bin/wx_send.py", "text", name, text,
-                  timeout=40)
-    out = (r.stdout + r.stderr).strip()
-    if "OK" in r.stdout:
-        return {"ok": True}
-    return {"ok": False, "error": out or "send failed"}
+    from core import sender
+    return sender.send_text(name, text)
 
 
 def open_chat(name):
@@ -241,12 +255,8 @@ def click(cx, cy):
 
 
 def paste_text(text):
-    """向【当前已打开】的会话发文本(不重新搜索)。需在 open_chat 之后调用。"""
-    with UI_LOCK:
-        r = _exec("python3", "/usr/local/bin/wx_send.py", "pastetext", text, timeout=30)
-    if "OK" in r.stdout:
-        return {"ok": True}
-    return {"ok": False, "error": (r.stdout + r.stderr).strip() or "paste failed"}
+    from core import sender
+    return sender.send_text('', text)
 
 
 def title_shot(host_out):
@@ -260,51 +270,18 @@ def title_shot(host_out):
 
 
 def paste_at(member_name, text):
-    """向【当前已打开的群】发一条 @某人 的消息(需先 open_chat 到该群)。"""
-    with UI_LOCK:
-        r = _exec("python3", "/usr/local/bin/wx_send.py", "pasteat",
-                  member_name, text, timeout=40)
-    if "OK" in r.stdout:
-        return {"ok": True}
-    return {"ok": False, "error": (r.stdout + r.stderr).strip() or "paste@ failed"}
+    from core import sender
+    return sender.send_at('', None, None, member_name, text)
 
 
 def paste_image_open(host_path):
-    """向【当前已打开】的会话发图片(不重新搜索)。"""
-    if not os.path.exists(host_path):
-        return {"ok": False, "error": f"图片不存在: {host_path}"}
-    if LOCAL:
-        cpath = host_path
-    else:
-        base = os.path.basename(host_path)
-        cpath = f"/tmp/wxsend_{int(os.path.getmtime(host_path))}_{base}"
-        cp = _docker("cp", host_path, f"{CONTAINER}:{cpath}")
-        if cp.returncode != 0:
-            return {"ok": False, "error": "docker cp 失败: " + cp.stderr}
-    with UI_LOCK:
-        r = _exec("python3", "/usr/local/bin/wx_send.py", "pasteimage", cpath, timeout=60)
-    if "OK" in r.stdout:
-        return {"ok": True}
-    return {"ok": False, "error": (r.stdout + r.stderr).strip() or "paste failed"}
+    from core import sender
+    return sender.send_image('', host_path)
 
 
 def send_image(name, host_path):
-    if not os.path.exists(host_path):
-        return {"ok": False, "error": f"图片不存在: {host_path}"}
-    if LOCAL:
-        cpath = host_path                         # 同一文件系统，无需拷贝
-    else:
-        base = os.path.basename(host_path)
-        cpath = f"/tmp/wxsend_{int(os.path.getmtime(host_path))}_{base}"
-        cp = _docker("cp", host_path, f"{CONTAINER}:{cpath}")
-        if cp.returncode != 0:
-            return {"ok": False, "error": "docker cp 失败: " + cp.stderr}
-    with UI_LOCK:
-        r = _exec("python3", "/usr/local/bin/wx_send.py", "image", name, cpath,
-                  timeout=60)
-    if "OK" in r.stdout:
-        return {"ok": True}
-    return {"ok": False, "error": (r.stdout + r.stderr).strip() or "send failed"}
+    from core import sender
+    return sender.send_image(name, host_path)
 
 
 def screenshot(host_out):

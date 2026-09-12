@@ -246,7 +246,7 @@ def _parse_refer(content):
         root = ET.fromstring(content)
     except ET.ParseError:
         return None, None
-    appmsg = root.find(".//appmsg")
+    appmsg = root if root.tag == 'appmsg' else root.find(".//appmsg")
     if appmsg is None:
         return None, None
     title = appmsg.findtext("title")
@@ -272,20 +272,35 @@ def _parse_appmsg(content):
         root = ET.fromstring(content)
     except ET.ParseError:
         return None
-    appmsg = root.find(".//appmsg")
+    appmsg = root if root.tag in ('appmsg', 'mmreader') else root.find(".//appmsg")
     if appmsg is None or appmsg.find(".//refermsg") is not None:
         return None
     title = (appmsg.findtext("title") or "").strip()
     des = (appmsg.findtext("des") or "").strip()
     url = (appmsg.findtext("url") or "").strip()
     articles = []
-    for it in appmsg.findall(".//mmreader/category/item"):
+    seen_articles = set()
+    reader = appmsg if appmsg.tag == 'mmreader' else appmsg.find('.//mmreader')
+    for it in (reader.findall('./category/*') if reader is not None else []):
+        if it.tag not in ('item', 'newitem'):
+            continue
         t = (it.findtext("title") or "").strip()
         u = (it.findtext("url") or "").strip()
         if t:
+            from urllib.parse import urlsplit
+            try:
+                link = urlsplit(u)
+                identity = (t, link.netloc, link.path)
+            except ValueError:
+                identity = (t, u)
+            if identity in seen_articles:
+                continue
+            seen_articles.add(identity)
             articles.append({"title": t, "url": u})
     if not (title or des or articles):
         return None
+    if articles and not title:
+        title, url = articles[0]['title'], articles[0]['url']
     return {"title": title, "des": des, "url": url, "articles": articles}
 
 
@@ -406,7 +421,7 @@ def get_messages(username, limit=50, before=None):
         ct_col = "WCDB_CT_message_content" if "WCDB_CT_message_content" in cols else None
         sct_col = "WCDB_CT_source" if "WCDB_CT_source" in cols else None
         sel = ["local_id", "server_id", "local_type", "real_sender_id",
-               "create_time", "message_content", "source"]
+               "create_time", "message_content", "source", "packed_info_data"]
         sel = [c for c in sel if c in cols]
         if ct_col:
             sel.append(ct_col)
@@ -460,12 +475,24 @@ def get_messages(username, limit=50, before=None):
             "at_all": at_all,
             "quote_me": False,
         }
+        if real_type == 34:
+            from core.voice_text import from_packed
+            transcript = from_packed(d.get("packed_info_data"))
+            if transcript:
+                item["voice_transcript"] = transcript
+                item["voice_transcript_source"] = "wechat_packed_v1"
         # 分类(稳定 slug + 中文名 + meta),供规则按类型匹配/展示徽章
         cat, cat_name, cat_meta = msgclass.classify(real_type, body)
         item["category"] = cat
         item["category_name"] = cat_name
         if cat_meta:
             item["meta"] = cat_meta
+        if real_type == 1 and '<mmreader' in body:
+            art = _parse_appmsg(body)
+            if art:
+                item['article'] = art
+                item['content'] = '｜'.join(a['title'] for a in art['articles']) or art['title']
+                item['category'], item['category_name'] = 'link', '新闻图文'
         if real_type == 49:
             title, refer = _parse_refer(body)
             if refer:

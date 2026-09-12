@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
-"""容器内发送器：用 xdotool 驱动 Linux 微信发文本/图片。
-
-流程：激活窗口 → 点侧栏搜索 → 粘贴目标名 → 回车打开首个匹配 → 粘贴内容 → 回车发送。
-用法：
-  python3 wx_send.py text  "文件传输助手" "你好"
-  python3 wx_send.py image "文件传输助手" /path/in/container.png
+"""Container navigation helpers. Direct sending is deliberately blocked.
+The current xdotool interface cannot prove stable recipient/account identity.
+Use core.sender for a durable cannot_confirm_target result; names are insufficient.
 """
 import subprocess as sp
 import sys
@@ -67,10 +64,10 @@ def open_chat(wid, name):
     time.sleep(0.15)
     set_clip_text(name)
     key("ctrl+v")
-    time.sleep(1.5)          # 等搜索结果浮出
-    key("Down")              # 高亮第一个结果(比裸 Return 更稳)
-    time.sleep(0.3)
-    key("Return")            # 打开选中的匹配
+    time.sleep(1.8)          # 等搜索结果浮出(精确微信号→下拉首行即目标联系人)
+    # 像人手动那样:输入完直接回车打开首个匹配。不按 Down——多按 Down 会把高亮从
+    # "首个精确联系人"移到"搜一搜网络结果/聊天记录",甚至结果没弹出时落到会话列表(误开)。
+    key("Return")
     time.sleep(1.0)
     return px, py, w, h
 
@@ -93,17 +90,7 @@ def focus_input(px, py, w, h):
 
 
 def send_text(name, text):
-    wid = win_id()
-    if not wid:
-        print("ERR:no-window"); sys.exit(2)
-    px, py, w, h = open_chat(wid, name)
-    focus_input(px, py, w, h)
-    set_clip_text(text)
-    time.sleep(0.2)
-    key("ctrl+v")
-    time.sleep(0.5)
-    key("Return")
-    print("OK")
+    raise RuntimeError("cannot_confirm_target: direct UI sending disabled")
 
 
 def just_open(name):
@@ -139,77 +126,19 @@ def click_xy(cx, cy):
 
 
 def paste_text(text):
-    """向【当前已打开】的会话发文本(不重新搜索/打开)。"""
-    wid = win_id()
-    if not wid:
-        print("ERR:no-window"); sys.exit(2)
-    px, py, w, h = win_geom(wid)
-    focus_input(px, py, w, h)
-    set_clip_text(text)
-    time.sleep(0.2)
-    key("ctrl+v")
-    time.sleep(0.5)
-    key("Return")
-    print("OK")
+    raise RuntimeError("cannot_confirm_target: direct UI sending disabled")
 
 
 def paste_at(member_name, text):
-    """向【当前已打开的群】发一条【@某人】的消息(不重新搜索)。
-    流程：聚焦输入框→按@弹出成员选择器→粘成员名过滤→回车选中(插入真·@提及)→粘正文→发送。"""
-    wid = win_id()
-    if not wid:
-        print("ERR:no-window"); sys.exit(2)
-    px, py, w, h = win_geom(wid)
-    focus_input(px, py, w, h)
-    key("at")                     # 按 @ 触发成员选择器
-    time.sleep(0.9)
-    set_clip_text(member_name)     # 粘成员名做过滤
-    key("ctrl+v")
-    time.sleep(1.1)
-    key("Return")                  # 选中高亮项 → 插入真正的 @提及 + 空格
-    time.sleep(0.5)
-    set_clip_text(text)            # 粘正文
-    key("ctrl+v")
-    time.sleep(0.5)
-    key("Return")                  # 发送
-    print("OK")
+    raise RuntimeError("cannot_confirm_target: direct UI sending disabled")
 
 
 def paste_image(path):
-    """向【当前已打开】的会话发图片(不重新搜索/打开)。"""
-    wid = win_id()
-    if not wid:
-        print("ERR:no-window"); sys.exit(2)
-    px, py, w, h = win_geom(wid)
-    x("xdotool", "mousemove", str(px + 397), str(py + h - 131), "click", "1")
-    time.sleep(1.5)
-    key("ctrl+a"); time.sleep(0.2); key("Delete"); time.sleep(0.2)
-    x("xdotool", "type", "--clearmodifiers", "--delay", "25", path)
-    time.sleep(0.4)
-    key("Return"); time.sleep(1.5)
-    key("Return")
-    print("OK")
+    raise RuntimeError("cannot_confirm_target: direct UI sending disabled")
 
 
 def send_image(name, path):
-    wid = win_id()
-    if not wid:
-        print("ERR:no-window"); sys.exit(2)
-    px, py, w, h = open_chat(wid, name)
-    # 点输入区「发送文件」文件夹图标 → GTK 文件选择器 → 输入路径 → 打开 → 回车发送
-    x("xdotool", "mousemove", str(px + 397), str(py + h - 131), "click", "1")
-    time.sleep(1.5)          # 等文件选择器
-    key("ctrl+a")
-    time.sleep(0.2)
-    key("Delete")            # 清空文件名框
-    time.sleep(0.2)
-    # 逐字符输入路径（--delay 防 GTK 丢字符），不走剪贴板避免与会话名混淆
-    x("xdotool", "type", "--clearmodifiers", "--delay", "25", path)
-    time.sleep(0.4)
-    key("Return")            # 打开文件 → 图片进入输入框
-    time.sleep(1.5)
-    key("Return")            # 发送
-    print("OK")
+    raise RuntimeError("cannot_confirm_target: direct UI sending disabled")
 
 
 def open_and_scroll(name, rounds=6):

@@ -108,6 +108,8 @@ def _silk_to_audio(silk):
             f.write(silk)
         pilk.decode(sp, pcmp, pcm_rate=24000)
         pcm = open(pcmp, "rb").read()
+        if not pcm:
+            raise ValueError("empty decoded audio")
         ff = shutil.which("ffmpeg")
         if ff:
             mp3 = os.path.join(td, "a.mp3")
@@ -236,6 +238,25 @@ def _video_root():
     return os.path.join(account_dir(), "msg", "video")
 
 
+def video_paths(base):
+    if not base or not isinstance(base,str) or not all(c.isalnum() or c in '_-' for c in base):
+        return []
+    hits=glob.glob(os.path.join(_video_root(), '*', base+'.mp4'))
+    from core import imgdec
+    captured=imgdec._capture_dir()
+    if captured:
+        hits.append(os.path.join(captured,base+'.mp4'))
+    valid=[]
+    for path in hits:
+        try:
+            with open(path,'rb') as stream:
+                if b'ftyp' in stream.read(32):
+                    valid.append(path)
+        except OSError:
+            continue
+    return valid
+
+
 def get_msg_video(chat_username, local_id):
     """返回 (bytes, 'video/mp4') 或 (None, reason)。
 
@@ -244,10 +265,9 @@ def get_msg_video(chat_username, local_id):
     base = _video_base(chat_username, int(local_id))
     if not base:
         return None, "no-resource-mapping"
-    hits = glob.glob(os.path.join(_video_root(), "*", base + ".mp4"))
-    hits = [h for h in hits if os.path.isfile(h) and os.path.getsize(h) > 0]
+    hits = video_paths(base)
     if not hits:
-        return None, "not-downloaded(在微信窗口里点开播放该视频后即可)"
+        return None, "not-downloaded(等待微信接收完整视频)"
     data = open(max(hits, key=os.path.getsize), "rb").read()
     if b"ftyp" not in data[:32]:
         return None, "invalid-mp4"
@@ -260,6 +280,9 @@ def get_msg_video_thumb(chat_username, local_id):
     if not base:
         return None, "no-resource-mapping"
     hits = glob.glob(os.path.join(_video_root(), "*", base + "_thumb.jpg"))
+    from core import imgdec
+    captured=imgdec._capture_dir()
+    if captured: hits.append(os.path.join(captured,base+"_thumb.jpg"))
     hits = [h for h in hits if os.path.isfile(h) and os.path.getsize(h) > 0]
     if not hits:
         return None, "no-thumb"

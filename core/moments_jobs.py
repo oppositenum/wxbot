@@ -1,0 +1,264 @@
+"""Durable account-scoped Moments jobs. An initiated send is NEVER replayed."""
+import contextlib
+from datetime import datetime
+import json
+import threading
+import time
+import uuid
+
+from core import account_session as sessions, moments as m
+
+wake = threading.Event()
+_tick_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def db():
+    with m.database() as c:
+        c.executescript('''CREATE TABLE IF NOT EXISTS moments_jobs (
+          id TEXT PRIMARY KEY, dedup TEXT UNIQUE NOT NULL, kind TEXT NOT NULL,
+          origin TEXT NOT NULL, state TEXT NOT NULL, payload TEXT NOT NULL,
+          session TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL,
+          initiated REAL NOT NULL DEFAULT 0, message TEXT NOT NULL DEFAULT '',
+          receipt TEXT NOT NULL DEFAULT '');''')
+        yield c
+
+
+def row(r):
+    d=dict(r);d['payload']=json.loads(d['payload']);d.pop('session',None);return d
+
+
+def listing():
+    with db() as c:
+        return [row(r) for r in c.execute('SELECT * FROM moments_jobs ORDER BY created DESC LIMIT 100')]
+
+
+def insert(c, dedup, kind, origin, payload, now, state='queued', message='等待处理'):
+    jid=uuid.uuid4().hex
+    c.execute('INSERT OR IGNORE INTO moments_jobs(id,dedup,kind,origin,state,payload,session,created,updated,message) VALUES (?,?,?,?,?,?,?,?,?,?)',
+              (jid,dedup,kind,origin,state,m._json(payload),m._json(sessions.check()),now,now,message))
+    return row(c.execute('SELECT * FROM moments_jobs WHERE dedup=?',(dedup,)).fetchone())
+
+
+def enqueue_draft(jid, revision):
+    if not m.capabilities()['send']:raise m.Unavailable(m.capabilities()['reason'])
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        d=c.execute('SELECT * FROM drafts WHERE id=?',(jid,)).fetchone()
+        if not d:raise ValueError('草稿不存在')
+        existing=c.execute('SELECT * FROM moments_jobs WHERE dedup=?',('draft:'+jid,)).fetchone()
+        if existing:return row(existing)  # identical request returns the same job, never sends twice
+        if d['revision']!=revision or d['status']!='draft':raise m.Conflict('草稿已变化')
+        d=m._draft(d)
+        if d['kind']=='comment' and m.detail(d['feed_id'])['digest']!=d['snapshot']['digest']:
+            raise m.Conflict('动态已更新，请重新核对后保存新草稿')
+        payload=dict(draft_id=jid,text=d['text'],assets=d['assets'],feed_id=d['feed_id'],reply_id=d['reply_id'],snapshot=d['snapshot'])
+        for recent in c.execute("SELECT kind,payload FROM moments_jobs WHERE created>? AND state IN ('queued','preparing','initiated','confirmed','uncertain')",(time.time()-600,)):
+            q=json.loads(recent['payload'])
+            if recent['kind']==d['kind'] and all(q.get(k)==payload.get(k) for k in ['text','assets','feed_id','reply_id']):
+                raise m.Conflict('相同内容已有近期任务，请先查看执行记录，避免重复发送')
+        result=insert(c,'draft:'+jid,d['kind'],'manual',payload,time.time())
+        c.execute("UPDATE drafts SET status='queued',updated=? WHERE id=?",(int(time.time()),jid))
+    wake.set();return result
+
+
+def finish(jid, state, message, receipt=''):
+    from core.moments_reflection import forget
+    forget(jid)
+    with db() as c:
+        c.execute('UPDATE moments_jobs SET state=?,message=?,receipt=?,updated=? WHERE id=?',
+                  (state,message,receipt,time.time(),jid))
+        r=c.execute('SELECT payload FROM moments_jobs WHERE id=?',(jid,)).fetchone()
+        if r:
+            did=json.loads(r[0]).get('draft_id')
+            if did:c.execute('UPDATE drafts SET status=?,updated=? WHERE id=?',(state,int(time.time()),did))
+
+
+def cancel(jid):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        r=c.execute('SELECT * FROM moments_jobs WHERE id=?',(jid,)).fetchone()
+        if not r or r['state']!='queued':raise m.Conflict('仅等待中的任务可以取消')
+        c.execute("UPDATE moments_jobs SET state='cancelled',message='已取消',updated=? WHERE id=?",(time.time(),jid))
+        did=json.loads(r['payload']).get('draft_id')
+        if did:c.execute("UPDATE drafts SET status='cancelled' WHERE id=?",(did,))
+    from core.moments_reflection import forget
+    forget(jid)
+    return dict(id=jid,state='cancelled')
+
+
+def recover():
+    """Account switches or server restart invalidate in-flight work, not receipts."""
+    token=m._json(sessions.check())
+    with db() as c:
+        stale=c.execute("SELECT id,state FROM moments_jobs WHERE session<>? AND state IN ('queued','preparing','initiated')",(token,)).fetchall()
+    for r in stale:
+        finish(r['id'],'uncertain' if r['state']=='initiated' else 'cancelled',
+               '服务重启或账号变化；可能已经提交，请核对微信，系统不会自动重发' if r['state']=='initiated' else '服务重启或账号变化，旧任务已取消')
+
+
+def refresh():
+    from core import docker_wx
+    from core.moments_native import Native
+    if docker_wx.priority_pending() or not docker_wx.UI_LOCK.acquire(blocking=False):
+        raise m.Conflict('聊天正在操作微信，稍后再刷新朋友圈')
+    n=Native()
+    try:n.refresh()
+    finally:n.cleanup();docker_wx.UI_LOCK.release()
+    return m.sync()
+
+
+def policy(job, value, now):
+    if job['origin']=='manual':return ''
+    kind=job['kind'];p=job['payload']
+    flag='chat_reflection' if job['origin']=='reflection' else ('auto_comment' if kind=='comment' else 'auto_publish')
+    if not value[flag]:return '自动开关已关闭'
+    if value['revision']!=p['settings_revision']:return '设置已变化，旧任务已取消'
+    if m.quiet_now(value,now):return '当前为免打扰时段'
+    if now-job['created']>1800:return '已错过本次执行窗口，不补发过期内容'
+    start=datetime.fromtimestamp(now,m.CHINA).replace(hour=0,minute=0,second=0,microsecond=0).timestamp()
+    with db() as c:
+        count=c.execute("SELECT count(*) FROM moments_jobs WHERE kind=? AND initiated>=? AND state IN ('initiated','confirmed','uncertain')",(kind,start)).fetchone()[0]
+        last=c.execute('SELECT MAX(initiated) FROM moments_jobs').fetchone()[0] or 0
+    limit=value['daily_comment_limit' if kind=='comment' else 'daily_publish_limit']
+    if limit>0 and count>=limit:return '今日数量已达上限'
+    if value['min_interval_minutes']>0 and now-last<value['min_interval_minutes']*60:return '距离上次互动过近'
+    return ''
+
+
+def schedule(now):
+    value=m.settings();token=sessions.check()
+    if m.quiet_now(value,now):return
+    with db() as c:
+        if c.execute("SELECT 1 FROM moments_jobs WHERE state IN ('queued','preparing','initiated')").fetchone():return
+        if value['auto_publish']:
+            dt=datetime.fromtimestamp(now,m.CHINA);hh,mm=map(int,value['publish_time'].split(':'))
+            slot=dt.replace(hour=hh,minute=mm,second=0,microsecond=0).timestamp()
+            if value['publish_since']<=slot<=now<slot+1800:
+                insert(c,'daily:'+dt.strftime('%Y-%m-%d'),'publish','automatic',
+                       dict(settings_revision=value['revision'],moods=value['moods'],assets=[]),now)
+        if not value['auto_comment']:return
+        known=None
+        for r in c.execute('SELECT payload FROM feed ORDER BY created DESC LIMIT 100').fetchall():
+            item=json.loads(r[0]);own=item['author']==token['account']
+            targets=[(q['id'],q['author'],q['created']) for q in item['comments'] if q['id'] and q['author']!=token['account']] if own else [('',item['author'],item['created'])]
+            for reply,who,created in targets:
+                if not value['comment_since']<created<=now or now-created>86400:continue
+                if value['friend_allowlist'] and who not in value['friend_allowlist']:continue
+                if known is None:
+                    from core import contacts
+                    known={v['username'] for v in contacts.list_contacts() if not v['username'].endswith('@chatroom')}
+                if who not in known:continue
+                # Already answered by the account (including manual WeChat activity).
+                if any(q['author']==token['account'] and (not reply or q['reply_id']==reply) for q in item['comments']):continue
+                key='event:'+item['id']+':'+reply
+                if c.execute('SELECT 1 FROM moments_jobs WHERE dedup=?',(key,)).fetchone():continue
+                insert(c,key,'comment','automatic',dict(feed_id=item['id'],reply_id=reply,settings_revision=value['revision'],assets=[]),now)
+                return
+
+
+def receipt(job, before, since):
+    token=sessions.check();p=job['payload']
+    if job['kind']=='publish':
+        matches=[i for i in m.catalog(100,author=token['account'])['items'] if i['id'] not in before and i['created']>=since-5 and i['text']==p['text'] and len(i['media'])==len(p.get('assets',[]))]
+        return matches[0]['id'] if len(matches)==1 else ''
+    item=m.detail(p['feed_id'])
+    matches=[q for q in item['comments'] if q['id'] not in before and q['id'] and q['author']==token['account'] and q['text']==p['text'] and q['created']>=since-5 and (q['reply_id']==p.get('reply_id','') or (not p.get('reply_id') and not q['reply_to']))]
+    return matches[0]['id'] if len(matches)==1 else ''
+
+
+def process_one():
+    from core import docker_wx, moments_ai
+    from core.moments_native import Native
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        r=c.execute("SELECT * FROM moments_jobs WHERE state='queued' ORDER BY CASE origin WHEN 'manual' THEN 0 ELSE 1 END,created LIMIT 1").fetchone()
+        if not r:return
+        if json.loads(r['session'])!=sessions.check():return
+        job=row(r);c.execute("UPDATE moments_jobs SET state='preparing',updated=?,message='正在准备' WHERE id=?",(time.time(),job['id']))
+    initiated=False;n=None
+    try:
+        why=policy(job,m.settings(),time.time())
+        if why:finish(job['id'],'skipped',why);return
+        p=job['payload']
+        if job['origin']!='manual' and not p.get('text'):
+            if moments_ai._generating.locked():
+                with db() as c:c.execute("UPDATE moments_jobs SET state='queued',message='等待当前 AI 文案生成完成' WHERE id=?",(job['id'],))
+                return
+            if job['origin']=='reflection':
+                from core import moments_reflection
+                result=moments_reflection.generate(job['id'])
+                if result.get('skip'):finish(job['id'],'skipped',result['reason']);return
+                p.update(text=result['text'],emotion=result['emotion'])
+            elif job['kind']=='publish':p['text']=moments_ai.generate_post(p['moods'])
+            else:
+                item=m.detail(p['feed_id'])
+                result=moments_ai.generate(dict(feed_id=item['id'],feed_digest=item['digest'],reply_id=p['reply_id']),decide=True)
+                if result.get('skip'):finish(job['id'],'skipped',result['reason']);return
+                p.update(text=result['text'],reply_id=result['reply_id'],snapshot=dict(digest=result['feed_digest']))
+            with db() as c:c.execute('UPDATE moments_jobs SET payload=? WHERE id=?',(m._json(p),job['id']))
+        if docker_wx.priority_pending() or not docker_wx.UI_LOCK.acquire(timeout=2):
+            with db() as c:c.execute("UPDATE moments_jobs SET state='queued',message='等待聊天操作完成' WHERE id=?",(job['id'],))
+            return
+        try:
+            n=Native()
+            if job['kind']=='comment':
+                item=m.detail(p['feed_id'])
+                if item['digest']!=p['snapshot']['digest']:raise m.Conflict('动态已变化，未发送；请重新核对')
+                before={q['id'] for q in item['comments']};n.prepare_comment(item,p['reply_id'],p['text'])
+            else:
+                before={i['id'] for i in m.catalog(100,author=sessions.check()['account'])['items']}
+                n.prepare_publish(p['text'],[m.asset(a) for a in p.get('assets',[])])
+            why=policy(job,m.settings(),time.time())
+            if why:finish(job['id'],'skipped',why);return
+            sessions.check();since=time.time()
+            with db() as c:
+                c.execute("UPDATE moments_jobs SET state='initiated',initiated=?,updated=?,message='已进入提交阶段，正在核对微信记录' WHERE id=?",(since,since,job['id']))
+            initiated=True;n.submit();time.sleep(1)
+        finally:
+            if n:n.cleanup()
+            docker_wx.UI_LOCK.release()
+        for attempt in range(12):
+            try:
+                m.sync();found=receipt(job,before,since)
+                if found:finish(job['id'],'confirmed','已在微信记录中确认发送',found);return
+            except (m.Conflict,m.Unavailable):pass
+            time.sleep(1)
+        finish(job['id'],'uncertain','已操作提交，但未查到唯一回执；请查看微信，系统不会自动重发')
+    except sessions.StaleAccount:
+        # Old account ledger stays pinned; next visit recovers it as uncertain.
+        return
+    except Exception as exc:
+        raw=str(exc)
+        # Chat traffic has priority over Moments. Keep the automatic job queued
+        # so a temporary navigation timeout does not permanently lose a reply.
+        if not initiated and ('聊天优先' in raw or '朋友圈定位超时' in raw):
+            with db() as c:
+                c.execute("UPDATE moments_jobs SET state='queued',updated=?,message='聊天操作占用微信，稍后重试' WHERE id=?",(time.time(),job['id']))
+            return
+        message=raw if isinstance(exc,(m.Conflict,m.Unavailable,ValueError)) else '客户端或模型操作异常'
+        finish(job['id'],'uncertain' if initiated else 'failed',message+('；可能已发送，不会自动重发' if initiated else '；未进入提交阶段'))
+
+
+def tick():
+    if not _tick_lock.acquire(blocking=False):return
+    try:
+        with sessions.bind():
+            with db() as c:
+                m._set(c,'last_worker_tick',time.time());m._set(c,'worker_error',None)
+            from core.moments_reflection import prune
+            prune();recover();process_one()
+            value=m.settings();now=time.time()
+            if value['sync_enabled'] or value['auto_comment'] or value['auto_publish']:
+                with db() as c:
+                    last=m._get(c,'native_refresh_attempt',0)
+                    due=now-last>=value['sync_interval_minutes']*60
+                    if due:m._set(c,'native_refresh_attempt',now)
+                if due:
+                    try:
+                        refresh()
+                        with db() as c:m._set(c,'sync_error',None)
+                    except Exception:
+                        with db() as c:m._set(c,'sync_error',dict(at=int(now),message='朋友圈刷新未完成，保留原缓存；稍后按间隔重试'))
+            schedule(now);process_one()
+    finally:_tick_lock.release()

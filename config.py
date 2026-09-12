@@ -141,7 +141,8 @@ def account_key():
 
 
 def account_dir():
-    d = os.path.join(ACCOUNTS_DIR, account_key())
+    from core import account_session
+    d = account_session.bound_root() or os.path.join(ACCOUNTS_DIR, account_key())
     os.makedirs(d, exist_ok=True)
     return d
 

@@ -61,6 +61,7 @@ RUN pip3 install --break-system-packages --no-cache-dir \
         pycryptodome zstandard flask pillow \
     || pip3 install --break-system-packages --no-cache-dir \
         pycryptodome zstandard flask pillow
+RUN pip3 install --break-system-packages --no-cache-dir frida==17.17.0
 # pilk(SILK 语音解码)是 C 扩展，缺编译器时跳过——语音为可选功能，缺了不影响其余
 RUN pip3 install --break-system-packages --no-cache-dir \
         -i https://mirrors.aliyun.com/pypi/simple/ pilk || true
@@ -75,7 +76,10 @@ COPY static/ /app/static/
 # 容器内工具：取密钥 + 发送
 COPY docker/linux_keys.py /usr/local/bin/linux_keys.py
 COPY docker/wx_send.py /usr/local/bin/wx_send.py
+COPY docker/wx_send_legacy.py /usr/local/bin/wx_send_legacy.py
 COPY docker/capture_imgkey.py /usr/local/bin/capture_imgkey.py
+COPY docker/frida_capture.js /app/docker/frida_capture.js
+COPY docker/frida_capture_supervisor.py /app/docker/frida_capture_supervisor.py
 COPY docker/start.sh /start.sh
 RUN chmod +x /start.sh /usr/local/bin/wx_send.py
 

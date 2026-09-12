@@ -1,0 +1,17 @@
+**
+!docker/
+!docker/WeChatLinux_arm64.deb
+!docker/ubuntu-manual/
+!docker/ubuntu-manual/Dockerfile
+!docker/ubuntu-manual/start.sh
+!config.py
+!server.py
+!core/
+!core/**
+!tools/
+!tools/**
+!static/
+!static/**
+!docker/linux_keys.py
+!docker/wx_send.py
+!docker/wx_send_legacy.py

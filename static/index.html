@@ -8,7 +8,7 @@
   :root { --bg:#f5f6f7; --panel:#fff; --line:#e4e6eb; --brand:#07c160; --muted:#8a8f99; }
   * { box-sizing:border-box; }
   body { margin:0; font:14px/1.5 -apple-system,"PingFang SC",sans-serif; background:var(--bg); color:#1d1f23; }
-  header { display:flex; align-items:center; gap:14px; padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--line); }
+  header { flex-wrap:wrap; display:flex; align-items:center; gap:14px; padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--line); }
   header h1 { font-size:15px; margin:0; }
   .dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:5px; }
   .ok{background:var(--brand)} .bad{background:#e0554e} .warn{background:#e6a23c}
@@ -16,7 +16,8 @@
   button { font:inherit; border:none; border-radius:6px; padding:6px 12px; cursor:pointer; background:#eaecef; }
   button.primary { background:var(--brand); color:#fff; }
   button:disabled { opacity:.5; cursor:default; }
-  main { display:grid; grid-template-columns:300px 1fr; height:calc(100vh - 53px); }
+  body { height:100vh; display:flex; flex-direction:column; }
+  main { flex:1; min-height:0; display:grid; grid-template-columns:300px 1fr; height:auto; }
   .side { background:var(--panel); border-right:1px solid var(--line); display:flex; flex-direction:column; overflow:hidden; }
   .tabs { display:flex; border-bottom:1px solid var(--line); }
   .tabs div { flex:1; text-align:center; padding:9px; cursor:pointer; color:var(--muted); }
@@ -67,11 +68,16 @@
   <button id="syncBtn">立即同步</button>
   <button id="botBtn">机器人：…</button>
   <button id="aiBtn">蒸馏/AI</button>
+  <button id="personalizationBtn" class="primary">画像与人设</button>
   <button id="watchBtn">监听设置</button>
   <button id="followBtn">跟发设置</button>
+  <button id="pushBtn">监听推送</button>
   <button id="scheduleBtn">定时任务</button>
-  <label class="pill" style="cursor:pointer" title="打开有图/视频的会话时,自动驱动微信解密其媒体"><input type="checkbox" id="autoDecrypt" checked style="vertical-align:middle"> 自动解密媒体</label>
-  <label class="pill" style="cursor:pointer" title="开启后:监听的会话一来新图,后台自动开一下那个会话让微信下高清原图→永久存档(可事后读图内容/防撤回)。会自动轮流覆盖多个群/私聊,期间微信会自动翻动。关掉则只存微信已下到的清晰度。"><input type="checkbox" id="fullresCap" style="vertical-align:middle"> 自动抓高清图存档</label>
+  <button id="accountsBtn">多账号管理</button>
+  <button onclick="location.href='/moments'">朋友圈</button>
+  <button id="configExportBtn">导出配置</button>
+  <button id="configImportBtn">导入配置</button><input id="configImportFile" type="file" accept=".zip" hidden>
+  <span class="pill" id="mediaState">媒体：连接中</span>
 </header>
 <main>
   <div class="side">
@@ -88,7 +94,7 @@
     <div class="chat-head">
       <span id="chatTitle">未选择会话</span>
       <span style="display:flex;gap:8px">
-        <button id="harvestBtn" style="display:none" title="驱动微信翻遍本会话图片以解密显示">解密图片</button>
+        <button id="harvestBtn" style="display:none" title="重新检查已经接收到本地的媒体文件">更新媒体</button>
         <button id="membersBtn" style="display:none">群成员</button>
       </span>
     </div>
@@ -105,13 +111,19 @@
 <div class="members" id="aiPanel" style="width:340px"></div>
 <div class="members" id="watchPanel" style="width:340px"></div>
 <div class="members" id="followPanel" style="width:340px"></div>
+<div class="members" id="pushPanel" style="width:380px"></div>
 <div class="members" id="schedulePanel" style="width:380px"></div>
+<div id="personalizationPane" hidden style="position:fixed;inset:0;z-index:900;background:var(--bg)">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 20px;background:white;border-bottom:1px solid var(--line)"><strong>联系人画像与专属人设</strong><button id="closePersonalization">返回聊天</button></div>
+  <iframe id="personalizationFrame" title="联系人画像与专属人设管理" style="width:100%;flex:1;min-height:0;border:0"></iframe>
+</div>
 <div class="toast" id="toast"></div>
 <div class="lightbox" id="lightbox" onclick="this.classList.remove('show')"><img id="lightboxImg" src=""></div>
 
 <script>
 const $ = s => document.querySelector(s);
 let tab = "sessions", data = {sessions:[],contacts:[],groups:[],other:[]}, current = null, lastMsgs = [];
+document.addEventListener('DOMContentLoaded',()=>{const b=document.querySelector('#accountsBtn');if(b)b.onclick=()=>{location.href='/accounts';};});
 
 function toast(m){ const t=$("#toast"); t.textContent=m; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),2200); }
 function fmtTime(ts){ if(!ts) return ""; const d=new Date(ts*1000); return d.toLocaleString("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}); }
@@ -167,9 +179,22 @@ function render(){
     div.className="row"+(current&&current.username===u?" active":"");
     const unread = x.unread || 0;
     const badge = unread > 0 ? `<div class="badge">${unread>99?'99+':unread}</div>` : "";
+    const greetBtn = (tab==="sessions") ? `<button class="greetBtn" title="AI按上下文打个招呼" style="border:none;background:none;font-size:16px;cursor:pointer;padding:2px 6px;flex-shrink:0">👋</button>` : "";
     div.innerHTML = `<img class="avatar" src="${src}" onerror="this.onerror=null;this.src='${avatarURL(u)}'">
-      <div style="min-width:0;flex:1"><div class="name">${escape_(name)}</div><div class="sub">${escape_(sub)}</div></div>${badge}`;
+      <div style="min-width:0;flex:1"><div class="name">${escape_(name)}</div><div class="sub">${escape_(sub)}</div></div>${greetBtn}${badge}`;
     div.onclick = ()=> openChat({username:u, name, is_group:u.endsWith("@chatroom")});
+    const gb = div.querySelector(".greetBtn");
+    if(gb) gb.onclick = async (e)=>{
+      e.stopPropagation();
+      if(gb.disabled) return;
+      gb.disabled = true; gb.textContent = "⏳";
+      toast("AI 生成打招呼并发送中…");
+      try{
+        const r = await (await fetch("/api/greet",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat:u})})).json();
+        toast(r.ok ? ((r.verified?"已确认发送: ":"已提交微信: ")+(r.message||"").slice(0,30)) : ((r.status==="uncertain"?"待核对: ":"未发送: ")+(r.message||r.reason||"请求未完成")));
+      }catch(err){ toast("打招呼出错: "+err); }
+      gb.disabled = false; gb.textContent = "👋";
+    };
     list.appendChild(div);
   }
   updateTabBadges();
@@ -194,7 +219,6 @@ async function refreshSessions(){   // 定时刷未读数(即使当前不在会�
 function escape_(s){ return (s||"").replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function showImg(u){ $("#lightboxImg").src=u; $("#lightbox").classList.add("show"); }
 
-const harvestedChats = new Set();   // 本会话已自动解密过的会话，避免重复驱动微信
 async function openChat(chat){
   current = chat;
   $("#chatTitle").textContent = chat.name || chat.username;
@@ -203,45 +227,29 @@ async function openChat(chat){
   $("#harvestBtn").style.display = "";
   render();
   await loadMessages(true);   // 打开会话：强制滚到最新(底部)
-  maybeAutoDecrypt(chat.username);
-  // 保持会话打开：让微信也停在这个会话，新图到达时自动下清晰版(秒撤也来得及)
-  fetch("/api/focus",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({chat:chat.username, name:chat.name||chat.username})}).catch(()=>{});
-}
-
-async function maybeAutoDecrypt(username){
-  if(!$("#autoDecrypt").checked || harvestedChats.has(username)) return;
-  const hasMedia = (lastMsgs||[]).some(m=>m.type===3||m.type===43);
-  if(!hasMedia) return;
-  harvestedChats.add(username);
-  try{
-    const r=await (await fetch("/api/harvest",{method:"POST",headers:{"content-type":"application/json"},
-      body:JSON.stringify({chat:username,nav:20})})).json();
-    if(r.decrypted>0 && current && current.username===username){ toast(`自动解密 ${r.decrypted} 张`); await loadMessages(); }
-  }catch(e){}
 }
 
 $("#harvestBtn").onclick=async()=>{
   if(!current) return;
-  if(!confirm("解密图片说明：\n\n收到的图片被微信加密，需让微信自己“翻一遍大图”来解密。\n\n最可靠做法：先在 noVNC 微信窗口里打开【"+(current.name||current.username)+"】这个会话，然后点确定。\n\n(我会尝试自动打开该会话，但这版微信自动搜索不稳，手动打开更保险。)")) return;
-  const btn=$("#harvestBtn"); btn.disabled=true; const old=btn.textContent;
-  btn.textContent="解密中…(约30秒,勿动微信)"; toast("正在驱动微信翻图解密,请稍候…");
+  const button=$("#harvestBtn"); button.disabled=true;
   try{
-    const r=await (await fetch("/api/harvest",{method:"POST",headers:{"content-type":"application/json"},
-      body:JSON.stringify({chat:current.username})})).json();
-    toast(r.decrypted>0?`已解密 ${r.decrypted} 张图片,正在刷新`:"没解出新图(请先在noVNC微信里打开此会话再试;表情/视频无法解)");
-    await loadMessages();
-  }catch(e){ toast("解密失败:"+e); }
-  btn.disabled=false; btn.textContent=old;
+    const response=await fetch('/api/media/refresh',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({chat:current.username})});
+    if(!response.ok) throw new Error('更新失败');
+    toast('正在检查已接收的媒体'); await loadMessages();
+  }catch(e){toast('媒体暂时无法更新');}
+  finally{button.disabled=false;}
 };
 
 async function loadMessages(force){
   if(!current) return;
+  const selected = current;
   const box = $("#msgs");
   const atBottom = force || (box.scrollHeight-box.scrollTop-box.clientHeight < 60);
   const r = await fetch("/api/messages?chat="+encodeURIComponent(current.username)+"&limit=60");
   if(!r.ok){ const e=await r.json(); box.innerHTML=`<div class="empty">${e.error||"加载失败"}</div>`; return; }
   const msgs = await r.json();
+  if(current !== selected) return; // A previous chat response must not render into the newly selected chat.
   lastMsgs = msgs;
   const prevTop=box.scrollTop;
   box.innerHTML="";
@@ -253,7 +261,7 @@ async function loadMessages(force){
     if(current.is_group && !m.is_self) inner+=`<div class="who">${escape_(m.sender_name||m.sender||"")}</div>`;
     let text = m.content;
     if(m.type===3){
-      if(imgReady){ inner+=`<img src="/api/msgimage?chat=${encodeURIComponent(current.username)}&id=${m.local_id}" style="max-width:200px;border-radius:6px;display:block;cursor:zoom-in" onclick="showImg(this.src)" onerror="this.replaceWith(Object.assign(document.createElement('div'),{textContent:'[图片]'}))">`; text=null; }
+      if(imgReady){ inner+=`<img src="/api/msgimage?chat=${encodeURIComponent(current.username)}&id=${m.local_id}" style="max-width:200px;border-radius:6px;display:block;cursor:zoom-in" onclick="showImg(this.src)" onerror="this.replaceWith(Object.assign(document.createElement('div'),{textContent:'[等待图片就绪]' }))">`; text=null; }
       else text="[图片]";
     }
     else if(m.type===34){   // 语音：可播(全量解密)
@@ -272,12 +280,12 @@ async function loadMessages(force){
       const a=m.article; let h="";
       if(a.articles&&a.articles.length>1){   // 仅多篇图文才用列表；单篇/通知显示 标题+详情
         h=a.articles.map(x=>x.url
-          ? `<div style="padding:2px 0">📄 <a href="${x.url}" target="_blank" style="color:#576b95;text-decoration:none">${escape_(x.title)}</a></div>`
+          ? `<div style="padding:2px 0">📄 <a href="${escape_(/^https?:\/\//i.test(x.url)?x.url:"#")}" target="_blank" rel="noopener noreferrer" style="color:#576b95;text-decoration:none">${escape_(x.title)}</a></div>`
           : `<div style="padding:2px 0">📄 ${escape_(x.title)}</div>`).join("");
       } else {
         h=(a.title?`<div style="font-weight:600">${escape_(a.title)}</div>`:"")
          +(a.des?`<div style="color:#555;white-space:pre-wrap;margin-top:2px">${escape_(a.des)}</div>`:"")
-         +(a.url?`<div style="margin-top:4px"><a href="${a.url}" target="_blank" style="color:#576b95;font-size:12px;text-decoration:none">查看链接 ›</a></div>`:"");
+         +(a.url?`<div style="margin-top:4px"><a href="${escape_(/^https?:\/\//i.test(a.url)?a.url:"#")}" target="_blank" rel="noopener noreferrer" style="color:#576b95;font-size:12px;text-decoration:none">查看链接 ›</a></div>`:"");
       }
       inner+=`<div style="border-left:3px solid var(--brand);background:#f7f8fa;border-radius:6px;padding:7px 9px">${h}</div>`;
       text=null;
@@ -293,6 +301,7 @@ async function loadMessages(force){
       text=null;
     }
     if(text!==null) inner+=`<div style="white-space:pre-wrap">${escape_(text)}</div>`;
+    if(m.media_label) inner+=`<div class="sub">${escape_(m.media_label)}</div>`;
     if(m.refer) inner+=`<div class="refer">${escape_(m.refer.displayname||"")}: ${escape_(m.refer.content||"")}</div>`;
     // 分类徽章(非纯文字才显示,让分类结果一眼可见;红包/转账带金额)
     if(m.category && m.category!=="text"){
@@ -303,7 +312,12 @@ async function loadMessages(force){
         +`background:${hot?"#ffece0":"#eef0f3"};color:${hot?"#d4380d":"#8a94a6"}">${escape_(tag)}</span>`;
     }
     inner+=`<div class="time">${fmtTime(m.create_time)}</div>`;
+    const face=document.createElement('img');
+    face.className='avatar'; face.alt=m.sender_name||'';
+    face.src=avatarURL(m.sender||(!m.is_self?current.username:''));
+    face.onerror=()=>{face.onerror=null;face.src='/static/avatar-placeholder.svg';};
     div.innerHTML=`<div class="bubble">${inner}</div>`;
+    div.prepend(face);
     box.appendChild(div);
   }
   // 追加本会话本地已发图片预览（网页即时可见）
@@ -362,7 +376,7 @@ async function pollSend(job){
     loadMessages();                          // 消息落库就会显示
     let s; try{ s=await(await fetch("/api/send/status?job="+encodeURIComponent(job))).json(); }catch(e){ continue; }
     if(s.status==="queued" && s.position!=null && s.position!==lastPos){ lastPos=s.position; toast("排队中(第"+s.position+"位)…"); }
-    if(s.status==="done"){ toast(s.verified?"✅ 已送达(已核对会话)":"已发送"); loadMessages(); return; }
+    if(s.status==="done"){ toast(s.send_status==="submitted"?"已执行发送，请在微信确认":s.verified?"✅ 已发送(已核对会话)":"已发送"); loadMessages(); return; }
     if(s.status==="error"){ toast("发送失败："+(s.wrong_chat?"打开的会话不对，已阻止":(s.error||"未确认"))); return; }
   }
 }
@@ -425,7 +439,20 @@ $("#membersBtn").onclick=async()=>{
   p.classList.add("show");
 };
 
+function openPersonalization(){
+  const panel=$("#personalizationPane");panel.hidden=false;panel.style.display="flex";panel.style.flexDirection="column";
+  const frame=$("#personalizationFrame");if(!frame.getAttribute("src"))frame.src="/personalization";
+}
+$("#personalizationBtn").onclick=openPersonalization;
+$("#closePersonalization").onclick=()=>{const panel=$("#personalizationPane");panel.hidden=true;panel.style.display="none";};
+const localAdminReady=fetch("/api/admin/access",{headers:{"X-Wxbot-Local-Admin":"1"}}).then(r=>r.json()).then(d=>!!d.local_admin).catch(()=>false);
+let localAdminAccess=false;
+let privateAdminToken = ""; // memory only; never persist or include in URLs
+function privateAdminFetch(url, options={}){
+  return fetch(url, {...options, headers:{...(options.headers||{}), "X-Wxbot-Admin-Token":privateAdminToken,"X-Wxbot-Local-Admin":"1"}});
+}
 async function renderAI(){
+  localAdminAccess=await localAdminReady;
   const p=$("#aiPanel");
   const llm=await(await fetch("/api/llm")).json();
   const groups=(data.groups&&data.groups.length)?data.groups:(await(await fetch("/api/groups")).json());
@@ -437,14 +464,21 @@ async function renderAI(){
   const personas=await(await fetch("/api/personas")).json();
   let ag={enabled:false,tools:[],all_tools:[]}, kb={total:0,docs:[]}, profs={profiles:[]};
   try{ ag=await(await fetch("/api/agent/config")).json(); }catch(e){}
-  try{ kb=await(await fetch("/api/kb")).json(); }catch(e){}
-  try{ profs=await(await fetch("/api/profiles")).json(); }catch(e){}
+  try{ kb=await(await privateAdminFetch("/api/kb")).json(); }catch(e){}
+  try{ profs=await(await privateAdminFetch("/api/profiles")).json(); }catch(e){}
   let activePersona="";
   try{ const botr=await(await fetch("/api/bot")).json(); const rr=(botr.rules&&botr.rules.rules||[]).find(r=>r.action&&r.action.type==="reply_ai"); activePersona=(rr&&rr.action.persona)||""; }catch(e){}
   p.innerHTML=`
+    ${llm.private_management_auth && !localAdminAccess ? `
+    <div class="sub">画像与知识库管理需独立授权；凭据仅保留在当前页面内存。</div>
+    <input id="privateAdminToken" type="password" autocomplete="off" placeholder="管理员授权凭据" style="width:100%;padding:5px;margin:4px 0">
+    <button id="privateAdminUnlock">授权管理访问</button>
+    <div class="sub">${escape_(profs.error||kb.error||'')}</div>
+    ` : ""}
+    ${llm.contact_personalization ? '<p><button onclick="openPersonalization()">联系人画像与专属人设</button></p>' : ''}
     <h3>AI 设置 <span class="sub" style="font-weight:normal">Claude / GPT 两套独立中转</span></h3>
     <div class="sub" style="margin-bottom:6px">状态：${llm.configured?'已配置 ✅':'未配置'} · Claude ${llm.claude&&llm.claude.has_key?'🔑':'—'} · GPT ${llm.gpt&&llm.gpt.has_key?'🔑':'—'}</div>
-    <label class="sub">主用(chat/工具/视觉默认走它)</label>
+    <label class="sub">${llm.tool_route ? "主用（聊天及未独立配置的工具/视觉）" : "主用聊天 provider"}</label>
     <select id="llmProv" style="width:100%;padding:5px;margin:2px 0 6px"><option value="claude">Claude</option><option value="gpt">GPT</option></select>
     <label class="sub">视觉用(留空=跟随主用)</label>
     <select id="llmVis" style="width:100%;padding:5px;margin:2px 0 8px"><option value="">跟随主用</option><option value="claude">Claude</option><option value="gpt">GPT</option></select>
@@ -460,6 +494,12 @@ async function renderAI(){
       <input id="gKey" placeholder="GPT API key(留空=不改)" style="width:100%;margin-bottom:4px;padding:5px">
       <input id="gModel" placeholder="模型 如 gpt-6-astra" style="width:100%;padding:5px" value="${(llm.gpt&&llm.gpt.model)||''}">
     </div>
+    ${llm.tool_route ? `
+    <div class="sub">工具调用：未独立指定时跟随主用，整轮及最终回复使用同一路由。</div>
+    <select id="llmToolsProv" style="width:100%;padding:5px;margin:2px 0 6px"><option value="">跟随主用 provider</option><option value="claude">Claude</option><option value="gpt">GPT</option></select>
+    <input id="llmToolsModel" placeholder="独立工具模型（留空使用该 provider 的模型）" style="width:100%;margin-bottom:6px;padding:5px" value="${escape_(llm.tools_model||'')}">
+    <div class="sub">实际请求路由：${escape_(llm.tool_route?.provider||llm.provider)} / ${escape_(llm.tool_route?.model||'')}；这是请求字段，不代表中转底层模型认证。</div>
+    ` : ""}
     <input id="llmProxy" placeholder="代理(可选,留空=不走代理)" style="width:100%;margin-bottom:6px;padding:5px" value="${llm.proxy||''}">
     <button id="llmSave" class="primary">保存 AI 配置</button>
     <button id="llmTest">测试两套</button>
@@ -470,7 +510,7 @@ async function renderAI(){
     <div id="agTools" style="margin-bottom:6px">${ag.all_tools.map(t=>`<label class="pill" style="cursor:pointer;margin:2px"><input type="checkbox" class="agTool" value="${t}" ${ag.tools.includes(t)?'checked':''}> ${t}</label>`).join("")}</div>
     <button id="agSave" class="primary">保存 Agent 配置</button>
     <hr style="margin:12px 0;border:none;border-top:1px solid #eee">
-    <h3>知识库(RAG) <span class="sub" style="font-weight:normal">共 ${kb.total} 块</span></h3>
+    <h3>知识库(RAG) <span class="sub" style="font-weight:normal">共 ${kb.total||0} 块</span></h3>
     <textarea id="kbText" placeholder="粘贴文档/FAQ，保存后可被机器人检索(search_kb)" style="width:100%;height:64px;padding:5px;margin-bottom:6px"></textarea>
     <input id="kbSrc" placeholder="来源标签(可选,如 faq)" style="width:100%;padding:5px;margin-bottom:6px">
     <button id="kbAdd" class="primary">切块导入知识库</button>
@@ -507,6 +547,9 @@ async function renderAI(){
     <h3>已有人设 <span class="sub" style="font-weight:normal">(当前机器人用：${escape_(activePersona||'无')})</span></h3>
     ${personas.length?personas.map(x=>`<div class="row"><div style="flex:1;min-width:0"><div class="name">${escape_(x.name)}${x.slug===activePersona?' ⭐':''}</div><div class="sub">slug: ${escape_(x.slug)} · ${x.count||0}条</div></div><button class="pView" data-s="${escape_(x.slug)}">查看</button><button class="pUse primary" data-s="${escape_(x.slug)}" style="margin-left:4px">设为回复</button><button class="pDel" data-s="${escape_(x.slug)}" style="margin-left:4px">删</button></div>`).join(""):'<div class="sub">还没有，先蒸馏或导入一个</div>'}
     <div id="personaView" style="margin-top:8px"></div>`;
+  if($("#privateAdminUnlock")) $("#privateAdminUnlock").onclick=()=>{
+    privateAdminToken=$("#privateAdminToken").value; renderAI();
+  };
   $("#impBtn").onclick=async()=>{
     const name=$("#impName").value.trim(), persona=$("#impText").value.trim();
     if(!name||!persona){ toast("填名字和人设内容"); return; }
@@ -520,21 +563,22 @@ async function renderAI(){
   };
   $("#kbAdd").onclick=async()=>{
     const content=$("#kbText").value.trim(); if(!content){ toast("粘贴内容"); return; }
-    const r=await(await fetch("/api/kb/add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({content,source:$("#kbSrc").value.trim()||"import",chunk:true})})).json();
+    const r=await(await privateAdminFetch("/api/kb/add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({content,source:$("#kbSrc").value.trim()||"import",chunk:true})})).json();
     toast(r.ok?("已导入 "+(r.chunks||1)+" 块"):"导入失败"); renderAI();
   };
   document.querySelectorAll(".kbDel").forEach(b=>b.onclick=async()=>{
-    await fetch("/api/kb/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:+b.dataset.id})});
-    toast("已删除"); renderAI();
+    const r=await(await privateAdminFetch("/api/kb/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:+b.dataset.id})})).json();
+    toast(r.ok?"已删除":(r.error||"删除失败")); renderAI();
   });
   document.querySelectorAll(".prView").forEach(b=>b.onclick=async()=>{
-    const d=await(await fetch("/api/profiles/"+encodeURIComponent(b.dataset.w))).json();
-    $("#profView").innerHTML=`<div style="background:#f7f8fa;border-radius:8px;padding:10px;font-size:13px;line-height:1.6"><b>${escape_(d.name||d.wxid)}</b>${d.summary?('<br>'+escape_(d.summary)):''}<br>${(d.facts||[]).map(f=>'· '+escape_(f.fact)).join('<br>')||'<span class=sub>无事实</span>'}</div>`;
+    const d=await(await privateAdminFetch("/api/profiles/"+encodeURIComponent(b.dataset.w))).json();
+    if(d.error){ toast(d.error); return; }
+    $("#profView").innerHTML=`<div style="background:#f7f8fa;border-radius:8px;padding:10px;font-size:13px;line-height:1.6"><b>${escape_(d.name||d.wxid)}</b>${d.summary?('<br>'+escape_(d.summary)):''}<br>${(d.facts||[]).map(f=>{const t=escape_(f.text||f.fact||'');const st=f.status&&f.status!=='active'?` <span class=sub>[已${f.status==='cancelled'?'取消':'更新'}]</span>`:'';return (f.status&&f.status!=='active'?'<span style=opacity:.5>':'')+'· '+t+st+(f.status&&f.status!=='active'?'</span>':'');}).join('<br>')||'<span class=sub>无事实</span>'}</div>`;
   });
   document.querySelectorAll(".prDel").forEach(b=>b.onclick=async()=>{
     if(!confirm("删除画像 "+b.dataset.w+"?")) return;
-    await fetch("/api/profiles/"+encodeURIComponent(b.dataset.w)+"/delete",{method:"POST"});
-    toast("已删除"); renderAI();
+    const r=await(await privateAdminFetch("/api/profiles/"+encodeURIComponent(b.dataset.w)+"/delete",{method:"POST"})).json();
+    toast(r.ok?"已删除":(r.error||"删除失败")); renderAI();
   });
   document.querySelectorAll(".pDel").forEach(b=>b.onclick=async()=>{
     if(!confirm("删除人设 "+b.dataset.s+"?")) return;
@@ -542,6 +586,7 @@ async function renderAI(){
     toast("已删除"); renderAI();
   });
   if(llm.provider) $("#llmProv").value=llm.provider;
+  if($("#llmToolsProv")) $("#llmToolsProv").value=llm.tools_provider||"";
   if(llm.vision_provider!==undefined) $("#llmVis").value=llm.vision_provider||"";
   document.querySelectorAll(".pView").forEach(b=>b.onclick=async()=>{
     const slug=b.dataset.s;
@@ -555,11 +600,13 @@ async function renderAI(){
     };
   });
   document.querySelectorAll(".pUse").forEach(b=>b.onclick=async()=>{
+    if(llm.contact_personalization){ openPersonalization(); return; }
     const r=await(await fetch("/api/bot/persona",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({slug:b.dataset.s})})).json();
     toast(r.ok?("机器人回复人设已设为 "+b.dataset.s):"设置失败"); renderAI();
   });
   $("#llmSave").onclick=async()=>{
-    const body={provider:$("#llmProv").value, vision_provider:$("#llmVis").value, proxy:$("#llmProxy").value.trim(),
+    const body={provider:$("#llmProv").value, vision_provider:$("#llmVis").value,
+      ...(llm.tool_route ? {tools_provider:$("#llmToolsProv").value, tools_model:$("#llmToolsModel").value.trim()} : {}), proxy:$("#llmProxy").value.trim(),
       claude:{base_url:$("#cBase").value.trim(), model:$("#cModel").value.trim(), api_key:$("#cKey").value.trim()},
       gpt:{base_url:$("#gBase").value.trim(), model:$("#gModel").value.trim(), api_key:$("#gKey").value.trim()}};
     const r=await(await fetch("/api/llm/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
@@ -612,15 +659,23 @@ async function renderWatch(){
     (await fetch("/api/bot")).json()
   ]);
   const watch=new Set((botr.rules&&botr.rules.watch)||[]);
+  const pc=botr.rules&&botr.rules.proactive||{};
   // 群：全部群(名字准)。私聊：最近会话里的真人私聊
   const groups=gs.map(g=>({username:g.username,name:g.name,is_group:true}));
-  const isOfficial=u=>u.startsWith("gh_")||u.endsWith("@openim")||u.includes("@kefu")||["brandsessionholder","weixin","filehelper"].includes(u);
+  const isOfficial=u=>u.startsWith("gh_")||u.endsWith("@openim")||u.includes("@kefu")||["brandsessionholder","weixin","filehelper","newsapp"].includes(u);
   const privs=ss.filter(s=>!s.is_group && !isOfficial(s.username));
   const rowHtml=s=>`<label class="row" style="cursor:pointer"><input type="checkbox" class="wchk" value="${s.username}" ${watch.has(s.username)?"checked":""} style="margin-right:8px"><div style="min-width:0"><div class="name">${escape_(s.name||s.username)}</div><div class="sub">${s.is_group?'群·@我/引用我触发':'私聊·任意消息自动回复'}</div></div></label>`;
   p.innerHTML=`<h3>监听设置 <span style="float:right;cursor:pointer;color:#999" onclick="closePanel('#watchPanel')">✕</span></h3>
-    <div class="sub" style="margin-bottom:6px">勾选的才会自动回复。<b>群</b>=被@或引用才回；<b>私聊</b>=对方一发消息就回。没勾的不动。</div>
+    <div class="sub" style="margin-bottom:6px">勾选的才会自动回复。<b>群</b>=被@或引用时回复，开启主动模式后也可在安静时接话；<b>私聊</b>=对方一发消息就回。没勾的不动。</div>
     <input id="wfilter" placeholder="过滤…" style="width:100%;padding:5px;margin-bottom:6px">
     <button id="wsave" class="primary">保存监听</button>
+    <div style="margin-top:10px;padding:8px;border:1px solid #ddd"><b>主动回复</b><br>
+    <label><input id="proOn" type="checkbox" ${pc.enabled===true?'checked':''}>开启主动模式</label>
+    <label><input id="proPrivate" type="checkbox" ${pc.private_share_enabled===true?'checked':''}>私聊分享近况</label>
+    <label><input id="proGroup" type="checkbox" ${pc.group_enabled===true?'checked':''}>群聊安静时主动接话</label><br>
+    群内停顿 <input id="groupAfter" type="number" min="1" max="1440" value="${Math.round((pc.group_after??300)/60)}" style="width:55px"> 分钟后尝试接话（每群至少间隔30分钟；读取最近约10条消息）<br>
+    免打扰（北京时间）：<input id="qStart" type="number" min="0" max="23" value="${pc.quiet_start??22}" style="width:45px">点 至 <input id="qEnd" type="number" min="0" max="23" value="${pc.quiet_end??8}" style="width:45px">点
+    <button id="proSave">保存主动设置</button></div>
     <div style="margin-top:8px"><b>群聊 (${groups.length})</b></div>
     <div id="wgroups">${groups.map(rowHtml).join("")}</div>
     <div style="margin-top:8px"><b>私聊 (${privs.length})</b></div>
@@ -632,6 +687,7 @@ async function renderWatch(){
     const r=await(await fetch("/api/bot/watch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({watch:w})})).json();
     toast("已保存监听 "+r.watch.length+" 个会话");
   };
+  $("#proSave").onclick=async()=>{const b={enabled:$("#proOn").checked,private_share_enabled:$("#proPrivate").checked,group_enabled:$("#proGroup").checked,group_after:Math.max(1,+$("#groupAfter").value)*60,quiet_start:+$("#qStart").value,quiet_end:+$("#qEnd").value};const r=await(await fetch('/api/bot/proactive',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json();toast(r.ok?'已保存主动回复设置':'保存失败');};
   p.classList.add("show");
 }
 $("#watchBtn").onclick=()=>{ const p=$("#watchPanel"); if(p.classList.contains("show")){p.classList.remove("show");return;} $("#aiPanel").classList.remove("show");$("#membersPanel").classList.remove("show");$("#followPanel").classList.remove("show"); renderWatch(); };
@@ -663,17 +719,88 @@ async function renderFollow(){
   p.classList.add("show");
 }
 $("#followBtn").onclick=()=>{ const p=$("#followPanel"); if(p.classList.contains("show")){p.classList.remove("show");return;} $("#aiPanel").classList.remove("show");$("#membersPanel").classList.remove("show");$("#watchPanel").classList.remove("show"); renderFollow(); };
+
+let _pushTargets=[];
+let _pushNames=[];
+function pushTargetRow(t,i){
+  if(t.type==="wechat")
+    return `<div class="row" style="gap:6px;align-items:center"><span class="pill">微信</span><input class="ptto" list="pnamelist" data-i="${i}" value="${escape_(t.to||"")}" placeholder="选/搜好友·群" style="flex:1;padding:4px"><label class="sub" style="cursor:pointer"><input type="checkbox" class="pten" data-i="${i}" ${t.enabled===false?"":"checked"}>启用</label><span style="cursor:pointer;color:#d4380d" onclick="_pushTargets.splice(${i},1);renderPush()">✕</span></div>`;
+  return `<div class="row" style="gap:6px;align-items:center"><span class="pill">webhook</span><input class="pturl" data-i="${i}" value="${escape_(t.url||"")}" placeholder="https://…" style="flex:1;padding:4px"><label class="sub" style="cursor:pointer"><input type="checkbox" class="pten" data-i="${i}" ${t.enabled===false?"":"checked"}>启用</label><span style="cursor:pointer;color:#d4380d" onclick="_pushTargets.splice(${i},1);renderPush()">✕</span></div>`;
+}
+async function renderPush(){
+  const p=$("#pushPanel");
+  if(!p.classList.contains("show")){
+    const [cfg,ss,gs,cs]=await Promise.all([
+      (await fetch("/api/bot/push")).json(),
+      fetch("/api/sessions").then(r=>r.json()).catch(()=>[]),
+      fetch("/api/groups").then(r=>r.json()).catch(()=>[]),
+      fetch("/api/contacts").then(r=>r.json()).catch(()=>[])
+    ]);
+    _pushTargets=(cfg.targets||[]).map(t=>({...t}));
+    p._cfg=cfg;
+    // 可选好友/群显示名(去重·发送用的正是显示名)
+    const names=[];
+    (Array.isArray(cs)?cs:[]).forEach(c=>{ if(c.name)names.push(c.name); });
+    (Array.isArray(gs)?gs:[]).forEach(g=>{ if(g.name)names.push(g.name); });
+    (Array.isArray(ss)?ss:[]).forEach(s=>{ if(s.name)names.push(s.name); });
+    _pushNames=[...new Set(names)].sort((a,b)=>a.localeCompare(b,"zh"));
+  }
+  const cfg=p._cfg||{};
+  const dlist=`<datalist id="pnamelist">${_pushNames.map(n=>`<option value="${escape_(n)}">`).join("")}</datalist>`;
+  p.innerHTML=`<h3>监听推送 <span style="float:right;cursor:pointer;color:#999" onclick="closePanel('#pushPanel')">✕</span></h3>
+    ${dlist}
+    <div class="sub" style="margin-bottom:8px">监听会话里<b>任何人</b>的<b>任何消息</b>(文字/图片/红包/转账…)都转发到下面的目标。来源默认=<b>监听设置</b>里的会话(留空即用它)。微信目标点输入框会弹出好友/群列表可选。</div>
+    <label class="row" style="cursor:pointer;margin-bottom:6px"><input type="checkbox" id="pen" ${cfg.enabled?"checked":""} style="margin-right:8px"><b>启用监听推送</b></label>
+    <label class="row" style="cursor:pointer;margin-bottom:8px"><input type="checkbox" id="pself" ${cfg.include_self?"checked":""} style="margin-right:8px">连自己发的也推</label>
+    <div style="margin:8px 0 4px"><b>推送目标</b></div>
+    <div id="ptlist">${_pushTargets.map(pushTargetRow).join("")||'<div class="sub">还没有目标</div>'}</div>
+    <div class="row" style="gap:6px;margin-top:6px">
+      <button id="padd_wx">+ 微信好友</button>
+      <button id="padd_wh">+ webhook</button>
+    </div>
+    <div class="row" style="gap:6px;margin-top:12px">
+      <button id="psave" class="primary">保存</button>
+      <button id="ptest">发测试</button>
+    </div>`;
+  const sync=()=>{ document.querySelectorAll("#ptlist .ptto").forEach(e=>_pushTargets[+e.dataset.i].to=e.value);
+    document.querySelectorAll("#ptlist .pturl").forEach(e=>_pushTargets[+e.dataset.i].url=e.value);
+    document.querySelectorAll("#ptlist .pten").forEach(e=>_pushTargets[+e.dataset.i].enabled=e.checked);
+    p._cfg={...(p._cfg||{}),enabled:$("#pen").checked,include_self:$("#pself").checked}; };
+  $("#padd_wx").onclick=()=>{ sync(); _pushTargets.push({type:"wechat",to:"",enabled:true}); renderPush(); };
+  $("#padd_wh").onclick=()=>{ sync(); _pushTargets.push({type:"webhook",url:"",enabled:true}); renderPush(); };
+  $("#psave").onclick=async()=>{ sync();
+    const body={enabled:$("#pen").checked,include_self:$("#pself").checked,targets:_pushTargets};
+    const r=await(await fetch("/api/bot/push",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
+    p._cfg=r.push; _pushTargets=(r.push.targets||[]).map(t=>({...t}));
+    toast("已保存推送 "+(r.push.targets||[]).length+" 个目标"); };
+  $("#ptest").onclick=async()=>{ sync();
+    const r=await(await fetch("/api/bot/push/test",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({targets:_pushTargets})})).json();
+    toast("测试已发出，看日志"); console.log("push test",r.log); };
+  p.classList.add("show");
+}
+$("#pushBtn").onclick=()=>{ const p=$("#pushPanel"); if(p.classList.contains("show")){p.classList.remove("show");return;} $("#aiPanel").classList.remove("show");$("#membersPanel").classList.remove("show");$("#watchPanel").classList.remove("show");$("#followPanel").classList.remove("show"); renderPush(); };
 $("#scheduleBtn").onclick=()=>{ const p=$("#schedulePanel"); if(p.classList.contains("show")){p.classList.remove("show");return;} document.querySelectorAll(".members").forEach(x=>x.classList.remove("show")); renderSchedule(); p.classList.add("show"); };
 async function renderSchedule(){
   const p=$("#schedulePanel");
   let d={tasks:[],log:[]}; try{ d=await(await fetch("/api/schedule")).json(); }catch(e){}
-  const rows=(d.tasks||[]).map(t=>`<div class="row" style="align-items:flex-start">
+  const rows=(d.tasks||[]).map(t=>`<div class="row" style="align-items:flex-start;flex-wrap:wrap">
       <div style="flex:1;min-width:0">
         <div class="name">${escape_(t.title||'')} ${t.is_group?'👥':'👤'}</div>
         <div class="sub" style="white-space:normal">→ ${escape_(t.target_display||t.target||'')}${t.mention_display?(' @'+escape_(t.mention_display)):''}<br>${escape_(t.schedule_desc||'')} · 下次 ${escape_(t.next||'?')}${t.use_llm?' · AI生成':''}${t.creator_name?(' · 由 '+escape_(t.creator_name)+' 设置'):''}<br>${escape_((t.prompt||'').slice(0,50))}</div>
       </div>
-      <button class="schRun" data-id="${t.id}" title="立即执行一次">▶</button>
+      <button class="schEdit" data-id="${t.id}" title="编辑时间/内容">改</button>
+      <button class="schRun" data-id="${t.id}" title="立即执行一次" style="margin-left:4px">▶</button>
       <button class="schDel" data-id="${t.id}" style="margin-left:4px">删</button>
+      <div class="schForm" id="schForm-${t.id}" style="display:none;flex-basis:100%;margin-top:6px;padding:8px;background:#f6f6f6;border-radius:6px">
+        <div class="sub" style="margin-bottom:4px">时间(cron 5字段，如 <code>0 18 * * 3-5</code>=周三到五18点；一次性用下面的日期)</div>
+        <input class="schCron" data-id="${t.id}" value="${escape_(t.cron||'')}" placeholder="分 时 日 月 周" style="width:100%;padding:5px;margin-bottom:5px">
+        <input class="schOnce" data-id="${t.id}" value="${escape_(t.once_at||'')}" placeholder="一次性: YYYY-MM-DD HH:MM (留空=用上面cron)" style="width:100%;padding:5px;margin-bottom:5px">
+        <input class="schTitle" data-id="${t.id}" value="${escape_(t.title||'')}" placeholder="标题" style="width:100%;padding:5px;margin-bottom:5px">
+        <textarea class="schPrompt" data-id="${t.id}" placeholder="到点要说/做的内容" style="width:100%;height:44px;padding:5px;margin-bottom:5px">${escape_(t.prompt||'')}</textarea>
+        <button class="schSave primary" data-id="${t.id}">保存</button>
+        <button class="schCancel" data-id="${t.id}" style="margin-left:4px">取消</button>
+        <span class="schEditMsg sub" data-id="${t.id}" style="margin-left:6px"></span>
+      </div>
     </div>`).join("") || '<div class="sub">还没有定时任务</div>';
   p.innerHTML=`<h3>定时任务 <span style="float:right;cursor:pointer;color:#999" onclick="closePanel('#schedulePanel')">✕</span></h3>
     <div class="sub" style="margin-bottom:6px">用一句话描述：创建/取消/列出。到点把结果发给对方（私聊直发，群聊@他）。</div>
@@ -698,13 +825,34 @@ async function renderSchedule(){
   });
   document.querySelectorAll(".schRun").forEach(b=>b.onclick=async()=>{
     await fetch("/api/schedule/"+b.dataset.id+"/run",{method:"POST"}); toast("已触发执行(看聊天)"); });
+  document.querySelectorAll(".schEdit").forEach(b=>b.onclick=()=>{
+    const f=$("#schForm-"+b.dataset.id); if(f) f.style.display=(f.style.display==="none"?"block":"none");
+  });
+  document.querySelectorAll(".schCancel").forEach(b=>b.onclick=()=>{
+    const f=$("#schForm-"+b.dataset.id); if(f) f.style.display="none";
+  });
+  document.querySelectorAll(".schSave").forEach(b=>b.onclick=async()=>{
+    const id=b.dataset.id;
+    const pick=(cls)=>document.querySelector("."+cls+"[data-id='"+id+"']");
+    const msg=pick("schEditMsg");
+    const body={ cron:pick("schCron").value.trim(), once_at:pick("schOnce").value.trim(),
+                 title:pick("schTitle").value.trim(), prompt:pick("schPrompt").value };
+    msg.textContent="保存中…";
+    try{
+      const r=await(await fetch("/api/schedule/"+id+"/update",{method:"POST",
+        headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
+      if(r.ok){ toast("已更新"); renderSchedule(); }
+      else{ msg.textContent="⚠️ "+(r.message||"保存失败"); }
+    }catch(e){ msg.textContent="出错:"+e; }
+  });
 }
 
 let botRunning=false;
 async function loadBot(){
   try{ const b=await(await fetch("/api/bot")).json();
     botRunning=b.running;
-    $("#botBtn").textContent="机器人："+(b.running?"运行中⏹":"已停止▶");
+    $("#botBtn").textContent="机器人："+(b.running?(b.sending_available===false?"监听中 · 微信发送不可用⏹":b.sending_scope==="legacy_search"?"运行中 · 最早版发送⏹":b.sending_scope==="private_text"?"运行中 · 私聊文字⏹":"运行中⏹"):"已停止▶");
+    $("#botBtn").title=b.sending_available===false?"真实微信发送适配器尚不可用，自动回复和打招呼不能发出；与画像开关无关。":b.sending_scope==="legacy_search"?"最早版：搜索联系人或群聊后粘贴发送，支持文字和图片。":b.sending_scope==="private_text"?"私聊文字使用原生微信号核对；群聊和图片尚未恢复。发送时请勿同时操作 VNC。":"切换机器人监听状态";
     $("#botBtn").className=b.running?"primary":"";
   }catch(e){}
 }
@@ -713,9 +861,14 @@ $("#botBtn").onclick=async()=>{
   await loadBot(); toast(botRunning?"机器人已启动":"机器人已停止");
 };
 
-// 撤回图抓全图开关：加载状态 + 切换持久化
-(async()=>{ try{ const r=await(await fetch("/api/bot/fullres")).json(); $("#fullresCap").checked=!!r.enabled; }catch(e){} })();
-$("#fullresCap").onchange=async()=>{ await fetch("/api/bot/fullres",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:$("#fullresCap").checked})}); toast($("#fullresCap").checked?"已开启:微信会跟随你看的会话保持打开,新图自动下清晰版":"已关闭"); if($("#fullresCap").checked&&current){ fetch("/api/focus",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat:current.username,name:current.name||current.username})}).catch(()=>{}); } };
+async function loadMediaStatus(){
+  try{const state=await(await fetch('/api/media/status')).json(); $("#mediaState").textContent=state.label||'媒体暂未连接';}
+  catch(e){$("#mediaState").textContent='媒体暂未连接';}
+}
+document.getElementById('configExportBtn').onclick=async()=>{const r=await fetch('/api/config/export',{headers:{'X-Wxbot-Local-Admin':'1'}});if(!r.ok){alert('导出失败');return;}const a=document.createElement('a');a.href=URL.createObjectURL(await r.blob());a.download='wxbot-config-backup.zip';a.click();};
+document.getElementById('configImportBtn').onclick=()=>document.getElementById('configImportFile').click();
+document.getElementById('configImportFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;const fd=new FormData();fd.append('file',f);const r=await fetch('/api/config/import',{method:'POST',headers:{'X-Wxbot-Local-Admin':'1'},body:fd});const d=await r.json();alert(d.message||d.error||'导入完成');e.target.value='';};
+loadMediaStatus(); setInterval(loadMediaStatus,8000);
 loadStatus(); loadTab("sessions"); loadBot();
 setInterval(loadStatus, 8000); setInterval(loadBot, 8000);
 // 自动刷新(无需手动刷新页面)：当前会话消息 1.2s(后端已事件驱动~0.3s刷解密库,前端跟上)；

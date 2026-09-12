@@ -10,17 +10,131 @@ import time
 
 from flask import Flask, jsonify, request, send_file, send_from_directory, Response
 import io
+import zipfile
+import tempfile
 
 import config
 from core import decrypt, contacts, messages, avatars, docker_wx, sender
 from core import bot as botmod
+from tools import wxbot_config
 
 app = Flask(__name__, static_folder=None)
+from core.personalization_api import bp as personalization_bp
+app.register_blueprint(personalization_bp)
+
+@app.get("/personalization")
+def personalization_page():
+    return send_from_directory(os.path.join(config.PROJECT_DIR, "static"), "personalization.html")
+
+
+
+from core import account_session as sessions
+
+def _config_access():
+    """Allow same-origin local UI or the configured admin token (Docker bridge requests
+    arrive as 172.x and cannot pass the strict loopback check)."""
+    if local_management_access():
+        return True
+    import hmac
+    expected = os.environ.get("WXBOT_ADMIN_READ_TOKEN", "")
+    supplied = request.headers.get("X-Wxbot-Admin-Token", "")
+    return bool(expected and supplied) and hmac.compare_digest(expected.encode(), supplied.encode())
+
+def local_management_access():
+    """Explicit local-owner access; never trust loopback alone or proxy headers.
+
+    The custom browser header requires same-origin access (no CORS grant). A
+    strict Host check also prevents a rebound external hostname gaining access.
+    Remote deployments keep the existing administrator token requirement.
+    """
+    if os.environ.get("WXBOT_LOCAL_ADMIN") != "1":
+        return False
+    # Docker published-port requests arrive from the bridge gateway (172.16/12).
+    if request.remote_addr not in ("127.0.0.1", "::1") and not (request.remote_addr or "").startswith("172."):
+        return False
+    if request.host not in (f"127.0.0.1:{config.PORT}", f"localhost:{config.PORT}", f"[::1]:{config.PORT}"):
+        return False
+    if request.headers.get("X-Wxbot-Local-Admin") != "1":
+        return False
+    if any(k.lower() == "forwarded" or k.lower().startswith("x-forwarded-") for k in request.headers.keys()):
+        return False
+    if request.headers.get("Sec-Fetch-Site", "same-origin") not in ("same-origin", "none"):
+        return False
+    origin = request.headers.get("Origin")
+    return not origin or origin == request.host_url.rstrip("/")
+
+
+@app.get("/api/config/export")
+def api_config_export():
+    if not _config_access():
+        return jsonify({"error": "配置导出仅允许本机后台操作"}), 403
+    out = io.BytesIO()
+    files = wxbot_config.collect_files()
+    manifest = {"format": "wxbot-config-v1", "created_at": int(time.time()), "files": files,
+                "excluded": ["keys.json", "llm_config.json", "decrypted/", "msg/", "mediacache/"]}
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("wxbot-manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        for rel in files: z.write(os.path.join(config.PROJECT_DIR, rel), rel)
+    out.seek(0)
+    return send_file(out, mimetype="application/zip", as_attachment=True, download_name="wxbot-config-backup.zip")
+
+@app.post("/api/config/import")
+def api_config_import():
+    if not _config_access():
+        return jsonify({"error": "配置导入仅允许本机后台操作"}), 403
+    upload = request.files.get("file")
+    if not upload or not upload.filename:
+        return jsonify({"error": "请选择配置 zip 文件"}), 400
+    fd, path = tempfile.mkstemp(suffix=".zip"); os.close(fd)
+    try:
+        upload.save(path); wxbot_config.import_archive(path)
+    except SystemExit as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": "导入失败：" + type(exc).__name__}), 400
+    finally:
+        try: os.unlink(path)
+        except OSError: pass
+    return jsonify({"ok": True, "message": "配置已导入，请重启后台"})
+
+@app.get("/api/admin/access")
+def admin_access():
+    return jsonify(local_admin=local_management_access())
+
+
+@app.before_request
+def authorize_private_management():
+    """Separate owner access to full profiles/KB; never inferred from absent tool context."""
+    if request.path not in ("/api/profiles", "/api/kb", "/api/personalization") and not request.path.startswith(("/api/profiles/", "/api/kb/", "/api/personalization/")):
+        return None
+    import hashlib
+    import hmac
+    expected = os.environ.get("WXBOT_ADMIN_READ_TOKEN", "")
+    supplied = request.headers.get("X-Wxbot-Admin-Token", "")
+    local = local_management_access()
+    allowed = local or (bool(expected and supplied) and hmac.compare_digest(expected.encode(), supplied.encode()))
+    account = hashlib.sha256(config.account_key().encode()).hexdigest()[:12]
+    app.logger.warning("private_management_access endpoint=%s method=%s account=%s allowed=%s auth=%s",
+                       request.endpoint, request.method, account, allowed,
+                       "local" if local else "token" if allowed else "denied")
+    if not allowed:
+        return jsonify({"error": "画像/知识库管理需要独立管理员授权"}), 403
+    return None
 
 _state = {"last_sync": 0, "last_sync_result": {}, "syncing": False}
 _lock = threading.Lock()
 
 _bot = {"thread": None, "running": False, "log": [], "state": {}}
+_bot_lifecycle_lock = threading.RLock()
+
+
+def _start_bot():
+    """One worker per process. A user stop pauses it without losing its queue."""
+    with _bot_lifecycle_lock:
+        _bot['running'] = True
+        if _bot['thread'] is None or not _bot['thread'].is_alive():
+            _bot['thread'] = threading.Thread(target=_bot_loop, daemon=True)
+            _bot['thread'].start()
 
 
 def _msg_db_mtime():
@@ -43,31 +157,12 @@ _focus = {"chat": None, "name": None, "thread": None}
 
 
 def _focus_loop():
-    from core import decrypt as _dec, messages as _msg, sender as _snd
-    while True:
-        chat = _focus["chat"]
-        name = _focus["name"]
-        try:
-            if not chat or not botmod.load_rules().get("fullres_capture"):
-                time.sleep(1.5)
-                continue
-            # 被切走(发送/翻图/别的会话)就重开，保持钉住
-            if not docker_wx.priority_pending() and docker_wx.current_open() != chat:
-                _snd.focus_chat(name, chat)
-            # 快轮询该会话：get_messages 内部会缓存(升级)清晰图。收紧到 ~0.5s 提高抓到
-            # "撤回前那一刻清晰图已就位"的命中率(微信下 _b.dat 约需1秒)。
-            _dec.run(force=False, only=["message"])
-            _msg.get_messages(chat, limit=15)
-        except Exception:  # noqa: BLE001
-            pass
-        time.sleep(0.5)
+    """Retired: reading a conversation must not navigate the WeChat window."""
+    return
 
 
 def _ensure_focus_loop():
-    if _focus["thread"] is None or not _focus["thread"].is_alive():
-        t = threading.Thread(target=_focus_loop, daemon=True)
-        t.start()
-        _focus["thread"] = t
+    return
 
 
 # 图片存档：后台把监听会话/焦点会话里收到的图解密成高清图永久存档,并(限速)读图内容。
@@ -84,7 +179,7 @@ def _archiver_loop():
     while True:
         try:
             rules = botmod.load_rules()
-            fullres_on = bool(rules.get("fullres_capture"))   # 开关:允许自动开会话抓全图
+            fullres_on = False   # 开关:允许自动开会话抓全图
             chats = list(dict.fromkeys(_bexpand(rules.get("watch", []))
                                        + ([_focus["chat"]] if _focus.get("chat") else [])))
             _dec.run(force=False, only=["message"])
@@ -151,15 +246,33 @@ def _ensure_archiver():
 
 
 def _bot_loop():
+    import config as _cfg
+    from core import reply_inbox
+    reply_inbox.start(lambda: _bot['running'])
+    from core import local_media
+    local_media.start()
+    cur_session = sessions.observe()
     _bot["state"] = botmod.load_state()
+    botmod.load_pending()        # 恢复去抖待回队列:重启前正等待回复的消息不丢,启动后补回
 
     def log(msg):
         _bot["log"].append(msg)
         _bot["log"][:] = _bot["log"][-100:]
         print("[bot]", msg)
 
-    while _bot["running"]:
+    while True:
+        if not _bot['running']:
+            time.sleep(0.2)
+            continue
         try:
+            # 切微信账号自动重载:登录账号变了→丢掉旧账号的内存 state,读新账号自己的
+            # bot_state/pending。否则新账号会沿用旧账号的高位 last_seen,消息全被当"已读"不回。
+            observed_session = sessions.observe()
+            if observed_session != cur_session:
+                log("检测到账号代次变化，重载监听状态")
+                cur_session = observed_session
+                _bot["state"] = botmod.load_state()
+                botmod.load_pending()
             rules = botmod.load_rules()
             botmod.run_once(rules, _bot["state"], log=log)
         except Exception as e:  # noqa: BLE001
@@ -203,6 +316,7 @@ def poller():
     last_mtime = -1.0
     last_full = 0.0
     while True:
+        sessions.observe()
         try:
             if os.path.exists(config.keys_json()):
                 now = time.time()
@@ -249,13 +363,61 @@ def api_status():
         "wechat_running": docker_wx.wechat_running(),
         "logged_in": docker_wx.logged_in(),
         "logged_in_wxid": docker_wx.container_wxid(),
-        "novnc_url": "http://localhost:6080/vnc.html",
+        "novnc_url": os.environ.get("WXBOT_NOVNC_URL", "http://localhost:6080/vnc.html"),
         "keys_ready": keys_ready,
         "core_keys": core_keys,
         "decrypted_ready": decrypted_ready,
         "last_sync": _state["last_sync"],
         "syncing": _state["syncing"],
     })
+
+@app.get('/accounts')
+def accounts_page():
+    return send_from_directory(os.path.join(config.PROJECT_DIR, 'static'), 'accounts.html')
+
+def _accounts_auth():
+    expected = os.environ.get('WXBOT_ADMIN_READ_TOKEN', '')
+    supplied = request.headers.get('X-Wxbot-Admin-Token', '')
+    import hmac
+    return bool(expected and hmac.compare_digest(expected.encode(), supplied.encode())) or local_management_access()
+
+from core.moments_api import create_blueprint as create_moments_blueprint
+app.register_blueprint(create_moments_blueprint(_accounts_auth))
+
+@app.get('/moments')
+def moments_page():
+    return send_from_directory(os.path.join(config.PROJECT_DIR, 'static'), 'moments.html')
+
+@app.before_request
+def _protect_account_manager():
+    if request.path.startswith('/api/accounts') and not _accounts_auth():
+        return jsonify(error='多账号管理需要管理员授权'), 403
+
+@app.get('/api/accounts')
+def api_accounts():
+    from core import multi_account
+    return jsonify(accounts=multi_account.list_accounts())
+
+@app.post('/api/accounts')
+def api_accounts_create():
+    from core import multi_account
+    body=request.get_json(silent=True) or {}
+    if not isinstance(body.get('label'), str) or not body['label'].strip(): return jsonify(error='label 不能为空'),400
+    try: return jsonify(ok=True, account=multi_account.create(body['label'], body.get('id')))
+    except (ValueError, KeyError) as exc: return jsonify(error=str(exc)),400
+
+@app.post('/api/accounts/<account_id>/<operation>')
+def api_accounts_action(account_id, operation):
+    from core import multi_account
+    try: return jsonify(multi_account.action(account_id, operation))
+    except (ValueError, KeyError) as exc: return jsonify(error=str(exc)),400
+
+@app.post('/api/accounts/batch')
+def api_accounts_batch():
+    from core import multi_account
+    action=request.get_json(silent=True).get('action') if request.get_json(silent=True) else ''
+    if action not in ('start','stop','restart'): return jsonify(error='不支持的批量操作'),400
+    return jsonify(results=[multi_account.action(a['id'], action) for a in multi_account.list_accounts()])
 
 
 @app.post("/api/login")
@@ -264,7 +426,7 @@ def api_login():
     running = docker_wx.container_running()
     return jsonify({
         "ok": running,
-        "novnc_url": "http://localhost:6080/vnc.html",
+        "novnc_url": os.environ.get("WXBOT_NOVNC_URL", "http://localhost:6080/vnc.html"),
         "logged_in": docker_wx.logged_in(),
         "msg": ("打开 noVNC 用小号扫码登录" if running else "容器未运行，请先启动容器"),
     })
@@ -285,18 +447,12 @@ def api_capture_img_key():
     from core import imgdec
     if imgdec.img_key() and not (request.get_json(force=True, silent=True) or {}).get("force"):
         return jsonify({"ok": True, "key": "已有(加 force 可重抓)"})
-    was = _bot["running"]
-    _bot["running"] = False
-    time.sleep(0.6)
+    # capture_img_key already holds the shared UI_LOCK. Do not change the
+    # user's run/stop choice or start a second polling thread for UI maintenance.
     try:
         ok, res = docker_wx.capture_img_key(log=lambda m: _bot["log"].append(m))
     except Exception as e:  # noqa: BLE001
         ok, res = False, str(e)
-    finally:
-        if was and not _bot["running"]:
-            _bot["running"] = True
-            _bot["thread"] = threading.Thread(target=_bot_loop, daemon=True)
-            _bot["thread"].start()
     return jsonify({"ok": ok, "key": (res[:10] + "…") if ok else res})
 
 
@@ -306,7 +462,11 @@ def api_bot_status():
         rules = botmod.load_rules()
     except Exception as e:  # noqa: BLE001
         rules = {"error": str(e)}
+    from core import sender, reply_inbox
     return jsonify({"running": _bot["running"], "rules": rules,
+                    "message_reader": reply_inbox.status(),
+                    "sending_available": bool(sender._adapter.available),
+                    "sending_scope": getattr(sender._adapter, "scope", "private_text" if isinstance(sender._adapter, sender.NativeContactAdapter) else "unknown"),
                     "log": _bot["log"][-30:]})
 
 
@@ -319,16 +479,14 @@ def api_categories():
 
 @app.post("/api/bot/start")
 def api_bot_start():
-    if not _bot["running"]:
-        _bot["running"] = True
-        _bot["thread"] = threading.Thread(target=_bot_loop, daemon=True)
-        _bot["thread"].start()
+    _start_bot()
     return jsonify({"ok": True, "running": True})
 
 
 @app.post("/api/bot/stop")
 def api_bot_stop():
-    _bot["running"] = False
+    with _bot_lifecycle_lock:
+        _bot["running"] = False
     return jsonify({"ok": True, "running": False})
 
 
@@ -346,6 +504,12 @@ def api_llm_status():
     return jsonify({"configured": llm.available(),
                     "provider": cfg.get("provider", "claude"),
                     "vision_provider": cfg.get("vision_provider", ""),
+                    "tools_provider": cfg.get("tools_provider", ""),
+                    "tools_model": cfg.get("tools_model", ""),
+                    "tool_route": llm.route_info(cfg, "tools"),
+                    "private_management_auth": True,
+                    "contact_personalization": True,
+                    "route_diagnostics": llm.route_diagnostics(),
                     "proxy": cfg.get("proxy", ""),
                     "claude": one("claude"), "gpt": one("gpt")})
 
@@ -392,6 +556,15 @@ def api_llm_test():
 def api_llm_config():
     body = request.get_json(force=True, silent=True) or {}
     cfg = llm.load_cfg()
+    for k in ("provider", "vision_provider", "tools_provider"):
+        choices = ("claude", "gpt") if k == "provider" else ("", "claude", "gpt")
+        if k in body and body[k] not in choices:
+            return jsonify({"error": "不支持的 provider"}), 400
+    if "tools_model" in body and not isinstance(body["tools_model"], str):
+        return jsonify({"error": "工具模型必须是文本"}), 400
+    for k in ("tools_provider", "tools_model"):
+        if k in body:
+            cfg[k] = body[k].strip()
     for k in ("provider", "vision_provider", "proxy", "max_tokens", "temperature"):
         if k in body:
             cfg[k] = body[k]
@@ -467,40 +640,44 @@ def api_bot_watch():
         json.dump(rules, f, ensure_ascii=False, indent=2)
     return jsonify({"ok": True, "watch": rules["watch"]})
 
+@app.get("/api/bot/proactive")
+def api_bot_proactive_get():
+    rules = botmod.load_rules()
+    return jsonify(rules.get('proactive') or {})
+
+@app.post("/api/bot/proactive")
+def api_bot_proactive_set():
+    body = request.get_json(force=True, silent=True) or {}
+    rules = botmod.load_rules()
+    old = rules.get('proactive') or {}
+    out = {**old}
+    for k in ('enabled','private_share_enabled','group_enabled'):
+        if k in body: out[k] = bool(body[k])
+    for k in ('after','gap','max','group_after','quiet_start','quiet_end'):
+        if k in body: out[k] = max(0, int(body[k]))
+    rules['proactive'] = out
+    with open(botmod.rules_file(), 'w', encoding='utf-8') as f:
+        json.dump(rules, f, ensure_ascii=False, indent=2)
+    return jsonify({'ok': True, 'proactive': out})
+
 
 @app.post("/api/focus")
 def api_focus():
-    """把网页正在看的会话设为"焦点会话"——后台看护线程会持续把它钉在微信里打开并快轮询，
-    新图到达微信自动下清晰版(_b.dat)，秒撤前就缓存到清晰图。仅在"保持会话打开"开关开启时生效。"""
-    b = request.get_json(force=True, silent=True) or {}
-    chat = b.get("chat")
-    name = b.get("name") or (botmod.send_name_for(chat) if chat else None)
-    _focus["chat"] = chat
-    _focus["name"] = name
-    if botmod.load_rules().get("fullres_capture"):
-        _ensure_focus_loop()
-    return jsonify({"ok": True, "focus": chat})
+    body = request.get_json(force=True, silent=True) or {}
+    _focus['chat'] = body.get('chat')
+    _focus['name'] = body.get('name')
+    return jsonify(ok=True, focus=_focus['chat'], ui_navigation=False)
 
 
 @app.get("/api/bot/fullres")
 def api_fullres_get():
-    """读取"保持会话打开(抓清晰图)"开关。"""
-    try:
-        return jsonify({"enabled": bool(botmod.load_rules().get("fullres_capture"))})
-    except Exception:  # noqa: BLE001
-        return jsonify({"enabled": False})
+    return jsonify(enabled=False, mode='local_hook', ui_navigation=False)
 
 
 @app.post("/api/bot/fullres")
 def api_fullres_set():
-    body = request.get_json(force=True, silent=True) or {}
-    rules = botmod.load_rules()
-    rules["fullres_capture"] = bool(body.get("enabled"))
-    with open(botmod.rules_file(), "w", encoding="utf-8") as f:
-        json.dump(rules, f, ensure_ascii=False, indent=2)
-    if rules["fullres_capture"]:
-        _ensure_focus_loop()
-    return jsonify({"ok": True, "enabled": rules["fullres_capture"]})
+    return jsonify(ok=True, enabled=False, mode='local_hook', ui_navigation=False,
+                   message='媒体已改为本地读取与进程捕获')
 
 
 @app.get("/api/bot/follow")
@@ -532,25 +709,78 @@ def api_bot_follow():
                     "threshold": rules.get("follow_threshold", 3)})
 
 
-@app.post("/api/bot/persona")
-def api_bot_persona():
-    """把某人设设为机器人 style-reply 规则的回复人设。"""
-    slug = (request.get_json(force=True, silent=True) or {}).get("slug", "")
-    if not distill.load_persona(slug):
-        return jsonify({"ok": False, "error": "人设不存在"}), 400
+def _default_push():
+    return {"enabled": False, "sources": [], "include_self": False, "targets": []}
+
+
+@app.get("/api/bot/push")
+def api_bot_push_get():
+    """读取监听推送配置(把监听会话的任何消息推给微信好友/webhook)。"""
+    try:
+        rules = botmod.load_rules()
+    except Exception as e:  # noqa: BLE001
+        return jsonify({**_default_push(), "error": str(e)})
+    p = rules.get("push") or {}
+    return jsonify({**_default_push(), **p})
+
+
+@app.post("/api/bot/push")
+def api_bot_push_set():
+    """设置监听推送：enabled/sources(缺省=监听列表)/include_self/targets。
+    targets: [{"type":"wechat","to":"好友名"},{"type":"webhook","url":"https://..."}]"""
+    body = request.get_json(force=True, silent=True) or {}
     rules = botmod.load_rules()
-    found = False
-    for r in rules.get("rules", []):
-        if r.get("action", {}).get("type") == "reply_ai":
-            r["action"]["persona"] = slug
-            found = True
-    if not found:
-        rules.setdefault("rules", []).insert(0, {
-            "name": "style-reply", "match": {"type": "mention"},
-            "action": {"type": "reply_ai", "persona": slug}})
+    p = rules.get("push") or {}
+    if "enabled" in body:
+        p["enabled"] = bool(body["enabled"])
+    if "include_self" in body:
+        p["include_self"] = bool(body["include_self"])
+    if "sources" in body:
+        p["sources"] = list(dict.fromkeys(body.get("sources") or []))
+    if "targets" in body:
+        clean = []
+        for t in body.get("targets") or []:
+            if not isinstance(t, dict):
+                continue
+            typ = t.get("type")
+            if typ == "wechat" and (t.get("to") or "").strip():
+                to = t["to"].strip()
+                clean.append({"type": "wechat", "to": to,
+                              "username": t.get("username")
+                              or botmod._username_for_name(to),
+                              "enabled": t.get("enabled", True)})
+            elif typ == "webhook" and (t.get("url") or "").strip():
+                clean.append({"type": "webhook", "url": t["url"].strip(),
+                              "enabled": t.get("enabled", True)})
+        p["targets"] = clean
+    rules["push"] = {**_default_push(), **p}
     with open(botmod.rules_file(), "w", encoding="utf-8") as f:
         json.dump(rules, f, ensure_ascii=False, indent=2)
-    return jsonify({"ok": True, "persona": slug})
+    return jsonify({"ok": True, "push": rules["push"]})
+
+
+@app.post("/api/bot/push/test")
+@sessions.task
+def api_bot_push_test():
+    """用当前(或请求体传入的)推送目标发一条测试消息,验证配置连通。"""
+    body = request.get_json(force=True, silent=True) or {}
+    rules = botmod.load_rules()
+    p = dict(rules.get("push") or {})
+    if body.get("targets"):
+        p["targets"] = body["targets"]
+    logs = []
+    fake = {"type": 1, "category": "text", "category_name": "文字",
+            "content": body.get("text") or "【wxbot 推送测试】这是一条测试消息",
+            "sender": "", "is_self": False, "local_id": 0}
+    botmod._do_push(fake, body.get("chat") or "filehelper", p, logs.append)
+    return jsonify({"ok": True, "log": logs})
+
+
+@app.post("/api/bot/persona")
+def api_bot_persona():
+    # Explicit migration is the sole new global role write path. The old UI must
+    # not claim success while silently changing an inactive legacy rule.
+    return jsonify({"ok": False, "error": "请在联系人画像与专属人设页面核对迁移并设置全局人设"}), 409
 
 
 # ---------------- 知识库(RAG) ----------------
@@ -691,6 +921,7 @@ def api_schedule_list():
 
 
 @app.post("/api/schedule/nl")
+@sessions.task
 def api_schedule_nl():
     """自然语言创建/取消/列出定时任务。"""
     from core import schedule
@@ -700,6 +931,21 @@ def api_schedule_nl():
     return jsonify(schedule.handle_nl(text))
 
 
+@app.post("/api/greet")
+@sessions.task
+def api_greet():
+    """网页"打招呼"：按该会话最近上下文,用人设生成一句问候并发送。"""
+    b = request.get_json(force=True, silent=True) or {}
+    chat = b.get("chat")
+    if not chat:
+        return jsonify({"ok": False, "message": "缺 chat"}), 400
+    try:
+        res = botmod.greet(chat)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"ok": False, "message": str(e)})
+    return jsonify(res)
+
+
 @app.post("/api/schedule/<int:tid>/delete")
 def api_schedule_delete(tid):
     from core import schedule
@@ -707,13 +953,27 @@ def api_schedule_delete(tid):
     return jsonify({"ok": n > 0})
 
 
+@app.post("/api/schedule/<int:tid>/update")
+def api_schedule_update(tid):
+    """编辑任务(改时间/内容/目标等)。body=要改的字段(cron/once_at/prompt/title/target/mention/use_llm)。"""
+    from core import schedule
+    fields = request.get_json(force=True, silent=True) or {}
+    t, err = schedule.update_task(id=tid, fields=fields)
+    if err:
+        return jsonify({"ok": False, "message": err}), 400
+    return jsonify({"ok": True, "task": t,
+                    "schedule_desc": schedule.describe_schedule(t)})
+
+
 @app.post("/api/schedule/<int:tid>/run")
+@sessions.task
 def api_schedule_run(tid):
     """立即手动触发一次(测试用)。"""
     from core import schedule
     for t in schedule.load_tasks():
         if t.get("id") == tid:
-            threading.Thread(target=schedule.fire, args=(t,), daemon=True).start()
+            threading.Thread(target=schedule.fire, args=(t,),
+                kwargs={"session": sessions.capture()}, daemon=True).start()
             return jsonify({"ok": True})
     return jsonify({"ok": False, "error": "任务不存在"}), 404
 
@@ -875,13 +1135,27 @@ def api_messages():
     before = request.args.get("before")
     before = int(before) if before else None
     try:
-        decrypt.run(force=False, only=["message"])   # 新消息实时可见(变了才重解密)
+        decrypt.run(force=False, only=["message", "biz_message"])   # 普通与公众号消息均保持刷新
     except Exception:  # noqa: BLE001
         pass
     try:
-        return jsonify(messages.get_messages(chat, limit=limit, before=before))
+        rows=messages.get_messages(chat, limit=limit, before=before)
+        from core import local_media
+        states=local_media.observe(chat,rows)
+        for row in rows:
+            if row.get('type') in (3,34,43):
+                state=states.get(row.get('local_id'),{})
+                row['media_status']=state.get('status','pending')
+                row['media_label']=local_media.LABELS.get(row['media_status'],'等待媒体就绪')
+                row['media_updated']=state.get('updated',0)
+        return jsonify(rows)
     except FileNotFoundError as e:
         return jsonify({"error": str(e)}), 409
+
+
+@app.get('/static/avatar-placeholder.svg')
+def avatar_placeholder():
+    return send_file(os.path.join(config.PROJECT_DIR, 'static', 'avatar-placeholder.svg'))
 
 
 @app.get("/api/avatar")
@@ -889,7 +1163,14 @@ def api_avatar():
     username = request.args.get("username", "")
     data, mime = avatars.get_avatar(username)
     if not data:
-        return Response(status=404)
+        if username == 'newsapp':
+            return send_file(os.path.join(config.PROJECT_DIR, 'static', 'news-avatar.svg'))
+        info = contacts.all_names().get(username, {})
+        url = info.get('head_url') or ''
+        if url.startswith(('https://', 'http://')):
+            from flask import redirect
+            return redirect(url)
+        return send_file(os.path.join(config.PROJECT_DIR, 'static', 'avatar-placeholder.svg'))
     return send_file(io.BytesIO(data), mimetype=mime)
 
 
@@ -908,33 +1189,28 @@ def api_msgimage():
 
 @app.post("/api/harvest")
 def api_harvest():
-    """驱动容器微信翻遍某会话的历史图片→触发微信解密落盘→网页即可显示。
-    期间暂停机器人(共用同一个微信窗口)，完成后恢复。"""
-    from core import harvest as hv
+    # Cached older pages may still call this endpoint. They cannot drive UI.
+    return jsonify(ok=True, decrypted=0, mode='local_hook', ui_navigation=False,
+                   log=['已停用界面翻图，媒体由本地读取与进程捕获提供'])
+
+
+@app.get('/api/media/status')
+def api_media_status():
+    from core import local_media
+    return jsonify(local_media.hook_status())
+
+
+@app.post('/api/media/refresh')
+def api_media_refresh():
+    from core import local_media
     body = request.get_json(force=True, silent=True) or {}
-    username = body.get("chat", "")
-    name = None
-    if username:
-        try:
-            name = botmod.send_name_for(username)
-        except Exception:  # noqa: BLE001
-            name = None
-    was_running = _bot["running"]
-    _bot["running"] = False           # 暂停机器人，避免抢微信窗口
-    time.sleep(0.6)
-    logs = []
-    try:
-        nav = int(body.get("nav") or 60)
-        got = hv.harvest(name, nav=max(6, min(nav, 80)), log=lambda m: logs.append(str(m)))
-    except Exception as e:  # noqa: BLE001
-        got = 0
-        logs.append(f"出错: {e}")
-    finally:
-        if was_running and not _bot["running"]:
-            _bot["running"] = True
-            _bot["thread"] = threading.Thread(target=_bot_loop, daemon=True)
-            _bot["thread"].start()
-    return jsonify({"ok": True, "decrypted": got, "log": logs})
+    chat = body.get('chat')
+    if not isinstance(chat,str) or not chat or len(chat)>256:
+        return jsonify(error='请选择一个聊天'),400
+    rows=messages.get_messages(chat,limit=60)
+    states=local_media.observe(chat,rows,reset=True)
+    local_media.start()
+    return jsonify(ok=True, queued=len(states), ui_navigation=False)
 
 
 @app.get("/api/msgvoice")
@@ -977,14 +1253,14 @@ def api_msgvideothumb():
 
 
 @app.post("/api/send")
+@sessions.task
 def api_send():
-    """入发送队列(单 worker FIFO 串行)，立即返回 job；发送含视觉核对+发后落库校验耗时
-    十几秒，同步等会卡界面，故异步+队列。同步模式(body.sync)供脚本。"""
+    """Create a durable send job; receipt uncertainty never triggers automatic resend."""
     from core import sendq
     body = request.get_json(force=True, silent=True) or {}
     to = body.get("to")
     kind = body.get("type", "text")
-    chat = body.get("chat")            # 会话 wxid：传了就做发后校验(确认落到正确会话)
+    chat = body.get("chat")            # stable target requested; UI proof is still required
     if not to:
         return jsonify({"ok": False, "error": "缺少 to（会话显示名）"}), 400
     content = body.get("content", "")
@@ -1033,14 +1309,18 @@ def index():
 
 def main():
     config.ensure_dirs()
+    from core import moments
+    moments.start_loop()
+    from core import sender
+    if isinstance(sender._adapter, sender.NativeContactAdapter) and sender._adapter.available:
+        sessions.install_identity_probe(lambda: sender._adapter.ui.call('state')['signature'])
     t = threading.Thread(target=poller, daemon=True)
     t.start()
     # 机器人随后台自启（有 reply_ai 人设或规则时）
     try:
-        _bot["running"] = True
-        _bot["thread"] = threading.Thread(target=_bot_loop, daemon=True)
-        _bot["thread"].start()
-        print("机器人已自启")
+        if os.environ.get('WXBOT_BOT_AUTOSTART', '1') == '1':
+            _start_bot()
+            print("机器人已自启")
     except Exception as e:  # noqa: BLE001
         print("机器人自启失败:", e)
     try:

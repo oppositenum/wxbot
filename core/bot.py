@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config  # noqa: E402
 from core import decrypt, messages, contacts, docker_wx, distill, llm  # noqa: E402
-from core import imgdec, media, sender, agent, memory, schedule, media_read  # noqa: E402
+from core import imgdec, media, sender, agent, memory, schedule, media_read, send_ledger  # noqa: E402
 
 _DEFAULT_RULES = {
     "poll_interval": 5, "include_self": False, "watch": [],
@@ -295,6 +295,7 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
               "那只是【供你理解】的参考,不是让你主动说出来的话题。别用'我记得你以前…''上次你说…'"
               "去主动翻旧事显示记性;只有对方这次的话真的用得上某条旧信息时,才自然带一句。"
               "熟悉感体现在你能贴切接住他当下的话,不是靠复述过去。他明确问起过去/让你回忆时,才照实回答。"
+              "\n\n【多条消息】如果自然语气确实需要停顿或补充，可以输出两段，并用单独一行 [[NEXT]] 分隔；否则只输出一段。不要为了凑数量拆句。"
               "\n\n【表达】像真人聊天,只输出回复正文(不要解释/引号/复述对方原话/重复问候)。"
               "闲聊寒暄就简短口语几句,别凑长;当对方要你说明图片内容、答疑或给结果时,"
               "再把信息说清楚,别为凑短而漏掉该给的内容。")
@@ -375,6 +376,9 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
             system += (f"\n\n【关于 {who} 的背景资料（供你理解，不是让你主动提起；"
                        "只有当他这次的话真的用得上时才自然带出，别为炫耀记性而翻旧账）】\n"
                        + "\n".join(mlines))
+        style_hint = memory.style_context(sender_wxid, scope=scope)
+        if style_hint:
+            system += "\n" + style_hint + "；只用于调整回应语气，不要向对方透露你在做画像。"
 
     acfg = agent.agent_config(rules)
     if acfg["enabled"]:
@@ -508,8 +512,22 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
             log(f"  AI回复[{persona['name']}] 生成为空，跳过发送(不发空/不空转重试)")
             return {"ok": False, "status": "not_sent", "reason": "generation_failed", "retryable": False}
         target = send_name_for(chat_username)
-        r = sender.send_text(target, text, chat_username=chat_username)
-        log(f"  AI回复[{persona['name']}] -> {target}: {text!r} => {r}")
+        parts = [x.strip() for x in re.split(r'\n\s*\[\[NEXT\]\]\s*\n', text) if x.strip()]
+        parts = parts[:2]
+        r = None
+        for index, part in enumerate(parts, 1):
+            r = sender.send_text(target, part, chat_username=chat_username,
+                                 job_id=send_ledger.stable_id(sessions.capture()['account'], chat_username, 'reply_part', [msg.get('local_id'), index]))
+            log(f"  AI回复[{persona['name']}] 第{index}条 -> {target}: {part!r} => {r}")
+            if r.get('status') not in ('confirmed', 'submitted'):
+                break
+
+    if kind == 'reply_ai' and r.get('status') == 'confirmed':
+        try:
+            from core import moments_reflection
+            moments_reflection.capture(chat_username, batch_msgs or [msg], context_msgs or [], text)
+        except Exception:
+            log('[朋友圈感悟] 本次触发未完成，聊天回复不受影响')
 
     return r if kind in ("reply", "forward", "reply_ai") else {"ok": False, "status": "failed", "reason": "unknown_action"}
 
@@ -697,8 +715,21 @@ def _expand_watch(watch):
 _pending_session = None
 _pending = {}          # chat -> {"msgs":[触发消息], "ctx":[...], "rule":.., "last_seen":ts}
 _processing = set()     # batches handed to worker threads; incoming messages form next batch
+_proactive_busy = set()
+_proactive_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='wxbot-proactive')
+
+def _proactive_worker(chat, msgs, rules, state, log, now, token):
+    try:
+        with sessions.bind(token):
+            fn = _maybe_group_nudge if chat.endswith('@chatroom') else _maybe_nudge
+            fn(chat, msgs, rules, state, log, now=now)
+    except Exception as exc:
+        log('[主动回复] ' + type(exc).__name__)
+    finally:
+        _proactive_busy.discard(chat)
+
 _process_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="wxbot-reply")
-SETTLE = 3             # 普通文字最多等3秒合并，降低自动回复延迟
+SETTLE = 5             # 从首条消息计时，固定五秒批次
 MEDIA_SETTLE = 30      # 纯媒体批(只发了图/语音/视频没说话)等更久,给对方补文字的机会
 
 
@@ -713,13 +744,15 @@ def _settle_for(batch, rules=None):
 NUDGE_AFTER = 2 * 3600    # 对方停止交流多久后第一次跟进
 NUDGE_GAP = 4 * 3600      # 第一次没回,再隔多久第二次(之后不再发,等对方开口重置)
 NUDGE_MAX = 2             # 一轮静默最多跟进次数(不打扰)
-NUDGE_QUIET = (23, 8)     # 夜间静默时段[起,止)不跟进
+NUDGE_QUIET = (22, 8)     # 中国时间夜间静默时段[起,止)不主动跟进
 
 
-def _quiet_now(now=None):
-    h = time.localtime(now or time.time()).tm_hour
-    a, b = NUDGE_QUIET
-    return h >= a or h < b
+def _quiet_now(now=None, quiet=None):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    h = datetime.fromtimestamp(now if now is not None else time.time(), ZoneInfo('Asia/Shanghai')).hour
+    a, b = quiet or NUDGE_QUIET
+    return (h >= a or h < b) if a > b else a <= h < b
 
 
 @sessions.task
@@ -728,7 +761,7 @@ def _maybe_nudge(chat, msgs, rules, state, log, now=None):
     对方一说话立即重置。只在私聊+配了 reply_ai 人设时生效。"""
     now = now or time.time()
     pcfg = rules.get("proactive") or {}
-    if pcfg.get("enabled") is False or chat in _pending:
+    if pcfg.get("enabled") is not True or pcfg.get('private_share_enabled', True) is not True or chat in _pending or chat in _processing:
         return False
     if sender.preflight(chat):
         return False
@@ -757,7 +790,8 @@ def _maybe_nudge(chat, msgs, rules, state, log, now=None):
         return False                       # 最后一句是对方的(在等回复流程),不跟进
     if st["count"] >= int(pcfg.get("max", NUDGE_MAX)):
         return False
-    if _quiet_now(now):
+    quiet = (pcfg.get('quiet_start', NUDGE_QUIET[0]), pcfg.get('quiet_end', NUDGE_QUIET[1]))
+    if _quiet_now(now, quiet):
         return False
     silence = now - (last.get("create_time") or 0)
     need = float(pcfg.get("after", NUDGE_AFTER)) if st["count"] == 0 \
@@ -805,6 +839,52 @@ def _maybe_nudge(chat, msgs, rules, state, log, now=None):
     log(f"[主动跟进{st['count']}/{int(pcfg.get('max', NUDGE_MAX))}] -> {target}: "
         f"{text!r} => ok={r.get('ok')}")
     return True
+
+
+@sessions.task
+def _maybe_group_nudge(chat, msgs, rules, state, log, now=None):
+    """Optional quiet-group reply using the recent conversation window."""
+    cfg = rules.get('proactive') or {}
+    if cfg.get('enabled') is not True or cfg.get('group_enabled') is not True or chat in _pending or chat in _processing or not msgs:
+        return False
+    now = now or time.time()
+    quiet = (cfg.get('quiet_start', NUDGE_QUIET[0]), cfg.get('quiet_end', NUDGE_QUIET[1]))
+    if _quiet_now(now, quiet):
+        return False
+    after = max(60, float(cfg.get('group_after', 300)))
+    real = [m for m in msgs[-20:] if (m.get('content') or '').strip()
+            and not (m.get('is_self') and schedule.is_scheduled_msg(m, chat))]
+    if not real or real[-1].get('is_self') or now - (real[-1].get('create_time') or 0) < after:
+        return False
+    rule = next((r for r in rules.get('rules', []) if r.get('action', {}).get('type') == 'reply_ai'), None)
+    if not rule or not llm.available() or sender.preflight(chat):
+        return False
+    st = state.setdefault('group_proactive', {}).setdefault(chat, {'last': 0})
+    if now - st.get('last_sent', 0) < max(after, 1800):
+        return False
+    marker = real[-1].get('local_id') or real[-1].get('server_id')
+    if marker == st.get('last'):
+        return False
+    gate = conversation_state.ticket(chat, real)
+    if gate is None or not conversation_state.allowed(gate):
+        return False
+    persona = personalization.resolve_persona(chat, rules, rule)['persona']
+    from core import reply_context
+    turns = _passive_turns(chat, real, now)
+    prompt = (personalization.role_context(chat, persona) +
+              '\n\n【任务】群里已经安静了一段时间。结合最近约十条真实消息，主动接住一个自然话题，发一两句简短内容；不要假装被@，不要催大家，也不要编造群外事实。')
+    text = (llm.chat(prompt + media_read.HONESTY + reply_context.ROLE_GUIDANCE, turns + [{'role':'user','content':'请生成一句自然的群聊回复。'}]) or '').strip()
+    if not text or not conversation_state.allowed(gate) or chat in _pending or chat in _processing:
+        return False
+    r = sender.send_text(send_name_for(chat), text, chat_username=chat,
+                         job_id=send_ledger.stable_id(sessions.capture()['account'], 'group_nudge', chat, marker),
+                         proactive_ticket=gate)
+    if r.get('status') in ('confirmed', 'submitted'):
+        st['last'] = marker
+        st['last_sent'] = now
+        log(f'[群主动回复] {chat}: {text!r}')
+        return True
+    return False
 
 FOLLOW_THRESHOLD = 2   # 群跟发默认阈值：末尾同一句话由 >=2 个【不同的人】发过才算接龙
 
@@ -905,10 +985,21 @@ def _maybe_learn(chat, ctx_msgs, log):
         if now - _last_learn.get(chat, 0) < LEARN_INTERVAL:
             return
         _last_learn[chat] = now
+        # 先做本地、无模型的风格/近期情绪增量统计；即使 LLM 不可用也不丢失习惯信息。
+        memory.update_style_from_messages(ctx_msgs, scope=_scope_of(chat))
         n = memory.extract_from_messages(ctx_msgs, me=config.wxid(),
                                          chat_scope=_scope_of(chat))
         if n:
             log(f"[记忆] {chat} 更新 {n} 人画像")
+        # Periodically condense large profiles while retaining source facts outside
+        # the active summary. This keeps replies fast without forgetting history.
+        for wid in {m.get('sender') for m in ctx_msgs if m.get('sender') and not m.get('is_self')}:
+            try:
+                prof = memory.load_profile(wid)
+                if sum(1 for f in prof.get('facts', []) if f.get('status','active') == 'active') > memory.MAX_FACTS:
+                    memory.compress(wid)
+            except Exception:
+                continue
     except Exception as e:  # noqa: BLE001
         log(f"[记忆] error: {e}")
 
@@ -963,6 +1054,7 @@ def enqueue_pending(chat, msg, context, rule, now):
     p = _pending.setdefault(chat, dict(msgs=[], ctx=context, rule=rule, session=sessions.capture()))
     from core import reply_context
     p['msgs'] = reply_context.unique(p['msgs'] + carry + [msg])
+    p.setdefault('first_seen', now)
     p.update(ctx=context, rule=rule, last_seen=now)
     return p
 
@@ -999,7 +1091,8 @@ def process_pending(chat, p, rules, log):
         send_ledger.Ledger().update(p['job_id'], result['status'], result['reason'])
         p.update(send_status=result['status'], reason=result['reason'])
         if result['status'] in ('confirmed', 'submitted', 'skipped'):
-            _pending.pop(chat, None)
+            if _pending.get(chat) is p:
+                _pending.pop(chat, None)
         send_ledger.Ledger().audit(p['job_id'], token, chat, result['status'], result['reason'], 0)
         save_pending()
         return
@@ -1057,7 +1150,8 @@ def process_pending(chat, p, rules, log):
     if not sessions.valid(token):
         return
     if p['send_status'] in ('confirmed', 'submitted', 'skipped'):
-        _pending.pop(chat, None)
+        if _pending.get(chat) is p:
+            _pending.pop(chat, None)
         save_pending()
         if p['send_status'] != 'skipped':
             _maybe_learn(chat, p.get('ctx') or [], log)
@@ -1112,9 +1206,13 @@ def run_once(rules, state, log=print):
         if chat in watch_set and not is_group:
             conversation_state.observe(chat, msgs)
         fresh = [m for m in msgs if m["local_id"] > last]
-        if chat in watch_set and not is_group:
+        if chat in watch_set:
             try:
-                personalization.learn_live(chat, fresh)
+                # Learn every watched conversation, including quiet groups where
+                # nobody mentioned the bot; group scope keeps members isolated.
+                _maybe_learn(chat, msgs[-60:], log)
+                if not is_group:
+                    personalization.learn_live(chat, fresh)
             except sessions.StaleAccount:
                 raise
             except Exception as exc:
@@ -1169,12 +1267,10 @@ def run_once(rules, state, log=print):
                 else:
                     enqueue_pending(chat, m, msgs, rule, now)
                 break
-        # 主动跟进：对方停止交流一段时间后,轻声跟进1-2次(私聊限定;夜间/冷却不发)
-        if chat in watch_set and not is_group:
-            try:
-                _maybe_nudge(chat, msgs, rules, state, log, now=now)
-            except Exception as e:  # noqa: BLE001
-                log(f"[跟进] error: {e}")
+        # Slow proactive generation/UI never holds up polling other contacts.
+        if chat in watch_set and chat not in _proactive_busy:
+            _proactive_busy.add(chat)
+            _proactive_pool.submit(_proactive_worker, chat, msgs, rules, state, log, now, sessions.capture())
     save_pending()
     save_state(state)  # cursor only advances durably after pending has committed
     # 去抖：对方停顿够久 → 综合最近这批消息回一次
@@ -1185,12 +1281,13 @@ def run_once(rules, state, log=print):
         if not p.get("msgs"):
             _pending.pop(chat, None)
             continue
-        if now - p.get("last_seen", 0) >= _settle_for(p["msgs"], rules):
+        if now - p.get("first_seen", p.get("last_seen", 0)) >= _settle_for(p["msgs"], rules):
             trig = p["msgs"][-1]
             if not p.get('send_status'):
                 log(f"[待回复批次] {chat} 综合 {len(p['msgs'])} 条")
             # Freeze this batch and hand slow model/UI work to a worker. New
             # inbound messages can immediately create the next batch.
+            send_ledger.Ledger().hold_reply(chat, p)
             _pending.pop(chat, None)
             _processing.add(chat)
             _process_pool.submit(_process_worker, chat, p, rules, log)
@@ -1207,6 +1304,12 @@ def _process_worker(chat, p, rules, log):
     try:
         process_pending(chat, p, rules, log)
     finally:
+        if sessions.valid(p.get('session')) and p.get('send_status') not in ('confirmed', 'submitted', 'skipped'):
+            if chat not in _pending:
+                _pending[chat] = p
+            else:
+                send_ledger.Ledger().hold_reply(chat, p)
+            save_pending()
         _processing.discard(chat)
 
 

@@ -220,8 +220,11 @@ def schedule(now):
                 if attempts>=MAX_AUTO_ATTEMPTS or now-prior['updated']<AUTO_RETRY_COOLDOWN:continue
                 # Transient failure/throttle/expiry: reset the row to queued for another try.
                 pp.update(auto_attempts=attempts+1,settings_revision=value['revision']);pp.pop('retry_at',None)
-                c.execute("UPDATE moments_jobs SET state='queued',origin='automatic',created=?,updated=?,initiated=0,payload=?,message='等待重试' WHERE id=?",
-                          (now,now,m._json(pp),prior['id']))
+                # Re-pin to the current (live) session so recover() doesn't cancel the
+                # requeued job — schedule() runs under sessions.bind(), so this is the
+                # active account/generation.
+                c.execute("UPDATE moments_jobs SET state='queued',origin='automatic',created=?,updated=?,initiated=0,session=?,payload=?,message='等待重试' WHERE id=?",
+                          (now,now,m._json(sessions.check()),m._json(pp),prior['id']))
                 return
 
 

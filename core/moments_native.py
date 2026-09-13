@@ -340,7 +340,12 @@ class Native:
                 copied_attempts += 1
                 copied=self.copy_at(x+96,top+38)
                 if copied.strip()==item['text'].strip():
-                    # Require the author label as well as the exact unique body.
+                    # The body is already globally unique in cache (line 323) and was
+                    # copied verbatim here, so identity is established. The author label
+                    # is a secondary sanity check against a stale-cache mix-up — but OCR
+                    # of a tiny name strip is lossy (drops chars, chokes on emoji), so
+                    # match it fuzzily and, when OCR reads nothing at all, defer to the
+                    # unique-body proof rather than hard-failing a correct target.
                     authors=self.ocr((x+75,top-15,x+w-40,top+13),psm=6)
                     names={norm(item['name'])}
                     from core import contacts
@@ -348,7 +353,11 @@ class Native:
                         if c['username']==item['author']:
                             names.update(norm(c.get(k) or '') for k in ['name','nick_name','remark'])
                     names.discard('')
-                    if not any(norm(r['text']) in names for r in authors):
+                    read=[norm(r['text']) for r in authors];read=[t for t in read if t]
+                    def _name_ok(t):
+                        return any(t==nm or (min(len(t),len(nm))>=2 and (t in nm or nm in t))
+                                   or difflib.SequenceMatcher(None,t,nm).ratio()>=0.6 for nm in names)
+                    if read and not any(_name_ok(t) for t in read):
                         raise NativeError('动态作者名称未能核对，未发送')
                     self.check(True)
                     return dict(x=x,y=y,w=w,h=h,top=top,body=(x+96,top+38))

@@ -47,6 +47,10 @@ def local_management_access():
     strict Host check also prevents a rebound external hostname gaining access.
     Remote deployments keep the existing administrator token requirement.
     """
+    # 本机/测试部署(WXBOT_LOCAL=1)免管理员 token。
+    # TODO(login-page): 正式登录页上线后收回此免鉴权。
+    if os.environ.get("WXBOT_LOCAL") == "1":
+        return True
     if os.environ.get("WXBOT_LOCAL_ADMIN") != "1":
         return False
     # Docker published-port requests arrive from the bridge gateway (172.16/12).
@@ -935,7 +939,56 @@ def api_archive_search():
 @app.get("/api/schedule")
 def api_schedule_list():
     from core import schedule
-    return jsonify({"tasks": schedule.list_view(), "log": schedule.logs()[-20:]})
+    # 陪伴问候单独在「定时问候」面板管理，这里只列普通提醒任务。
+    tasks = [t for t in schedule.list_view() if t.get("kind") != "greeting"]
+    return jsonify({"tasks": tasks, "log": schedule.logs()[-20:]})
+
+
+# 频率 → cron。避开整点重合的常规做法在本地单账号无所谓，问候按用户设定的整点/半点即可。
+_GREET_INTERVAL_CRON = {"30m": "*/30 * * * *", "1h": "0 * * * *",
+                        "2h": "0 */2 * * *", "3h": "0 */3 * * *"}
+
+
+@app.get("/api/greeting")
+def api_greeting_list():
+    from core import schedule
+    return jsonify({"tasks": schedule.list_greetings(), "log": schedule.logs()[-10:],
+                    "intervals": list(_GREET_INTERVAL_CRON)})
+
+
+@app.post("/api/greeting")
+@sessions.task
+def api_greeting_save():
+    """新建/编辑一条陪伴型定时问候。body={id?,target,interval,quiet_start,quiet_end,persona?,enabled}。"""
+    from core import schedule
+    b = request.get_json(force=True, silent=True) or {}
+    cron = _GREET_INTERVAL_CRON.get(str(b.get("interval") or "1h"))
+    if not cron:
+        return jsonify({"ok": False, "message": "频率无效(可选 30m/1h/2h/3h)"}), 400
+    qs, qe = (b.get("quiet_start") or "").strip(), (b.get("quiet_end") or "").strip()
+    quiet = {"start": qs, "end": qe} if qs and qe else None
+    enabled = bool(b.get("enabled", True))
+    tid = b.get("id")
+    if tid:
+        fields = {"cron": cron, "quiet": quiet, "enabled": enabled}
+        if (b.get("target") or "").strip():
+            fields["target"] = b["target"].strip()
+        if b.get("persona") is not None:
+            fields["persona"] = (b.get("persona") or "").strip()
+        t, err = schedule.update_task(id=int(tid), fields=fields)
+    else:
+        target = (b.get("target") or "").strip()
+        if not target:
+            return jsonify({"ok": False, "message": "请选择问候对象"}), 400
+        t, err = schedule.add_greeting(target=target, cron=cron, quiet=quiet,
+                                       persona=(b.get("persona") or None),
+                                       title=(b.get("title") or "定时问候"))
+        if not err and not enabled:
+            schedule.update_task(id=t["id"], fields={"cron": cron, "enabled": False})
+            t["enabled"] = False
+    if err:
+        return jsonify({"ok": False, "message": err}), 400
+    return jsonify({"ok": True, "task": t})
 
 
 @app.post("/api/schedule/nl")

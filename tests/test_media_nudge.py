@@ -127,6 +127,51 @@ def run():
     run_once_wait(RULES, state)
     check("mixed-normal-settle", sent and CHAT not in bot._pending)
 
+    # ---- 2b. 纯语音批：微信「转文字」是异步落库的 ----
+    # 未拿到转写前不该回落"这条语音我没能读取"，落库后用文字正常回；宽限期到了才兜底。
+    bot._pending.clear()
+    llm.load_cfg = lambda: {}                       # 未开自带 STT，得靠微信那份转写
+    # local_id 用 20+，避开本文件前面章节已在同一 CHAT 用过的 1~4(否则 reply 幂等键相撞)。
+    v_store = {"msgs": [{"local_id": 19, "server_id": 19, "type": 1, "is_self": False,
+                         "content": "旧消息", "create_time": NOW - 9000, "sender": CHAT}]}
+    messages.get_messages = lambda chat, limit=40: [dict(x) for x in v_store["msgs"]]
+    state2 = bot.load_state()
+    state2[CHAT] = 19                                # 指针钉在旧文字之后，避免把它当新消息重放
+    v_store["msgs"].append({"local_id": 20, "server_id": 20, "type": 34, "is_self": False,
+                            "content": "[语音 1\"]", "create_time": NOW, "sender": CHAT})
+    run_once_wait(RULES, state2)
+    check("voice-queued", CHAT in bot._pending)
+    # 过了 MEDIA_SETTLE 但转写仍未落库 → 继续等，不回复
+    for key in ("first_seen", "last_seen"):
+        bot._pending[CHAT][key] = time.time() - (bot.MEDIA_SETTLE + 2)
+    sent.clear()
+    run_once_wait(RULES, state2)
+    check("voice-waits-transcript", CHAT in bot._pending and not sent)
+    # 微信转写落库 → 补进快照并用文字回复
+    for m in v_store["msgs"]:
+        if m["local_id"] == 20:
+            m["voice_transcript"] = "你好，你好。"
+            m["voice_transcript_source"] = "wechat_packed_v1"
+    run_once_wait(RULES, state2)
+    check("voice-replied-after-transcript", sent and CHAT not in bot._pending)
+    check("voice-transcript-not-waiting", not bot._voice_batch_waiting(CHAT, [
+        {"local_id": 20, "type": 34, "voice_transcript": "你好，你好。"}]))
+    # 宽限期到了仍无转写 → 带兜底回，不无限等
+    bot._pending.clear()
+    v_store["msgs"].append({"local_id": 21, "server_id": 21, "type": 34, "is_self": False,
+                            "content": "[语音 2\"]", "create_time": NOW + 300, "sender": CHAT})
+    run_once_wait(RULES, state2)
+    for key in ("first_seen", "last_seen"):
+        bot._pending[CHAT][key] = time.time() - (bot.VOICE_GRACE + 2)
+    sent.clear()
+    run_once_wait(RULES, state2)
+    check("voice-grace-timeout-replies", sent and CHAT not in bot._pending)
+    # 开了自带 STT 就不必等微信转写
+    llm.load_cfg = lambda: {"enable_stt": True}
+    check("voice-stt-no-wait", not bot._voice_batch_waiting(CHAT, [
+        {"local_id": 9, "type": 34, "content": "[语音 3\"]"}]))
+    llm.load_cfg = lambda: {}
+
     # ---- 3. 主动跟进状态机 ----
     def mk(last_is_self, silence, extra_self=None):
         ms = [{"local_id": 10, "type": 1, "is_self": False, "content": "你在吗",

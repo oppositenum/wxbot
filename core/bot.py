@@ -734,11 +734,39 @@ SETTLE = 5             # 从首条消息计时，固定五秒批次
 MEDIA_SETTLE = 30      # 纯媒体批(只发了图/语音/视频没说话)等更久,给对方补文字的机会
 
 
+VOICE_GRACE = 90       # 纯语音批最多再等微信「转文字」落库的宽限秒数(超过就带兜底回)
+
+
 def _settle_for(batch, rules=None):
     """批内有文字→普通去抖;纯媒体→等更久(超时没等到文字就带着图意回)。"""
     if any((pm.get("type") in (1, 49)) for pm in (batch or [])):
         return SETTLE
     return (rules or {}).get("media_settle", MEDIA_SETTLE)
+
+
+def _voice_batch_waiting(chat, msgs):
+    """纯媒体批里有语音但还没拿到微信转写→按库里最新转写补进快照(原地改)。
+
+    补不到且未开自带 STT(得靠微信那份文字)时返回 True,提示上层再等一会;
+    转写已到、或本就配了自带转写、或批里含非媒体消息,都返回 False(照常回复)。
+    """
+    voice = [m for m in msgs if m.get("type") == 34]
+    if not voice or any(m.get("type") not in (3, 34, 43) for m in msgs):
+        return False
+    if all(m.get("voice_transcript") for m in voice):
+        return False
+    fresh = {m.get("local_id"): m for m in (messages.get_messages(chat, limit=40) or [])}
+    for m in voice:
+        if m.get("voice_transcript"):
+            continue
+        f = fresh.get(m.get("local_id"))
+        if f and f.get("voice_transcript"):
+            m["voice_transcript"] = f["voice_transcript"]
+            m["voice_transcript_source"] = f.get("voice_transcript_source")
+    if all(m.get("voice_transcript") for m in voice):
+        return False
+    # 已配自带转写就不必等微信,下游会自己转;否则值得再等微信的转文字落库。
+    return not llm.load_cfg().get("enable_stt")
 
 
 # ---------------- 主动跟进(对方不接话时轻声唤1-2次) ----------------
@@ -1293,7 +1321,13 @@ def run_once(rules, state, log=print):
         if not p.get("msgs"):
             _pending.pop(chat, None)
             continue
-        if now - p.get("first_seen", p.get("last_seen", 0)) >= _settle_for(p["msgs"], rules):
+        elapsed = now - p.get("first_seen", p.get("last_seen", 0))
+        if elapsed >= _settle_for(p["msgs"], rules):
+            # 纯语音批：微信「转文字」是异步写库的，批次快照定格时可能还没有转写。
+            # 触发前先按库里最新转写补进快照；仍缺且未开自带 STT，就在宽限期内继续等，
+            # 别急着回落到"这条语音我没能读取"。
+            if elapsed < VOICE_GRACE and _voice_batch_waiting(chat, p["msgs"]):
+                continue
             trig = p["msgs"][-1]
             if not p.get('send_status'):
                 log(f"[待回复批次] {chat} 综合 {len(p['msgs'])} 条")

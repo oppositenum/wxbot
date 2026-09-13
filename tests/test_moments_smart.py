@@ -13,7 +13,7 @@ import test_moments as fixtures
 from test_moments import FID
 from PIL import Image
 from core import (moments as m, moments_jobs as j, moments_ai, moments_media,
-                  moments_reflection, account_session as sessions)
+                  moments_native, moments_reflection, account_session as sessions)
 
 
 def _png(color='red', size=(12, 12)):
@@ -229,6 +229,88 @@ class Post(unittest.TestCase):
         self.assertIsInstance(data['text'], str)
         self.assertEqual(data['text'], '今天心情不错')
         self.assertEqual(data['image_prompt'], 'sunset')
+
+
+class ScrollToComment(unittest.TestCase):
+    """Off-screen later comments must be scrolled into view before send.
+
+    Pure geometry/loop logic of _scroll_to_comment, driven by scripted OCR and
+    avatar frames — no X server. POS puts our post avatar at top=100 in a
+    400x800 window; the next post's avatar sits far below.
+    """
+    POS = dict(x=0, y=0, w=400, h=800, top=100)
+    TARGET = dict(id='c9', name='张三', text='目标评论')
+
+    def _native(self, avatars, ocr):
+        from unittest.mock import MagicMock
+        from core import moments_native
+        n = moments_native.Native()
+        n._avatars = MagicMock(side_effect=avatars)
+        n.ocr = MagicMock(side_effect=ocr)
+        n.run = MagicMock()
+        return n
+
+    def _hit(self):
+        return [dict(text='目标评论', x=50, y=300)]
+
+    def test_target_visible_first_frame_no_scroll(self):
+        n = self._native([[100, 700]], [self._hit()])
+        with patch('core.docker_wx.priority_pending', return_value=False):
+            hit = n._scroll_to_comment(self.POS, self.TARGET)
+        self.assertEqual((hit['x'], hit['y']), (50, 300))
+        self.assertEqual(n.run.call_count, 0)
+
+    def test_anchored_hit_after_one_scroll(self):
+        n = self._native([[100, 700], [95, 700]], [[], self._hit()])
+        with patch('core.docker_wx.priority_pending', return_value=False):
+            hit = n._scroll_to_comment(self.POS, self.TARGET)
+        self.assertEqual(hit['y'], 300)
+        self.assertEqual(n.run.call_count, 1)
+
+    def test_tail_mode_after_our_avatar_leaves_top(self):
+        # Frame 2 shows only the next post's avatar => our avatar scrolled off.
+        n = self._native([[100, 700], [700]], [[], self._hit()])
+        with patch('core.docker_wx.priority_pending', return_value=False):
+            hit = n._scroll_to_comment(self.POS, self.TARGET)
+        self.assertEqual(hit['y'], 300)
+
+    def test_never_found_raises_original_message(self):
+        n = self._native([[100, 700]] * 4, [[]] * 4)
+        with patch('core.docker_wx.priority_pending', return_value=False):
+            with self.assertRaises(moments_native.NativeError) as e:
+                n._scroll_to_comment(self.POS, self.TARGET)
+        self.assertIn('目标评论未完整显示', str(e.exception))
+
+    def test_two_fuzzy_hits_raise_not_unique(self):
+        rows = [dict(text='目标评论一', x=50, y=300), dict(text='目标评论二', x=50, y=360)]
+        n = self._native([[100, 700]], [rows])
+        with patch('core.docker_wx.priority_pending', return_value=False):
+            with self.assertRaises(moments_native.NativeError) as e:
+                n._scroll_to_comment(self.POS, self.TARGET)
+        self.assertIn('不唯一', str(e.exception))
+
+    def test_priority_pending_yields_to_chat(self):
+        n = self._native([[100, 700]], [self._hit()])
+        with patch('core.docker_wx.priority_pending', return_value=True):
+            with self.assertRaises(moments_native.NativeError) as e:
+                n._scroll_to_comment(self.POS, self.TARGET)
+        self.assertIn('聊天优先', str(e.exception))
+
+    def test_reply_branch_verifies_then_clicks_in_order(self):
+        from unittest.mock import MagicMock
+        n = moments_native.Native()
+        item = dict(text='帖子正文', name='我', author='me',
+                    comments=[dict(id='c9', name='张三', text='目标评论')])
+        calls = []
+        n.find_post = MagicMock(return_value=self.POS)
+        n._scroll_to_comment = MagicMock(return_value=dict(x=50, y=300))
+        n.copy_at = MagicMock(side_effect=lambda *a: calls.append('copy_at') or '目标评论')
+        n.click = MagicMock(side_effect=lambda *a: calls.append('click'))
+        # Abort right after the click, before real editor detection touches X.
+        n.shot = MagicMock(side_effect=AssertionError('stop'))
+        with self.assertRaises(AssertionError):
+            n.prepare_comment(item, 'c9', '回复内容')
+        self.assertEqual(calls, ['copy_at', 'click'])
 
 
 class PublishImage(unittest.TestCase):

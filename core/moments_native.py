@@ -316,6 +316,48 @@ class Native:
                 self.run('xdotool','mousemove',str(x+w-30),str(y+h-65),'click','5');time.sleep(.2)
         raise NativeError('没有在当前可见朋友圈中找到目标，未发送')
 
+    def _scroll_to_comment(self, pos, target):
+        """Scroll the target comment into view and return its OCR hit row.
+
+        Comments always render below their post avatar, and find_post leaves our
+        avatar visible, so a target comment is only ever at or below the fold —
+        we only scroll down. Each notch we re-anchor our post's avatar top
+        geometrically (no clipboard copies), keep the region fenced between our
+        avatar and the next post's avatar so a body that is unique only within
+        this post stays unambiguous, and OCR that region. Raises NativeError
+        (with the original wording) if the comment never resolves in budget.
+        """
+        x,y,w,h,top=(pos[k] for k in ('x','y','w','h','top'))
+        NOTCH_MAX=200  # one scroll notch is shorter than a post that has comments
+        own_top=top    # trusted: find_post already copy_at-verified this avatar
+        deadline=time.monotonic()+30
+        last_sig=None;stall=0
+        for _ in range(24):
+            from core import docker_wx
+            if time.monotonic()>deadline or docker_wx.priority_pending():
+                raise NativeError('聊天优先或朋友圈定位超时，本次未发送')
+            avatars=sorted(self._avatars())
+            if own_top is not None:
+                cand=[t for t in avatars if own_top-NOTCH_MAX<=t<=own_top]
+                own_top=max(cand) if cand else None  # None => our avatar left the top (TAIL)
+            if own_top is not None:
+                region_top=own_top+60
+                below=[t for t in avatars if t>own_top+40]
+            else:
+                region_top=y+56  # previous post is already gone above the fold
+                below=list(avatars)  # smallest avatar is the next post
+            bottom=min(below) if below else y+h-25
+            rows=self.ocr((x+78,region_top,x+w-20,bottom))
+            hits=[r for r in rows if norm(target['text']) in norm(r['text'])]
+            if len(hits)>1:raise NativeError('目标评论匹配不唯一，未发送')
+            if len(hits)==1:return hits[0]
+            if own_top is None and below and min(below)<=y+120:break  # next post reached the top
+            sig=tuple(round(t) for t in avatars)
+            stall=stall+1 if sig==last_sig else 0;last_sig=sig
+            if stall>=2:break  # feed bottom, nothing new revealed
+            self.run('xdotool','mousemove',str(x+w-30),str(y+h-65),'click','5');time.sleep(.2)
+        raise NativeError('目标评论未完整显示，未发送')
+
     def input_text(self, point, text):
         self.click(*point)
         old=self.clip();sentinel='wx-empty-'+os.urandom(8).hex()
@@ -339,13 +381,9 @@ class Native:
             target=matches[0]
             if sum(c['text']==target['text'] for c in item['comments'])!=1 or not norm(target['text']):
                 raise NativeError('评论内容重复或为空，无法核对回复对象')
-            # Only search within this post (stop at next avatar).
-            next_tops=[t for t in self._avatars() if t>top+40]
-            bottom=min(next_tops) if next_tops else y+h-25
-            rows=self.ocr((x+78,top+60,x+w-20,bottom))
-            hits=[r for r in rows if norm(target['text']) in norm(r['text'])]
-            if len(hits)!=1:raise NativeError('目标评论未完整显示，未发送')
-            hit=hits[0]
+            # Later comments can sit below the fold; scroll the target into view
+            # (fenced within this post) before verifying and clicking it.
+            hit=self._scroll_to_comment(pos,target)
             copied=self.copy_at(hit['x'],hit['y'])
             if norm(copied) not in {norm(target['text']),norm(target['name']+target['text'])}:raise NativeError('目标评论正文核对失败')
             self.click(hit['x'],hit['y'])

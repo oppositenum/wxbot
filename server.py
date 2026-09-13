@@ -640,6 +640,24 @@ def api_bot_watch():
         json.dump(rules, f, ensure_ascii=False, indent=2)
     return jsonify({"ok": True, "watch": rules["watch"]})
 
+@app.post("/api/bot/admins")
+def api_bot_admins():
+    """设置管理员名单(可在会话里发 /命令 触发系统功能)。只接受当前账号的真人联系人。"""
+    admins = (request.get_json(force=True, silent=True) or {}).get("admins", [])
+    try:
+        from core import contacts
+        known = {c["username"] for c in contacts.list_contacts()}
+    except Exception:  # noqa: BLE001
+        known = None
+    clean = [a for a in dict.fromkeys(admins)
+             if isinstance(a, str) and not a.endswith("@chatroom") and (known is None or a in known)]
+    rules = botmod.load_rules()
+    rules["admins"] = clean
+    with open(botmod.rules_file(), "w", encoding="utf-8") as f:
+        json.dump(rules, f, ensure_ascii=False, indent=2)
+    return jsonify({"ok": True, "admins": clean})
+
+
 @app.get("/api/bot/proactive")
 def api_bot_proactive_get():
     rules = botmod.load_rules()

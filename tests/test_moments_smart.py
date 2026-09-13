@@ -398,6 +398,18 @@ class CopyMenu(unittest.TestCase):
         # 复制 inferred one row (716-686=30 above) up from 搜一搜, at its x column.
         self.assertEqual(n.clicks[-1][:2], (703, 686))
 
+    def test_reply_at_clicks_the_reply_menu_item(self):
+        # Opening the editor via 回复 avoids a left-click landing on the author name.
+        rows = [dict(text='复制', x=707, y=686),
+                dict(text='搜一搜', x=703, y=716),
+                dict(text='回复', x=707, y=746),
+                dict(text='删除', x=707, y=786)]
+        n = self._native(rows, 'unused')
+        n.reply_at(565, 578)
+        self.assertEqual(n.clicks[0][:2], (565, 578))   # right-click to open menu
+        self.assertEqual(n.clicks[0][2], (3,))
+        self.assertEqual(n.clicks[-1][:2], (707, 746))  # then the 回复 entry
+
     def test_no_menu_at_all_returns_empty_without_crashing(self):
         rows = [dict(text='1太单调了吧', x=828, y=692)]
         n = self._native(rows, 'irrelevant')

@@ -74,13 +74,21 @@ class Jobs(unittest.TestCase):
         j.retry(task['id'])
         self.assertEqual(m.drafts()[0]['status'],'queued')
 
-    def test_daily_schedule_china_no_catchup_and_once(self):
+    def test_interval_publish_paces_by_gap_and_skips_quiet(self):
         self.ready();now=datetime(2026,9,12,12,30,tzinfo=m.CHINA).timestamp()
-        with patch('time.time',return_value=now-60):m.save_settings(dict(auto_publish=True),0)
+        with patch('time.time',return_value=now-60):
+            m.save_settings(dict(auto_publish=True,publish_interval_minutes=120),0)
+        # Enabling publishes on the next tick; the in-flight guard blocks a duplicate.
         j.schedule(now);j.schedule(now+1);self.assertEqual(len(j.listing()),1)
-        task=j.listing()[0];self.assertEqual(task['origin'],'automatic')
-        j.finish(task['id'],'confirmed','ok');j.schedule(now+10);self.assertEqual(len(j.listing()),1)
-        j.schedule(now+86400+1801);self.assertEqual(len(j.listing()),1)
+        task=j.listing()[0];self.assertEqual((task['origin'],task['kind']),('automatic','publish'))
+        j.finish(task['id'],'confirmed','ok')
+        # Within the interval (default 2h + up to 1h jitter): no new post yet.
+        j.schedule(now+600);self.assertEqual(len(j.listing()),1)
+        # Past the maximum gap (3h): the next post is scheduled.
+        j.schedule(now+3*3600+1);self.assertEqual(len(j.listing()),2)
+        # Quiet hours suppress scheduling entirely (returns before the interval check).
+        night=datetime(2026,9,13,23,0,tzinfo=m.CHINA).timestamp()
+        j.schedule(night);self.assertEqual(len(j.listing()),2)
 
     def test_activation_watermark_does_not_reply_to_old_posts(self):
         self.ready();self.seed()
@@ -94,7 +102,7 @@ class Jobs(unittest.TestCase):
 
     def test_policy_rechecks_switch_revision_quiet_and_counts_uncertainty(self):
         now=datetime(2026,9,12,12,30,tzinfo=m.CHINA).timestamp()
-        value=dict(m.DEFAULTS,auto_publish=True,revision=2)
+        value=dict(m.DEFAULTS,auto_publish=True,revision=2,daily_publish_limit=1)
         job=dict(kind='publish',origin='automatic',created=now,payload=dict(settings_revision=2))
         self.assertEqual(j.policy(job,value,now),'')
         self.assertTrue(j.policy(job,dict(value,auto_publish=False),now))

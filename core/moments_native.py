@@ -39,6 +39,7 @@ class Native:
         self.editor = None
         self.opened = False
         self.submitted = False
+        self.like_pending = False
 
     @staticmethod
     def capability():
@@ -423,6 +424,77 @@ class Native:
             self.run('xdotool','mousemove',str(x+w-30),str(y+h-65),'click','5');time.sleep(.2)
         raise NativeError('目标评论未完整显示，未发送')
 
+    # Relative-time markers on the action row. Auto-like only targets posts <24h
+    # old, so the time is always relative (never an absolute 月/年 date, which
+    # would also false-match dates inside the body text).
+    TIME_TOKENS=('刚刚','分钟前','小时前','昨天','天前','周前')
+
+    def _footer_anchor(self, rows, names, lo):
+        """First likes/comment footer row below `lo` (a contact name substring or
+        a comment colon). The gray 时间/··· action row sits just above it."""
+        for r in sorted(rows,key=lambda r:r['y']):
+            if r['y']<=lo:continue
+            t=r['text']
+            if '：' in t or ':' in t:return r['y']
+            nt=norm(t)
+            if any(nm and len(nm)>=2 and nm in nt for nm in names):return r['y']
+        return None
+
+    def _reveal_actionbar(self, pos):
+        """Scroll the post's 时间/··· action row into view and return its OCR row.
+
+        The action row renders below the body and any media, so on a tall (image)
+        post find_post can leave our avatar visible while the row is still below
+        the fold. Mirror _scroll_to_comment's geometry: re-anchor our avatar top
+        each notch (no clipboard copies). Two ways to land the row:
+          * fast path — a readable relative-time token in the coarse region OCR
+            (text posts, where the row isn't occluded by media);
+          * media path — the faint gray time text is dropped by sparse-mode OCR
+            over a tall photo region, but the likes/comment footer below it reads
+            fine, so anchor to the footer and re-OCR the narrow band just above it
+            with psm=6 (line mode reliably reads the small time text there).
+        Only accept a row with room to click below it so the ··· button and popped
+        赞 menu land fully inside the window. Raises NativeError('动态操作栏未识别').
+        """
+        x,y,w,h,top=(pos[k] for k in ('x','y','w','h','top'))
+        from core import contacts
+        names={norm(c.get(k) or '') for c in contacts.list_contacts() for k in ('name','nick_name','remark')}
+        names.discard('')
+        NOTCH_MAX=200
+        own_top=top
+        deadline=time.monotonic()+25
+        last_sig=None;stall=0
+        for _ in range(20):
+            from core import docker_wx
+            if time.monotonic()>deadline or docker_wx.priority_pending():
+                raise NativeError('聊天优先或朋友圈定位超时，本次未发送')
+            avatars=sorted(self._avatars())
+            cand=[t for t in avatars if own_top-NOTCH_MAX<=t<=own_top+8]
+            own_top=max(cand) if cand else (min(avatars) if avatars else own_top)
+            below=[t for t in avatars if t>own_top+40]
+            bottom=min(below) if below else y+h-15
+            if bottom>own_top+52:
+                rows=self.ocr((x+75,own_top+42,x+w-15,bottom))
+                times=[r for r in rows if any(t in r['text'] for t in self.TIME_TOKENS)]
+                if times:
+                    hit=max(times,key=lambda r:r['y'])
+                    if hit['y']<=y+h-30:return hit  # fast path: readable time row
+                fy=self._footer_anchor(rows,names,own_top+90)
+                if fy and fy>own_top+130:
+                    # Tight bands just above the footer; psm=6 reads the gray time
+                    # text that the tall sparse-mode region OCR above missed.
+                    for by in (fy-60,fy-44,fy-76):
+                        band=self.ocr((x+75,max(by,own_top+80),x+w-15,by+30),psm=6)
+                        th=[r for r in band if any(t in r['text'] for t in self.TIME_TOKENS)]
+                        if th:
+                            hit=max(th,key=lambda r:r['y'])
+                            if hit['y']<=y+h-30:return hit
+            sig=tuple(round(t) for t in avatars)
+            stall=stall+1 if sig==last_sig else 0;last_sig=sig
+            if stall>=2:break  # feed bottom, nothing new revealed
+            self.run('xdotool','mousemove',str(x+w-30),str(y+h-65),'click','5');time.sleep(.2)
+        raise NativeError('动态操作栏未识别')
+
     def input_text(self, point, text):
         self.click(*point)
         old=self.clip();sentinel='wx-empty-'+os.urandom(8).hex()
@@ -477,6 +549,31 @@ class Native:
         self.submit_point=(send['x'],send['y'])
         self.anchor=self.shot((x,y,x+w,y+60)).tobytes()
 
+    def prepare_like(self, item):
+        """Stage a 赞 (like) on someone else's post: locate it, pop the ···
+        action menu (same one that holds 评论), find the 赞 entry and remember
+        its point WITHOUT clicking — submit() performs the single irreversible
+        click after process_one re-checks policy. There is no editor/text, so
+        this never touches the clipboard. Clicking 赞 twice would UN-like, so the
+        job-state ban on replaying an initiated job is what guarantees one click.
+        """
+        pos=self.find_post(item);x,y,w,h=(pos[k] for k in ('x','y','w','h'))
+        # The 时间/··· action row sits BELOW the body and any media, so on a tall
+        # (image) post find_post can leave the avatar visible while the action row
+        # is still below the fold. Scroll it fully into view (also handles the
+        # common already-visible case) before popping the menu.
+        row=self._reveal_actionbar(pos)
+        self.click(x+w-40,row['y'])  # pop the 赞 | 评论 menu
+        # The 赞 glyph is small and OCR-hostile (tesseract reads it as 移/贰/… as
+        # often as 赞), but 评论 right next to it reads reliably and the popup is
+        # fixed-layout, so anchor on 评论 (this also confirms the menu popped) and
+        # step left by the constant 赞↔评论 gap (~96px at this DPI).
+        c=self.label('评论',(x+w-143,row['y']-18,x+w-65,row['y']+19),exact=False)
+        self.editor=self.window
+        self.submit_point=(c['x']-96,c['y'])
+        self.like_pending=True
+        self.anchor=self.shot((x,y,x+w,y+60)).tobytes()
+
     def prepare_publish(self, text, paths):
         x,y,w,h=self.open()
         self.click(x+78,y+22,3)
@@ -522,7 +619,12 @@ class Native:
     def submit(self):
         self.check(True)
         wid=self.run('xdotool','getactivewindow').decode().strip()
-        if not self.staged or wid!=self.editor:
+        if wid!=self.editor:
+            raise NativeError('提交前编辑窗口已变化')
+        if self.like_pending:
+            # 无文案:直接点一下 赞 即可(点第二次会取消赞,故只点一次由任务状态保证)。
+            self.like_pending=False;self.submitted=True;self.click(*self.submit_point);return
+        if not self.staged:
             raise NativeError('提交前编辑窗口已变化')
         point,text=self.staged;old=self.clip()
         try:
@@ -535,6 +637,8 @@ class Native:
         if self.submitted:return  # do not touch an editor/feed after an ambiguous click
         try:
             self.check()
+            if self.like_pending:
+                self.key('Escape')  # 关掉点开但未点击的 赞/评论 弹出菜单
             if self.staged:
                 old=self.clip();point,text=self.staged
                 self.click(*point);self.key('ctrl+a');self.key('ctrl+c')

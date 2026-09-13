@@ -211,6 +211,25 @@ class Post(unittest.TestCase):
         self.assertEqual(moments_ai._parse_post('```json\n{"text":"a","image_prompt":"b"}\n```'), ('a', 'b'))
         self.assertEqual(moments_ai._parse_post('就一句纯文本'), ('就一句纯文本', ''))
 
+    def test_ai_post_endpoint_returns_plain_text_not_object(self):
+        # Regression: generate_post now returns a dict; the /ai-post endpoint must
+        # unpack it so the frontend gets a string, not the "[object Object]" that
+        # a dict serialised into the text field produces.
+        from flask import Flask
+        from core import moments_api
+        app = Flask(__name__)
+        app.register_blueprint(moments_api.create_blueprint(lambda: True))
+        client = app.test_client()
+        token = sessions.capture()
+        with patch('core.moments_ai.generate_post',
+                   return_value=dict(text='今天心情不错', image_prompt='sunset')):
+            resp = client.post('/api/moments/ai-post', json={'session': token})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertIsInstance(data['text'], str)
+        self.assertEqual(data['text'], '今天心情不错')
+        self.assertEqual(data['image_prompt'], 'sunset')
+
 
 class PublishImage(unittest.TestCase):
     setUp = fixtures.Moments.setUp

@@ -4,6 +4,7 @@ All model, network and client calls are mocked: no real WeChat, CDN, paid model
 or image generation is touched.
 """
 import io
+import json
 import threading
 import time
 import unittest
@@ -206,6 +207,27 @@ class Post(unittest.TestCase):
             out = moments_ai.generate_post(['平静'])
         self.assertEqual(out['image_prompt'], '')
         ws.assert_not_called()
+
+    def test_generate_post_grounds_current_time_of_day(self):
+        # The post must know what time it is, so it can't write "晚风" at 10am.
+        captured = {}
+        def fake_chat(system, msgs, cfg=None):
+            captured['system'] = system; captured['user'] = msgs[0]['content']
+            return '{"text":"此刻的心情","image_prompt":""}'
+        with patch('core.personalization.resolve_persona', return_value=self._persona()), \
+             patch('core.moments.catalog', return_value=dict(items=[])), \
+             patch('core.moments.settings', return_value=dict(m.DEFAULTS, publish_images=False, publish_web_opinions=False)), \
+             patch('core.moments.capabilities', return_value=dict(image_publish=False)), \
+             patch('core.llm.load_cfg', return_value={}), \
+             patch('core.llm.chat', side_effect=fake_chat):
+            moments_ai.generate_post(['平静'])
+        material = json.loads(captured['user'])
+        self.assertIn('time', material); self.assertIn('period', material)
+        self.assertIn(material['period'], ['深夜','清晨','上午','中午','下午','傍晚','夜晚'])
+        # The system prompt states the clock time and its period, and forbids mismatched imagery.
+        self.assertIn('北京时间', captured['system'])
+        self.assertIn(material['period'], captured['system'])
+        self.assertIn('时段', captured['system'])
 
     def test_parse_post_tolerates_fence_and_plain(self):
         self.assertEqual(moments_ai._parse_post('```json\n{"text":"a","image_prompt":"b"}\n```'), ('a', 'b'))

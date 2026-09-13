@@ -161,16 +161,19 @@ def _target_intact(p, item):
 def policy(job, value, now):
     if job['origin']=='manual' or job['payload'].get('forced'):return ''
     kind=job['kind'];p=job['payload']
-    flag='chat_reflection' if job['origin']=='reflection' else ('auto_comment' if kind=='comment' else ('auto_like' if kind=='like' else 'auto_publish'))
+    flag=('chat_reflection' if job['origin']=='reflection' else
+          {'comment':'auto_comment','like':'auto_like','chat':'auto_chat_after_like'}.get(kind,'auto_publish'))
     if not value[flag]:return '自动开关已关闭'
     if value['revision']!=p['settings_revision']:return '设置已变化，旧任务已取消'
-    if m.quiet_now(value,now):return '当前为免打扰时段'
+    # 深夜无视免打扰:开了 late_night_override,点赞与主动私聊在免打扰时段照常;评论/发布仍受限。
+    if m.quiet_now(value,now) and not (value['late_night_override'] and kind in ('like','chat')):
+        return '当前为免打扰时段'
     if now-job['created']>1800:return '已错过本次执行窗口，不补发过期内容'
     start=datetime.fromtimestamp(now,m.CHINA).replace(hour=0,minute=0,second=0,microsecond=0).timestamp()
     with db() as c:
         count=c.execute("SELECT count(*) FROM moments_jobs WHERE kind=? AND initiated>=? AND state IN ('initiated','confirmed','uncertain')",(kind,start)).fetchone()[0]
         last=c.execute('SELECT MAX(initiated) FROM moments_jobs').fetchone()[0] or 0
-    limit=value['daily_comment_limit' if kind=='comment' else ('daily_like_limit' if kind=='like' else 'daily_publish_limit')]
+    limit=value[{'comment':'daily_comment_limit','like':'daily_like_limit','chat':'daily_chat_limit'}.get(kind,'daily_publish_limit')]
     if limit>0 and count>=limit:return '今日数量已达上限'
     if value['min_interval_minutes']>0 and now-last<value['min_interval_minutes']*60:return '距离上次互动过近'
     return ''
@@ -178,10 +181,13 @@ def policy(job, value, now):
 
 def schedule(now):
     value=m.settings();token=sessions.check()
-    if m.quiet_now(value,now):return
+    # 深夜无视免打扰:开了 late_night_override 时,免打扰时段仍放行点赞(→触发主动私聊),
+    # 但发布/评论扫描仍按免打扰跳过(下方各加 not quiet 判断)。未开则夜间整体不动。
+    quiet=m.quiet_now(value,now)
+    if quiet and not value['late_night_override']:return
     with db() as c:
         if c.execute("SELECT 1 FROM moments_jobs WHERE state IN ('queued','preparing','initiated')").fetchone():return
-        if value['auto_publish']:
+        if value['auto_publish'] and not quiet:
             # Publish on a rolling interval (default every 2–3h) rather than a fixed
             # daily time; quiet hours are already excluded above. The gap is the
             # configured interval plus up to an hour of jitter derived from the last
@@ -201,7 +207,7 @@ def schedule(now):
                 from core import contacts
                 known={v['username'] for v in contacts.list_contacts() if not v['username'].endswith('@chatroom')}
             return known
-        if value['auto_comment']:
+        if value['auto_comment'] and not quiet:
             for r in c.execute('SELECT payload FROM feed ORDER BY created DESC LIMIT 100').fetchall():
                 item=json.loads(r[0]);own=item['author']==token['account']
                 targets=[(q['id'],q['author'],q['created']) for q in item['comments'] if q['id'] and q['author']!=token['account']] if own else [('',item['author'],item['created'])]
@@ -316,6 +322,66 @@ def yield_to_chat(job, message):
                       (time.time(),m._json(p),message,job['id']))
 
 
+def _enqueue_chat_after_like(feed_id):
+    """点赞确认后:若开了「点赞后主动私聊」,入队一条 chat 任务(dedup=chat:<feed_id>,一动态一私聊)。
+
+    尽力而为——任何异常都不影响"点赞已确认"这个既成结果,只是这次不追私聊。
+    """
+    try:
+        value=m.settings()
+        if not value['auto_chat_after_like']:return
+        item=m.detail(feed_id)
+        if item['author']==sessions.check()['account']:return  # 不给自己私聊
+        with db() as c:
+            insert(c,'chat:'+feed_id,'chat','automatic',
+                   dict(feed_id=feed_id,author=item['author'],name=item.get('name',''),
+                        text=item.get('text',''),created=item.get('created',0),
+                        settings_revision=value['revision'],assets=[]),time.time())
+        wake.set()
+    except Exception:
+        pass
+
+
+def _process_chat(job):
+    """点赞后主动私聊:在 UI_LOCK 之外走 sender.send_text(它自带 SEND_LOCK),避免死锁。
+
+    情绪感知文案由 moments_ai.generate_outreach 生成(伤感→关心可 2-3 条、趣事→共鸣、
+    广告/无实质→跳过);回执用 send_text 返回状态,不走朋友圈 feed diff。
+    """
+    from core import sender, send_ledger, conversation_state, moments_ai, contacts
+    p=job['payload'];chat=p['author'];account=sessions.check()['account']
+    disp=next((c['name'] for c in contacts.list_contacts() if c['username']==chat),'') or p.get('name') or chat
+    if sender.preflight(chat):
+        finish(job['id'],'skipped','对方会话暂不可用,未主动私聊');return
+    gate=conversation_state.ticket(chat,[])
+    if gate is None or not conversation_state.allowed(gate):
+        finish(job['id'],'skipped','对方已暂停主动打扰,未私聊');return
+    try:
+        out=moments_ai.generate_outreach(chat,p.get('text',''),p.get('name',''))
+    except (m.Conflict,m.Unavailable) as exc:
+        finish(job['id'],'skipped',str(exc));return
+    if out.get('skip'):
+        finish(job['id'],'skipped',out.get('reason','这条动态不值得主动打扰'));return
+    parts=out['messages'][:3]
+    now=time.time()
+    with db() as c:
+        c.execute("UPDATE moments_jobs SET state='initiated',initiated=?,updated=?,message='正在主动私聊' WHERE id=?",(now,now,job['id']))
+    sent=0;last=None
+    for idx,part in enumerate(parts,1):
+        if not conversation_state.allowed(gate):break
+        last=sender.send_text(disp,part,chat_username=chat,
+                              job_id=send_ledger.stable_id(account,'moment_outreach',chat,p['feed_id'],idx),
+                              proactive_ticket=gate)
+        if (last or {}).get('status') not in ('confirmed','submitted'):break
+        sent+=1
+    if sent==len(parts):
+        finish(job['id'],'confirmed','已主动私聊 %d 条'%sent,p['feed_id'])
+    elif sent==0 and last is None:
+        finish(job['id'],'skipped','对方已暂停主动打扰,未私聊')
+    else:
+        finish(job['id'],'uncertain','主动私聊仅送达 %d/%d 条,不自动重发'%(sent,len(parts)))
+
+
 def process_one():
     from core import docker_wx, moments_ai
     from core.moments_native import Native
@@ -332,6 +398,10 @@ def process_one():
         why=policy(job,m.settings(),time.time())
         if why:finish(job['id'],'skipped',why);return
         p=job['payload']
+        # 主动私聊完全走 sender.send_text(自带 SEND_LOCK),绝不进下面的朋友圈原生 UI_LOCK 块,
+        # 否则 UI_LOCK==SEND_LOCK 会死锁。回执用 send_text 状态,不走 feed diff。
+        if job['kind']=='chat':
+            _process_chat(job);return
         if job['origin']!='manual' and job['kind']!='like' and not p.get('text'):
             if moments_ai._generating.locked():
                 with db() as c:c.execute("UPDATE moments_jobs SET state='queued',message='等待当前 AI 文案生成完成' WHERE id=?",(job['id'],))
@@ -386,7 +456,10 @@ def process_one():
         for attempt in range(12):
             try:
                 m.sync();found=receipt(job,before,since)
-                if found:finish(job['id'],'confirmed','已在微信记录中确认发送',found);return
+                if found:
+                    finish(job['id'],'confirmed','已在微信记录中确认发送',found)
+                    if job['kind']=='like':_enqueue_chat_after_like(p['feed_id'])
+                    return
             except (m.Conflict,m.Unavailable):pass
             time.sleep(1)
         finish(job['id'],'uncertain','已操作提交，但未查到唯一回执；请查看微信，系统不会自动重发')

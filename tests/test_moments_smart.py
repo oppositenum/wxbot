@@ -642,5 +642,75 @@ class Reflection(unittest.TestCase):
         self.assertEqual(moments_reflection._mood_image_prompt('感悟'), '')
 
 
+class ProactiveChat(unittest.TestCase):
+    """点赞后主动私聊:走 sender.send_text(UI_LOCK 外),情绪感知、可跳过、门禁复查。"""
+    setUp = fixtures.Moments.setUp
+
+    def _job(self, **payload):
+        pl = dict(feed_id='F1', author='friend-A', name='朋友甲', text='今天好难过',
+                  created=1, settings_revision=0, assets=[])
+        pl.update(payload)
+        with j.db() as c:
+            return j.insert(c, 'chat:F1', 'chat', 'automatic', pl, time.time())
+
+    def _contacts(self):
+        return patch('core.contacts.list_contacts', return_value=[dict(username='friend-A', name='阿甲')])
+
+    def test_process_chat_sends_messages_and_confirms(self):
+        job = self._job()
+        sent = []
+        with patch('core.sender.preflight', return_value=None), \
+             patch('core.sender.send_text', side_effect=lambda disp, text, **kw: sent.append((disp, text)) or dict(status='confirmed')), \
+             patch('core.conversation_state.ticket', return_value=dict(chat='friend-A', revision=1)), \
+             patch('core.conversation_state.allowed', return_value=True), self._contacts(), \
+             patch('core.moments_ai.generate_outreach',
+                   return_value=dict(skip=False, sentiment='sad', messages=['在吗', '看到你不开心', '抱抱'])):
+            j._process_chat(dict(job))
+        self.assertEqual(sent, [('阿甲', '在吗'), ('阿甲', '看到你不开心'), ('阿甲', '抱抱')])
+        updated = next(x for x in j.listing() if x['id'] == job['id'])
+        self.assertEqual(updated['state'], 'confirmed')
+
+    def test_process_chat_skips_when_model_declines(self):
+        job = self._job()
+        with patch('core.sender.preflight', return_value=None), \
+             patch('core.sender.send_text', side_effect=AssertionError('跳过时不得发送')), \
+             patch('core.conversation_state.ticket', return_value=dict(chat='friend-A', revision=1)), \
+             patch('core.conversation_state.allowed', return_value=True), self._contacts(), \
+             patch('core.moments_ai.generate_outreach', return_value=dict(skip=True, reason='广告')):
+            j._process_chat(dict(job))
+        self.assertEqual(next(x for x in j.listing() if x['id'] == job['id'])['state'], 'skipped')
+
+    def test_process_chat_skips_when_conversation_paused(self):
+        job = self._job()
+        with patch('core.sender.preflight', return_value=None), \
+             patch('core.sender.send_text', side_effect=AssertionError('暂停时不得发送')), \
+             patch('core.conversation_state.ticket', return_value=None), \
+             patch('core.moments_ai.generate_outreach', side_effect=AssertionError('暂停时不得生成')), self._contacts():
+            j._process_chat(dict(job))
+        self.assertEqual(next(x for x in j.listing() if x['id'] == job['id'])['state'], 'skipped')
+
+    def test_parse_outreach_handles_fences_skip_and_caps(self):
+        f = moments_ai._parse_outreach
+        self.assertIsNone(f(''))
+        self.assertIsNone(f('这不是 JSON'))
+        self.assertTrue(f('```json\n{"skip":true,"reason":"广告"}\n```')['skip'])
+        out = f('{"sentiment":"happy","skip":false,"messages":["a","b","c","d"]}')
+        self.assertEqual(out['messages'], ['a', 'b', 'c'])   # 最多 3 条
+        self.assertEqual(out['sentiment'], 'happy')
+        self.assertIsNone(f('{"skip":false,"messages":[]}'))  # 空消息视为无效
+
+    def test_process_chat_partial_send_is_uncertain(self):
+        job = self._job()
+        results = iter([dict(status='confirmed'), dict(status='failed')])
+        with patch('core.sender.preflight', return_value=None), \
+             patch('core.sender.send_text', side_effect=lambda *a, **k: next(results)), \
+             patch('core.conversation_state.ticket', return_value=dict(chat='friend-A', revision=1)), \
+             patch('core.conversation_state.allowed', return_value=True), self._contacts(), \
+             patch('core.moments_ai.generate_outreach',
+                   return_value=dict(skip=False, sentiment='sad', messages=['一', '二'])):
+            j._process_chat(dict(job))
+        self.assertEqual(next(x for x in j.listing() if x['id'] == job['id'])['state'], 'uncertain')
+
+
 if __name__ == '__main__':
     unittest.main()

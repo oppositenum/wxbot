@@ -332,4 +332,76 @@ class Likes(unittest.TestCase):
         with self.assertRaises(ValueError):m.save_settings(dict(daily_like_limit=99999),s['revision'])
         with self.assertRaises(ValueError):m.save_settings(dict(like_since=5),s['revision'])  # 水位不可由前端直接设置
 
+class Chats(unittest.TestCase):
+    """点赞后主动私聊:like 确认→入队 chat;情绪感知发送;深夜无视免打扰。"""
+    setUp=fixtures.Moments.setUp
+    seed=fixtures.Moments.seed
+
+    def ready(self):
+        p=patch('core.moments.capabilities',return_value=dict(send=True));p.start();self.addCleanup(p.stop)
+
+    def _detail(self):
+        return dict(id=FID,author='friend-A',name='朋友甲',text='今天好累好难过',created=1789207200,likes=[],comments=[])
+
+    def test_enqueue_chat_after_like_inserts_when_enabled(self):
+        self.ready()
+        with patch('time.time',return_value=1000.0):m.save_settings(dict(auto_like=True,auto_chat_after_like=True),0)
+        with patch('core.moments.detail',return_value=self._detail()):
+            j._enqueue_chat_after_like(FID)
+        rows=j.listing();self.assertEqual(len(rows),1)
+        job=rows[0]
+        self.assertEqual((job['kind'],job['origin'],job['dedup']),('chat','automatic','chat:'+FID))
+        self.assertEqual(job['payload']['author'],'friend-A')
+        self.assertEqual(job['payload']['text'],'今天好累好难过')
+        # 同一条动态不重复入队(dedup)。
+        with patch('core.moments.detail',return_value=self._detail()):j._enqueue_chat_after_like(FID)
+        self.assertEqual(len(j.listing()),1)
+
+    def test_enqueue_chat_after_like_noop_when_disabled(self):
+        self.ready()  # auto_chat_after_like 默认 False
+        with patch('core.moments.detail',return_value=self._detail()):j._enqueue_chat_after_like(FID)
+        self.assertEqual(j.listing(),[])
+
+    def test_enqueue_chat_after_like_skips_own_post(self):
+        self.ready()
+        with patch('time.time',return_value=1000.0):m.save_settings(dict(auto_like=True,auto_chat_after_like=True),0)
+        own=dict(self._detail(),author=self.account)
+        with patch('core.moments.detail',return_value=own):j._enqueue_chat_after_like(FID)
+        self.assertEqual(j.listing(),[])
+
+    def test_chat_policy_gates_flag_and_daily_limit(self):
+        now=datetime(2026,9,12,12,30,tzinfo=m.CHINA).timestamp()  # 白天,非免打扰
+        value=dict(m.DEFAULTS,auto_chat_after_like=True,revision=2,daily_chat_limit=1)
+        job=dict(kind='chat',origin='automatic',created=now,payload=dict(settings_revision=2))
+        self.assertEqual(j.policy(job,value,now),'')
+        self.assertEqual(j.policy(job,dict(value,auto_chat_after_like=False),now),'自动开关已关闭')
+        with j.db() as c:
+            r=j.insert(c,'chatcap','chat','automatic',{},now,state='initiated')
+            c.execute('UPDATE moments_jobs SET initiated=? WHERE id=?',(now-100,r['id']))
+        self.assertIn('上限',j.policy(job,value,now))
+
+    def test_chat_policy_late_night_override(self):
+        night=datetime(2026,9,12,2,0,tzinfo=m.CHINA).timestamp()  # 02:00 落在默认 22:00-08:00 免打扰
+        base=dict(m.DEFAULTS,auto_chat_after_like=True,auto_like=True,auto_comment=True,revision=2)
+        chat=dict(kind='chat',origin='automatic',created=night,payload=dict(settings_revision=2))
+        like=dict(kind='like',origin='automatic',created=night,payload=dict(settings_revision=2))
+        comment=dict(kind='comment',origin='automatic',created=night,payload=dict(settings_revision=2))
+        # override 开:chat/like 夜间放行,评论仍受免打扰。
+        on=dict(base,late_night_override=True)
+        self.assertEqual(j.policy(chat,on,night),'')
+        self.assertEqual(j.policy(like,on,night),'')
+        self.assertIn('免打扰',j.policy(comment,on,night))
+        # override 关:chat 夜间也被免打扰拦。
+        off=dict(base,late_night_override=False)
+        self.assertIn('免打扰',j.policy(chat,off,night))
+
+    def test_save_settings_validates_chat_and_sets_watermark(self):
+        self.ready()
+        with patch('time.time',return_value=2000.0):
+            s=m.save_settings(dict(auto_chat_after_like=True,daily_chat_limit=5,late_night_override=False),0)
+        self.assertTrue(s['auto_chat_after_like']);self.assertEqual(s['daily_chat_limit'],5)
+        self.assertFalse(s['late_night_override']);self.assertEqual(s['chat_since'],2000.0)
+        with self.assertRaises(ValueError):m.save_settings(dict(daily_chat_limit=99999),s['revision'])
+        with self.assertRaises(ValueError):m.save_settings(dict(chat_since=5),s['revision'])  # 水位不可由前端直接设置
+
 if __name__=='__main__':unittest.main()

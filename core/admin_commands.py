@@ -40,16 +40,18 @@ def _cmd_moment(args, ctx):
 
 
 def _cmd_moment_image(args, ctx):
-    """/配图朋友圈 <内容>：发图文朋友圈，用内容作为提示词生成一张配图。"""
-    from core import moments, moments_jobs, llm
-    text = (args or '').strip()
-    if not text:
-        return '⚠️ 用法：/配图朋友圈 文字内容'
+    """/配图朋友圈 <主题>：主题交大模型润色成正文，再按内容生成配图后发图文朋友圈。"""
+    from core import moments, moments_jobs, moments_ai, llm
+    topic = (args or '').strip()
+    if not topic:
+        return '⚠️ 用法：/配图朋友圈 主题内容（会由大模型润色成正文并按内容配图）'
     caps = moments.capabilities()
     if not caps.get('image_publish'):
         return '⚠️ 当前环境不支持生成配图：' + (caps.get('reason') or '未知原因')
+    post = moments_ai.compose_from_topic(topic)          # 主题 → 润色正文 + 配图画面描述
+    text = post['text']
     try:
-        data = llm.gen_image(text, cfg=llm.load_cfg())
+        data = llm.gen_image(post['image_prompt'], cfg=llm.load_cfg())
     except Exception as exc:  # noqa: BLE001
         return '⚠️ 配图生成失败：' + (str(exc) or type(exc).__name__)[:80]
     if not data:
@@ -144,7 +146,7 @@ def _cmd_help(args, ctx):
 
 COMMANDS = {
     '朋友圈': (_cmd_moment, '/朋友圈 <内容>  发一条朋友圈（内容留空=自动生成）'),
-    '配图朋友圈': (_cmd_moment_image, '/配图朋友圈 <内容>  发图文朋友圈（用内容生成配图）'),
+    '配图朋友圈': (_cmd_moment_image, '/配图朋友圈 <主题>  主题交大模型润色成正文并按内容配图，发图文朋友圈'),
     '同步朋友圈': (_cmd_sync, '/同步朋友圈  立即同步朋友圈'),
     '朋友圈状态': (_cmd_status, '/朋友圈状态  查看同步与自动化状态'),
     '设置': (_cmd_set, '/设置 <项> <开|关>  项：自动评论/自动发布/聊天反思/配图/网络观点/同步'),

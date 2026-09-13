@@ -281,13 +281,24 @@ class ScrollToComment(unittest.TestCase):
                 n._scroll_to_comment(self.POS, self.TARGET)
         self.assertIn('目标评论未完整显示', str(e.exception))
 
-    def test_two_fuzzy_hits_raise_not_unique(self):
-        rows = [dict(text='目标评论一', x=50, y=300), dict(text='目标评论二', x=50, y=360)]
+    def test_fuzzy_match_tolerates_ocr_dropped_char(self):
+        # OCR drops 昼 and prepends a garbled name glyph; must still locate it
+        # (copy_at is the exact gate downstream, so a fuzzy locate is safe).
+        target = dict(id='c9', name='飒', text='夏以昼 你没回复我！')
+        rows = [dict(text='着:夏以你没回复我!', x=60, y=300)]
         n = self._native([[100, 700]], [rows])
         with patch('core.docker_wx.priority_pending', return_value=False):
+            hit = n._scroll_to_comment(self.POS, target)
+        self.assertEqual(hit['y'], 300)
+
+    def test_dissimilar_row_is_not_matched(self):
+        target = dict(id='c9', name='x', text='夏以昼 你没回复我！')
+        rows = [dict(text='完全不同的另一条评论内容啦啦啦', x=60, y=300)]
+        n = self._native([[100, 700]] * 4, [rows] * 4)
+        with patch('core.docker_wx.priority_pending', return_value=False):
             with self.assertRaises(moments_native.NativeError) as e:
-                n._scroll_to_comment(self.POS, self.TARGET)
-        self.assertIn('不唯一', str(e.exception))
+                n._scroll_to_comment(self.POS, target)
+        self.assertIn('未完整显示', str(e.exception))
 
     def test_priority_pending_yields_to_chat(self):
         n = self._native([[100, 700]], [self._hit()])

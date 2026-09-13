@@ -4,6 +4,7 @@ No network vision, hooks, database writes or unchecked chat-sender fallback.
 Callers must own docker_wx.UI_LOCK for the entire prepare/submit/cleanup cycle.
 """
 import csv
+import difflib
 import hashlib
 import io
 import json
@@ -324,10 +325,17 @@ class Native:
         we only scroll down. Each notch we re-anchor our post's avatar top
         geometrically (no clipboard copies), keep the region fenced between our
         avatar and the next post's avatar so a body that is unique only within
-        this post stays unambiguous, and OCR that region. Raises NativeError
-        (with the original wording) if the comment never resolves in budget.
+        this post stays unambiguous, and OCR that region. OCR is lossy (it drops
+        or garbles characters), so a row is matched by fuzzy similarity, not exact
+        substring — this only LOCATES a candidate to right-click; copy_at then
+        re-verifies the exact text before anything is sent, so a mis-locate fails
+        cleanly. Raises NativeError (original wording) if nothing resolves in budget.
         """
         x,y,w,h,top=(pos[k] for k in ('x','y','w','h','top'))
+        nt=norm(target['text'])
+        def _score(r):
+            nr=norm(r['text'])
+            return difflib.SequenceMatcher(None,nt,nr).ratio() if nr else 0.0
         NOTCH_MAX=200  # one scroll notch is shorter than a post that has comments
         own_top=top    # trusted: find_post already copy_at-verified this avatar
         deadline=time.monotonic()+30
@@ -348,9 +356,11 @@ class Native:
                 below=list(avatars)  # smallest avatar is the next post
             bottom=min(below) if below else y+h-25
             rows=self.ocr((x+78,region_top,x+w-20,bottom))
-            hits=[r for r in rows if norm(target['text']) in norm(r['text'])]
-            if len(hits)>1:raise NativeError('目标评论匹配不唯一，未发送')
-            if len(hits)==1:return hits[0]
+            best=max(rows,key=_score,default=None)
+            # 0.8 clears real OCR noise (dropped/garbled glyphs score ~0.87-0.93)
+            # while a merely similar neighbouring comment stays below it; copy_at
+            # is the exact gate, so keep scrolling rather than grabbing a weak row.
+            if best is not None and _score(best)>=0.8:return best
             if own_top is None and below and min(below)<=y+120:break  # next post reached the top
             sig=tuple(round(t) for t in avatars)
             stall=stall+1 if sig==last_sig else 0;last_sig=sig

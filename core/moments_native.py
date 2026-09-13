@@ -385,7 +385,12 @@ class Native:
             # (fenced within this post) before verifying and clicking it.
             hit=self._scroll_to_comment(pos,target)
             copied=self.copy_at(hit['x'],hit['y'])
-            if norm(copied) not in {norm(target['text']),norm(target['name']+target['text'])}:raise NativeError('目标评论正文核对失败')
+            # copy_at yields one whole comment. A top-level comment copies as the
+            # body alone (or 昵称+正文); a reply copies as "昵称 回复 某人：正文",
+            # so also accept when both the author name and the exact body appear.
+            nc=norm(copied);nt=norm(target['text']);nn=norm(target['name'])
+            if nc not in {nt,norm(target['name']+target['text'])} and not (nt and nt in nc and nn and nn in nc):
+                raise NativeError('目标评论正文核对失败')
             self.click(hit['x'],hit['y'])
         else:
             rows=self.ocr((x+75,top+42,x+w-15,min(y+h,top+260)))

@@ -312,6 +312,35 @@ class ScrollToComment(unittest.TestCase):
             n.prepare_comment(item, 'c9', '回复内容')
         self.assertEqual(calls, ['copy_at', 'click'])
 
+    def _reply_branch(self, copied):
+        """Run prepare_comment's reply branch with a stubbed clipboard readback,
+        aborting right after the verify/click via a shot() that raises."""
+        from unittest.mock import MagicMock
+        n = moments_native.Native()
+        item = dict(text='帖子正文', name='我', author='me',
+                    comments=[dict(id='c9', name='蜜蜜🌱besos', text='他一起回复的。但是概率失败。')])
+        clicked = []
+        n.find_post = MagicMock(return_value=self.POS)
+        n._scroll_to_comment = MagicMock(return_value=dict(x=50, y=300))
+        n.copy_at = MagicMock(return_value=copied)
+        n.click = MagicMock(side_effect=lambda *a: clicked.append(a))
+        n.shot = MagicMock(side_effect=AssertionError('stop-after-click'))
+        return n, item, clicked
+
+    def test_reply_comment_copy_with_infix_passes_verification(self):
+        # WeChat copies a reply as "昵称 回复 某人：正文"; both name and body present.
+        n, item, clicked = self._reply_branch('蜜蜜🌱besos 回复 飒：他一起回复的。但是概率失败。')
+        with self.assertRaises(AssertionError):  # aborts at shot(), i.e. past the check + click
+            n.prepare_comment(item, 'c9', '回复内容')
+        self.assertEqual(len(clicked), 1)
+
+    def test_wrong_comment_copy_fails_verification_without_click(self):
+        n, item, clicked = self._reply_branch('完全不相关的另一条评论')
+        with self.assertRaises(moments_native.NativeError) as e:
+            n.prepare_comment(item, 'c9', '回复内容')
+        self.assertIn('核对失败', str(e.exception))
+        self.assertEqual(clicked, [])
+
 
 class PublishImage(unittest.TestCase):
     setUp = fixtures.Moments.setUp

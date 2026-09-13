@@ -117,7 +117,8 @@ class Jobs(unittest.TestCase):
         return now,jid
 
     def test_transient_comment_failure_retries_only_after_cooldown(self):
-        now,jid=self._seed_comment_job('failed')
+        # Seed stale generated text + an old digest snapshot to prove they're dropped.
+        now,jid=self._seed_comment_job('failed',dict(text='旧文案',snapshot=dict(digest='old')))
         with patch('core.contacts.list_contacts',return_value=[dict(username='friend-A')]):
             # Before the cooldown elapses the buried comment is left alone.
             with patch('time.time',return_value=now+3):j.schedule(now+3)
@@ -128,6 +129,9 @@ class Jobs(unittest.TestCase):
         row=j.listing()[0]
         self.assertEqual(row['state'],'queued')
         self.assertEqual(row['payload']['auto_attempts'],2)
+        # Stale text/snapshot are cleared so process_one regenerates against the live thread.
+        self.assertNotIn('text',row['payload'])
+        self.assertNotIn('snapshot',row['payload'])
 
     def test_decided_skip_comment_is_never_auto_retried(self):
         now,jid=self._seed_comment_job('skipped',dict(decided_skip=True))

@@ -219,7 +219,11 @@ def schedule(now):
                 attempts=pp.get('auto_attempts',1)
                 if attempts>=MAX_AUTO_ATTEMPTS or now-prior['updated']<AUTO_RETRY_COOLDOWN:continue
                 # Transient failure/throttle/expiry: reset the row to queued for another try.
-                pp.update(auto_attempts=attempts+1,settings_revision=value['revision']);pp.pop('retry_at',None)
+                # Drop the stale generated text + feed-digest snapshot so process_one
+                # regenerates against the CURRENT thread; otherwise a since-grown digest
+                # trips the '动态已变化' guard on every retry until attempts run out.
+                pp.update(auto_attempts=attempts+1,settings_revision=value['revision'])
+                for k in ('retry_at','text','snapshot','image_prompt','emotion'):pp.pop(k,None)
                 # Re-pin to the current (live) session so recover() doesn't cancel the
                 # requeued job — schedule() runs under sessions.bind(), so this is the
                 # active account/generation.

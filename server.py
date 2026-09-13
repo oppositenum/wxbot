@@ -976,19 +976,32 @@ def api_greeting_save():
         if b.get("persona") is not None:
             fields["persona"] = (b.get("persona") or "").strip()
         t, err = schedule.update_task(id=int(tid), fields=fields)
-    else:
-        target = (b.get("target") or "").strip()
-        if not target:
-            return jsonify({"ok": False, "message": "请选择问候对象"}), 400
+        if err:
+            return jsonify({"ok": False, "message": err}), 400
+        return jsonify({"ok": True, "task": t})
+    # 新建:支持一次为多个联系人各建一条问候(targets 列表;兼容旧的单 target)。
+    raw = b.get("targets")
+    targets = [str(x).strip() for x in raw if str(x).strip()] if isinstance(raw, list) \
+        else [t for t in [(b.get("target") or "").strip()] if t]
+    if not targets:
+        return jsonify({"ok": False, "message": "请选择问候对象"}), 400
+    created, failed = [], []
+    for target in targets:
         t, err = schedule.add_greeting(target=target, cron=cron, quiet=quiet,
                                        persona=(b.get("persona") or None),
                                        title=(b.get("title") or "定时问候"))
-        if not err and not enabled:
+        if err:
+            failed.append({"target": target, "message": err})
+            continue
+        if not enabled:
             schedule.update_task(id=t["id"], fields={"cron": cron, "enabled": False})
             t["enabled"] = False
-    if err:
-        return jsonify({"ok": False, "message": err}), 400
-    return jsonify({"ok": True, "task": t})
+        created.append(t)
+    if not created:
+        msg = "；".join(f'{f["target"]}: {f["message"]}' for f in failed) or "创建失败"
+        return jsonify({"ok": False, "message": msg}), 400
+    return jsonify({"ok": True, "tasks": created, "failed": failed,
+                    "task": created[0]})  # task 兼容旧前端
 
 
 @app.post("/api/schedule/nl")

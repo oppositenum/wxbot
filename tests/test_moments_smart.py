@@ -208,8 +208,9 @@ class Post(unittest.TestCase):
         self.assertEqual(out['image_prompt'], '')
         ws.assert_not_called()
 
-    def test_generate_post_grounds_current_time_of_day(self):
-        # The post must know what time it is, so it can't write "晚风" at 10am.
+    def test_generate_post_grounds_time_and_varies_tone(self):
+        # The post must fit the real time (no "晚风" at 10am) without being forced to
+        # announce it, and its tone is randomised so posts don't all read the same.
         captured = {}
         def fake_chat(system, msgs, cfg=None):
             captured['system'] = system; captured['user'] = msgs[0]['content']
@@ -222,16 +223,26 @@ class Post(unittest.TestCase):
              patch('core.llm.chat', side_effect=fake_chat):
             moments_ai.generate_post(['平静'])
         material = json.loads(captured['user'])
-        self.assertIn('time', material); self.assertIn('period', material)
-        self.assertIn(material['period'], ['深夜','清晨','上午','中午','下午','傍晚','夜晚'])
-        # The system prompt states the clock time and its period, and forbids mismatched imagery.
-        self.assertIn('北京时间', captured['system'])
-        self.assertIn(material['period'], captured['system'])
-        self.assertIn('时段', captured['system'])
+        # The clock is NOT fed as content (so the model won't echo it); only a soft
+        # period constraint plus a randomised tone live in the system prompt.
+        self.assertNotIn('time', material)
+        self.assertIn(material['tone'], moments_ai.TONES)
+        # The clock is only a soft anti-contradiction hint, explicitly not to be written out.
+        self.assertIn('仅用于避免时间矛盾', captured['system'])
+        self.assertIn('不要写进文案', captured['system'])
+        self.assertIn(material['tone'], captured['system'])
 
     def test_parse_post_tolerates_fence_and_plain(self):
         self.assertEqual(moments_ai._parse_post('```json\n{"text":"a","image_prompt":"b"}\n```'), ('a', 'b'))
         self.assertEqual(moments_ai._parse_post('就一句纯文本'), ('就一句纯文本', ''))
+
+    def test_parse_post_salvages_or_rejects_broken_json(self):
+        # A closed "text" field in otherwise-broken JSON is salvaged, never published raw.
+        self.assertEqual(moments_ai._parse_post('{"text":"完整的一句","image_prompt":"scene"'),
+                         ('完整的一句', 'scene'))
+        # Truncated mid-string (no closing quote) must be rejected, not published as braces.
+        with self.assertRaises(m.Unavailable):
+            moments_ai._parse_post('{"text":"手头的事刚收尾，抬头发现光很正，脑子却')
 
     def test_ai_post_endpoint_returns_plain_text_not_object(self):
         # Regression: generate_post now returns a dict; the /ai-post endpoint must

@@ -117,6 +117,12 @@ def create_blueprint(authorize):
         from core import moments_jobs
         return moments_jobs.cancel(jid)
 
+    @bp.post('/api/moments/jobs/<jid>/retry')
+    @guarded
+    def retry(body, jid):
+        from core import moments_jobs
+        return moments_jobs.retry(jid)
+
     @bp.post('/api/moments/ai-post')
     @guarded
     def ai_post(body):

@@ -35,6 +35,29 @@ class Jobs(unittest.TestCase):
         self.assertEqual(states[a['id']],'cancelled');self.assertEqual(states[b['id']],'uncertain')
         j.recover();self.assertEqual(len(j.listing()),2)
 
+    def test_retry_requeues_only_never_initiated_jobs(self):
+        with j.db() as c:
+            failed=j.insert(c,'f','comment','manual',dict(text='x',attempts=6,retry_at=time.time()+99),time.time(),state='failed')
+            initiated=j.insert(c,'i','publish','manual',{},time.time(),state='initiated')
+            uncertain=j.insert(c,'u','publish','manual',{},time.time(),state='uncertain')
+        got=j.retry(failed['id']);self.assertEqual(got['state'],'queued')
+        again={x['id']:x for x in j.listing()}
+        self.assertEqual(again[failed['id']]['state'],'queued')
+        # attempts / retry_at cleared so the job runs promptly with a fresh budget.
+        self.assertNotIn('retry_at',again[failed['id']]['payload'])
+        self.assertNotIn('attempts',again[failed['id']]['payload'])
+        # An initiated (possibly-live) or uncertain send is never replayable.
+        with self.assertRaises(m.Conflict):j.retry(initiated['id'])
+        with self.assertRaises(m.Conflict):j.retry(uncertain['id'])
+        with self.assertRaises(ValueError):j.retry('nope')
+
+    def test_retry_reopens_cancelled_draft(self):
+        self.ready();d=m.save_draft(dict(kind='publish',text='想法'))
+        task=j.enqueue_draft(d['id'],1);j.cancel(task['id'])
+        self.assertEqual(m.drafts()[0]['status'],'cancelled')
+        j.retry(task['id'])
+        self.assertEqual(m.drafts()[0]['status'],'queued')
+
     def test_daily_schedule_china_no_catchup_and_once(self):
         self.ready();now=datetime(2026,9,12,12,30,tzinfo=m.CHINA).timestamp()
         with patch('time.time',return_value=now-60):m.save_settings(dict(auto_publish=True),0)

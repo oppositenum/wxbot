@@ -87,6 +87,29 @@ def cancel(jid):
     return dict(id=jid,state='cancelled')
 
 
+# Only jobs that provably never reached the submit stage may be re-queued; an
+# initiated/uncertain/confirmed job could already be live on WeChat and must
+# never be replayed (see module docstring).
+RETRYABLE = ('failed', 'cancelled', 'skipped')
+
+
+def retry(jid):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        r=c.execute('SELECT * FROM moments_jobs WHERE id=?',(jid,)).fetchone()
+        if not r:raise ValueError('任务不存在')
+        if r['state'] not in RETRYABLE:raise m.Conflict('仅失败、已取消或已跳过的任务可以重试')
+        p=json.loads(r['payload']);p.pop('retry_at',None);p.pop('attempts',None)
+        # Re-pin to the current account so process_one (which only runs jobs for
+        # the active session) will actually pick this up now.
+        c.execute("UPDATE moments_jobs SET state='queued',message='已重新排队，等待处理',payload=?,session=?,updated=? WHERE id=?",
+                  (m._json(p),m._json(sessions.check()),time.time(),jid))
+        did=p.get('draft_id')
+        if did:c.execute("UPDATE drafts SET status='queued',updated=? WHERE id=?",(int(time.time()),did))
+    wake.set()
+    return dict(id=jid,state='queued')
+
+
 def recover():
     """Account switches or server restart invalidate in-flight work, not receipts."""
     token=m._json(sessions.check())

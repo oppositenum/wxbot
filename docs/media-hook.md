@@ -13,7 +13,7 @@
 
 ## 当前实现
 
-`docker/frida_capture.js` 使用 Frida 观察微信进程的 `open/openat`、`close`、`rename`、`unlink` 等 libc 文件操作。在写入文件关闭、文件改名后或删除前，通过硬链接保留符合范围的媒体文件。只处理 `/root/xwechat_files/<账号>/` 下指定图片目录和 `msg/video`，捕获目录为 `/root/wxbot_capture/<账号>/`，保留账号目录的完整名称，不设跨账号共享池。
+`docker/frida_capture.js` 使用 Frida 观察微信进程的 `open/openat`、`close`、`rename`、`unlink` 等 libc 文件操作。在写入文件关闭、文件改名后或删除前，通过硬链接保留符合范围的媒体文件。只处理 `/home/wechat/xwechat_files/<账号>/` 下指定图片目录和 `msg/video`，捕获目录为 `/home/wechat/wxbot_capture/<账号>/`，保留账号目录的完整名称，不设跨账号共享池。
 
 `docker/frida_capture_supervisor.py` 保证单个捕获进程运行，定期更新心跳；微信进程退出或连接断开后重试，发现多个同名微信进程时不任意选择。当前容器启动脚本已加入 Hook 启动块，使用 `/root/wxbot-hooks/current/`；Dockerfile 也包含 Frida 依赖和脚本，供后续重建。当前容器没有重启，完整重启链路尚未实测。
 

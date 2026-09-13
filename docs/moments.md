@@ -113,7 +113,7 @@ curl --fail --silent --show-error \
 
 `accounts/<account>/moments.sqlite3` 保存缓存、设置、草稿和任务；`moments_assets/` 保存图片。沿用账号目录持久化挂载。只读解密微信库到临时快照，绝不向微信原库写数据或返回密钥和私有媒体 URL。
 
-依赖：`xdotool wmctrl scrot xclip xprop xwininfo tesseract-ocr tesseract-ocr-chi-sim`，已写入 `docker/ubuntu-manual/Dockerfile`。`core/moments_templates/` 的 PNG 只包含两个按钮，无账号内容。
+依赖：`xdotool wmctrl scrot xclip xprop xwininfo tesseract-ocr tesseract-ocr-chi-sim`，已写入 `docker/Dockerfile`。`core/moments_templates/` 的 PNG 只包含两个按钮，无账号内容。
 
 源代码不实时挂载到当前容器。发布需更新 `core/moments*.py`、`core/moments_templates/`、`core/ui_lock.py`、共享锁变更后的 `core/docker_wx.py` 和 `static/moments.html`，再仅重启后端；不要重启整个微信容器。原有 `server.py` 已注册页面/API 并启动 `moments.start_loop()`。
 

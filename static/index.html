@@ -914,8 +914,8 @@ async function renderGreeting(edit){
     <div class="sub" style="margin-bottom:8px">到点会按当前时段、用该会话的聊天人设，自由发一句"就在身边"的陪伴问候（想你了/早餐做好了/陪你在床头…）。免打扰时段内不发；对方正在聊天时本次自动跳过。</div>
     <div style="padding:8px;border:1px solid #ddd;border-radius:6px;margin-bottom:8px">
       <input type="hidden" id="grId" value="${e.id||''}">
-      <label class="sub">问候对象</label>
-      <select id="grTarget" style="width:100%;padding:5px;margin:2px 0 6px">${opts||'<option value="">（无联系人）</option>'}</select>
+      <label class="sub">问候对象${e.id?'':'（可多选：按住 Ctrl/⌘ 或拖选，可给多人各建一条）'}</label>
+      <select id="grTarget" ${e.id?'':'multiple size="5"'} style="width:100%;padding:5px;margin:2px 0 6px">${opts||'<option value="">（无联系人）</option>'}</select>
       <label class="sub">频率</label>
       <select id="grInt" style="width:100%;padding:5px;margin:2px 0 6px">
         ${Object.keys(_INT_LABEL).map(k=>`<option value="${k}" ${curInt===k?"selected":""}>${_INT_LABEL[k]}</option>`).join("")}
@@ -934,14 +934,17 @@ async function renderGreeting(edit){
     <h3>已设问候 <span class="sub" style="font-weight:normal">${(d.tasks||[]).length} 条</span></h3>
     ${rows}`;
   $("#grSave").onclick=async()=>{
-    const body={ id:$("#grId").value||undefined, target:$("#grTarget").value,
-      interval:$("#grInt").value, quiet_start:$("#grQs").value, quiet_end:$("#grQe").value,
-      enabled:$("#grEn").checked };
-    if(!body.target){ $("#grMsg").textContent="请选择对象"; return; }
+    const id=$("#grId").value||undefined;
+    const sel=[...$("#grTarget").selectedOptions].map(o=>o.value).filter(Boolean);
+    const body={ id, interval:$("#grInt").value, quiet_start:$("#grQs").value,
+      quiet_end:$("#grQe").value, enabled:$("#grEn").checked };
+    if(id){ body.target=sel[0]||$("#grTarget").value; } else { body.targets=sel; }
+    if(!(id?body.target:body.targets.length)){ $("#grMsg").textContent="请选择对象"; return; }
     $("#grMsg").textContent="保存中…";
     try{
       const r=await(await fetch("/api/greeting",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
-      if(r.ok){ toast("已保存"); renderGreeting(); } else { $("#grMsg").textContent="⚠️ "+(r.message||"保存失败"); }
+      if(r.ok){ const n=(r.tasks||[r.task]).length; toast("已保存"+(n>1?("("+n+"人)"):"")); renderGreeting(); }
+      else { $("#grMsg").textContent="⚠️ "+(r.message||"保存失败"); }
     }catch(err){ $("#grMsg").textContent="出错:"+err; }
   };
   if($("#grNew")) $("#grNew").onclick=()=>renderGreeting();

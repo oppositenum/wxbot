@@ -65,6 +65,15 @@ def resolve_target(name):
     n = _norm(name)
     if not n:
         return None, None, None
+    # 直接传微信号(username/wxid)时精确命中——UI 下拉常以 username 为值,不能只靠昵称匹配。
+    raw = str(name).strip()
+    for g in contacts.list_groups():
+        if g.get("username") == raw:
+            return g["username"], True, g.get("name")
+    for c in contacts.list_contacts():
+        if c.get("username") == raw:
+            return c["username"], False, (c.get("remark") or c.get("nick_name")
+                                          or c.get("name") or raw)
     # 群
     best = None
     for g in contacts.list_groups():

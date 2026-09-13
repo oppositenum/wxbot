@@ -91,20 +91,28 @@ def generate(body, decide=False):
         cfg = dict(llm.load_cfg())
         cfg.update(single_attempt=True, max_tokens=400)
         sessions.check(token)
-        try:
-            text = llm.chat(system, [{'role': 'user', 'content': json.dumps(context_data, ensure_ascii=False)}], cfg=cfg)
-        except Exception as exc:
-            raise moments.Unavailable('AI 生成失败，请检查后台 AI 设置中的模型接口、额度或连接后重试；原评论已保留') from exc
-        sessions.check(token)
-        if moments.detail(item['id'])['digest'] != item['digest']:
-            raise moments.Conflict('生成期间动态已更新，请重新打开后生成')
-        if decide:
+        msgs=[{'role': 'user', 'content': json.dumps(context_data, ensure_ascii=False)}]
+        for _ in range(2):  # retry once on a truncated/format-invalid body (single_attempt only retries network errors)
             try:
-                answer=json.loads(text)
-                if answer['action']=='skip':return dict(skip=True,reason=str(answer.get('reason','不适合主动评论'))[:200])
-                if answer['action']!='reply':raise ValueError()
-                text=answer['text']
-            except (ValueError,TypeError,KeyError):raise moments.Unavailable('模型自动互动判断格式无效，本次未发送')
+                text = llm.chat(system, msgs, cfg=cfg)
+            except Exception as exc:
+                raise moments.Unavailable('AI 生成失败，请检查后台 AI 设置中的模型接口、额度或连接后重试；原评论已保留') from exc
+            sessions.check(token)
+            if moments.detail(item['id'])['digest'] != item['digest']:
+                raise moments.Conflict('生成期间动态已更新，请重新打开后生成')
+            if decide:
+                try:
+                    answer=json.loads(text)
+                    if answer['action']=='skip':return dict(skip=True,reason=str(answer.get('reason','不适合主动评论'))[:200])
+                    if answer['action']!='reply':raise ValueError()
+                    text=answer['text']
+                except (ValueError,TypeError,KeyError):
+                    text=None;continue  # bad shape — give the model one more try before failing
+            if isinstance(text, str) and text.strip() and len(text.strip()) <= 2000:
+                break
+            text=None
+        if decide and text is None:
+            raise moments.Unavailable('模型自动互动判断格式无效，本次未发送')
         if not isinstance(text, str) or not text.strip() or len(text.strip()) > 2000:
             raise moments.Unavailable('模型没有返回有效的评论正文，请重试；原评论已保留')
         return dict(text=text.strip(), feed_id=item['id'], feed_digest=item['digest'], reply_id=reply_id,

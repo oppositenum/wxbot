@@ -107,14 +107,25 @@ def _valid_image(data):
 def _sns_decrypt(data, source):
     """Decrypt an encrypted SNS payload (x-Enc:1) → (bytes, mime) or (None, None).
 
-    Reverse-engineering (kanxue "微信4.0朋友圈媒体解密全解析") shows Tencent streams
-    encrypted moments media as `ciphertext XOR ISAAC-64(media.key)` — NOT AES. The
-    exact ISAAC-64 seeding used by the client is not yet reproduced here, so for now
-    an encrypted image degrades to "unread" instead of feeding garbage to the vision
-    model. Plaintext feeds (key="0", no x-Enc) are the common case and already work.
+    Encrypted moments media are a keystream XOR (NOT AES), per kanxue "微信4.0朋友圈
+    媒体解密全解析". The keystream comes from WeChat's own `WxIsaac64`, which is a
+    *non-standard* ISAAC-64: it is seeded from a decimal STRING via an undisclosed
+    transform, and is NOT bit-compatible with the reference / rand_isaac ISAAC-64
+    (verified against WeChat's shipped wasm_video_decode.wasm: seed "0" yields
+    0x9d39247e33776d41, which no correct stock ISAAC-64 produces).
 
-    TODO: seed ISAAC-64 from int(source['key']), XOR the (first 128KB of the)
-    payload, and gate on _valid_image so only a correct decrypt is ever returned.
+    Concretely, reproducing decryption here was NOT achieved:
+      * Seeding WeChat's real WASM with this media's url `key` decimal does not
+        decrypt its ciphertext (no JPEG magic, md5 mismatch); candidate seeds
+        (key, md5, media id, tokens) all fail too.
+      * The encrypted length (e.g. 148952B) exceeds the declared plaintext
+        totalSize (147782B), which is inconsistent with a pure 1:1 stream XOR —
+        so the on-CDN format and/or the per-image seed derivation differ from the
+        documented 视频号 (Channels) scheme and need more reverse-engineering.
+
+    Until that is resolved, an encrypted image degrades to "unread" rather than
+    feeding garbage to the vision model. Plaintext feeds (key="0", no x-Enc) are
+    the common case and already work end-to-end.
     """
     return None, None
 

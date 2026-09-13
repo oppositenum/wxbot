@@ -27,11 +27,12 @@ _sync_lock = threading.Lock()
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 DEFAULTS = dict(revision=0, sync_enabled=False, sync_interval_minutes=10,
                 auto_comment=False, auto_publish=False, auto_like=False, chat_reflection=False, quiet_start='22:00', quiet_end='08:00',
+                auto_chat_after_like=False, daily_chat_limit=5, late_night_override=True,
                 daily_comment_limit=0, daily_publish_limit=0, daily_like_limit=0, min_interval_minutes=0,
                 publish_interval_minutes=120,
                 friend_allowlist=[], publish_time='12:30', moods=['喜悦', '平静', '趣事'],
                 publish_images=True, publish_web_opinions=True,
-                comment_since=0, publish_since=0, like_since=0)
+                comment_since=0, publish_since=0, like_since=0, chat_since=0)
 
 
 class Conflict(ValueError):
@@ -45,7 +46,8 @@ class Unavailable(RuntimeError):
 def capabilities():
     from core.moments_native import Native
     ready, reason = Native.capability()
-    return dict(read=True, drafts=True, send=ready, auto_comment=ready, auto_publish=ready, auto_like=ready, chat_reflection=ready,
+    return dict(read=True, drafts=True, send=ready, auto_comment=ready, auto_publish=ready, auto_like=ready,
+                auto_chat_after_like=ready, chat_reflection=ready,
                 media_preview=False, image_publish=ready, reason=reason)
 
 
@@ -247,7 +249,7 @@ def settings():
 
 
 def save_settings(patch, revision):
-    if not isinstance(patch, dict) or set(patch) - (set(DEFAULTS) - {'revision','comment_since','publish_since','like_since'}):
+    if not isinstance(patch, dict) or set(patch) - (set(DEFAULTS) - {'revision','comment_since','publish_since','like_since','chat_since'}):
         raise ValueError('未知设置字段')
     with database() as c:
         c.execute('BEGIN IMMEDIATE')
@@ -256,11 +258,13 @@ def save_settings(patch, revision):
             raise Conflict('设置已更新，请重新加载后保存')
         previous = dict(value)
         value.update(patch)
-        for key in ['sync_enabled', 'auto_comment', 'auto_publish', 'auto_like', 'chat_reflection', 'publish_images', 'publish_web_opinions']:
+        for key in ['sync_enabled', 'auto_comment', 'auto_publish', 'auto_like', 'auto_chat_after_like',
+                    'late_night_override', 'chat_reflection', 'publish_images', 'publish_web_opinions']:
             if type(value[key]) is not bool:
                 raise ValueError('开关必须是布尔值')
         for key, lo, hi in [('sync_interval_minutes', 5, 1440), ('daily_comment_limit', 0, 1000),
                             ('daily_publish_limit', 0, 1000), ('daily_like_limit', 0, 1000),
+                            ('daily_chat_limit', 0, 1000),
                             ('min_interval_minutes', 0, 10080),
                             ('publish_interval_minutes', 30, 1440)]:
             if type(value[key]) is not int or not lo <= value[key] <= hi:
@@ -289,12 +293,12 @@ def save_settings(patch, revision):
             if any(x not in known or x.endswith('@chatroom') for x in friends):
                 raise ValueError('好友不属于当前账号')
         value['friend_allowlist'] = list(dict.fromkeys(friends))
-        if (value['auto_comment'] or value['auto_publish'] or value['auto_like'] or value['chat_reflection']) and not capabilities()['send']:
+        if (value['auto_comment'] or value['auto_publish'] or value['auto_like'] or value['auto_chat_after_like'] or value['chat_reflection']) and not capabilities()['send']:
             raise Unavailable(capabilities()['reason'])
         if not isinstance(value['moods'], list) or not value['moods'] or any(x not in ['喜悦','愤怒','轻微烦躁','平静','趣事','随想'] for x in value['moods']):
             raise ValueError('请选择有效的情绪与话题')
         value['moods'] = list(dict.fromkeys(value['moods']))
-        for flag, watermark in [('auto_comment','comment_since'),('auto_publish','publish_since'),('auto_like','like_since')]:
+        for flag, watermark in [('auto_comment','comment_since'),('auto_publish','publish_since'),('auto_like','like_since'),('auto_chat_after_like','chat_since')]:
             if value[flag] and not previous[flag]:value[watermark] = time.time()
         value['revision'] += 1
         _set(c, 'settings', value)

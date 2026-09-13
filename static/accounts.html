@@ -15,4 +15,6 @@ $('#refresh').onclick=load;$('#add').onclick=()=>$('#dlg').showModal();$('#creat
 $('#authForm').onsubmit=async e=>{e.preventDefault();if(loading)return;token=$('#adminToken').value.trim();$('#adminToken').value='';$('#error').textContent='';if(!token){lock();$('#error').textContent='请输入管理员 Token';return;}loading=true;$('#authorize').disabled=true;try{const data=await api('/api/accounts');unlock();draw(data.accounts);$('#authStatus').textContent='已授权。Token 仅在当前页面内存中保存。';}catch(e){lock();token='';report(e);}finally{loading=false;$('#authorize').disabled=false;}};
 $('#logout').onclick=()=>{token='';$('#adminToken').value='';lock();$('#dlg').close();$('#authStatus').textContent='已退出授权';};
 lock();setInterval(()=>{if(authorized)load()},15000);
+// 本机部署(WXBOT_LOCAL=1)同源即为管理员，免 Token 自动加载；远程部署仍走上方 Token 表单。
+fetch('/api/admin/access',{headers:{'X-Wxbot-Local-Admin':'1'}}).then(r=>r.json()).then(async a=>{if(!a.local_admin)return;$('#authForm').hidden=true;token='';unlock();$('#authStatus').textContent='本机后台已连接，无需 Token。';await load();}).catch(()=>{});
 </script></html>

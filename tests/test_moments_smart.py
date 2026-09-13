@@ -386,6 +386,64 @@ class ScrollToComment(unittest.TestCase):
         self.assertEqual(clicked, [])
 
 
+class FindPostAuthor(unittest.TestCase):
+    """find_post's author label is a fuzzy sanity check, not a brittle exact gate.
+
+    The body is already globally unique in cache and copied verbatim, so a lossy
+    OCR of the tiny name strip must not fail a correct target. Drives find_post
+    with a stubbed X/clipboard/DB; the post body is unique so identity is proven.
+    """
+    from unittest.mock import MagicMock
+
+    def _native(self, item, author_rows):
+        from unittest.mock import MagicMock
+        from core import moments_native
+        n = moments_native.Native()
+        n.open = MagicMock(return_value=(0, 0, 400, 800))
+        n.run = MagicMock()
+        n._avatars = MagicMock(return_value=[100])
+        n.copy_at = MagicMock(return_value=item['text'])
+        n.ocr = MagicMock(return_value=author_rows)
+        n.check = MagicMock()
+        return n
+
+    def _run(self, item, author_rows, contacts_rows):
+        import contextlib
+        from unittest.mock import MagicMock
+        from core import moments_native
+        n = self._native(item, author_rows)
+        fake_c = MagicMock()
+        fake_c.execute.return_value = [(json.dumps(item),)]
+        @contextlib.contextmanager
+        def fake_db():
+            yield fake_c
+        with patch('core.moments.database', fake_db), \
+             patch('core.contacts.list_contacts', return_value=contacts_rows), \
+             patch('core.docker_wx.priority_pending', return_value=False):
+            return n.find_post(item)
+
+    def test_fuzzy_author_tolerates_ocr_dropped_char(self):
+        item = dict(id='f1', text='哪有正常发挥而已', name='蜜蜜🌱besos', author='wxid_x')
+        # OCR drops the emoji and a trailing glyph.
+        pos = self._run(item, [dict(text='蜜蜜beso', x=90, y=95)],
+                        [dict(username='wxid_x', name='蜜蜜🌱besos', nick_name='', remark='')])
+        self.assertEqual(pos['top'], 100)
+
+    def test_empty_author_ocr_defers_to_unique_body(self):
+        item = dict(id='f1', text='哪有正常发挥而已', name='蜜蜜🌱besos', author='wxid_x')
+        # OCR read nothing legible (emoji-heavy name): unique body already proves identity.
+        pos = self._run(item, [dict(text='', x=90, y=95)],
+                        [dict(username='wxid_x', name='蜜蜜🌱besos', nick_name='', remark='')])
+        self.assertEqual(pos['top'], 100)
+
+    def test_clearly_wrong_author_still_fails(self):
+        item = dict(id='f1', text='哪有正常发挥而已', name='张三', author='wxid_x')
+        with self.assertRaises(moments_native.NativeError) as e:
+            self._run(item, [dict(text='李四王五', x=90, y=95)],
+                      [dict(username='wxid_x', name='张三', nick_name='', remark='')])
+        self.assertIn('作者名称', str(e.exception))
+
+
 class CopyMenu(unittest.TestCase):
     """copy_at must still find 复制 when its own glyph is unreadable.
 

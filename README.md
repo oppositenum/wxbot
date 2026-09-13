@@ -1,71 +1,62 @@
-# wxbot — 微信抓取 + 发送后台
+# wxbot — Ubuntu 微信机器人
 
-在 **Docker 里跑一个 Linux 微信（小号）**，可远程扫码登录、可视操作；后台负责：
-读取**私聊/群成员/群聊天**，发送**文本/图片**，Web 界面展示登录状态、列数据、发消息。
-
-> 主账号继续在你自己的 Mac 上用；容器里登录一个**小号**当机器人，互不影响。
+单个 Ubuntu 24.04 容器同时运行 Linux 微信、XFCE/noVNC 桌面和管理后台。
+支持 `amd64`、`arm64`，可远程扫码登录、读取私聊和群聊、发送文本/图片并运行机器人。
 
 ## 架构
 
 ```
-┌─ Docker 容器 (arm64, Linux 微信 4.1.1) ──────────────┐
-│  Xvfb + fluxbox + x11vnc + noVNC(6080)               │
-│  /opt/wechat/wechat  ← 小号扫码登录                    │
-│  linux_keys.py  从 /proc/pid/mem 取密钥(明文 x'hex')  │
-│  wx_send.py     xdotool 驱动界面发文本/图片            │
-│  数据卷 /root ──挂载──> docker/wxdata (宿主可读)       │
-└───────────────────────────────────────────────────────┘
-        ▲ docker exec (发送/取密钥)   │ 读 db 文件
-        │                             ▼
-┌─ 宿主 (macOS) ────────────────────────────────────────┐
-│  core/decrypt.py  逐页 AES-256-CBC 解密 db             │
-│  core/contacts|messages|avatars  读联系人/群/消息      │
-│  core/docker_wx.py  与容器交互(状态/发送/取密钥)        │
-│  server.py  Flask API + 前端  http://localhost:5100    │
-└───────────────────────────────────────────────────────┘
+┌─ Ubuntu 24.04 容器 ────────────────────────────────────┐
+│  XFCE + Xvfb + x11vnc + noVNC :6080                    │
+│  Linux 微信（/home/wechat 数据卷，保存登录态）           │
+│  密钥提取 + 解密 + 读取 + UI 发送                       │
+│  Flask API + Web 管理后台 :5100                         │
+│  /app/accounts 数据卷保存账号配置和解密数据              │
+└────────────────────────────────────────────────────────┘
 ```
 
-关键点：**Linux 微信把库密钥以明文 `x'<hex>'` 存在进程内存**（不像 macOS 4.1.x 做了混淆），
-容器内 root 直接读 `/proc/pid/mem` 秒取全部 per-db 密钥。数据库格式与 macOS 4.1 同代，
-解密/表结构/protobuf 解析完全复用。发送用 `xdotool`（容器内 X，坐标稳定，比 macOS 屏幕自动化可靠）。
+镜像以普通用户运行微信，通过 `SYS_PTRACE` 读取同一容器内的数据库密钥；发送使用容器桌面里的
+`xdotool`。Compose 保存微信 Home 和应用账号目录，容器更新不会删除登录态和业务配置。
 
 ## 目录
 
 ```
 docker/
-  Dockerfile            arm64 Debian + VNC/noVNC + 微信 + 依赖 + 脚本
-  start.sh              容器入口：起 X/VNC/微信
+  Dockerfile            Ubuntu 24.04 多架构镜像
+  start.sh              容器入口：桌面/VNC/微信/后台
   linux_keys.py         取密钥(容器内)
   wx_send.py            xdotool 发送(容器内)
-  WeChatLinux_arm64.deb  微信安装包
-  wxdata/               容器数据卷(挂载, 内含 db + keys.json)
 core/
   decrypt.py  db.py  contacts.py  messages.py  avatars.py  protobuf.py
-  docker_wx.py          宿主↔容器 交互
-config.py               自动探测 docker/wxdata 数据目录
+  docker_wx.py          微信状态、密钥和发送接口
+config.py               数据和账号路径配置
 server.py               后台 API + 前端
 static/index.html       单页 UI
-run.sh                  一键：起容器→取密钥→解密→起后台
+deploy.sh               唯一部署入口
+run.sh                  deploy.sh 的兼容别名
 ```
 
-## 使用
+## 一键部署
 
-### 首次
 ```bash
-# 1. 构建镜像（含微信 + 全部依赖，约 3GB）
-cd docker && docker build --platform linux/arm64 -t wxbot-wechat . && cd ..
-
-# 2. 一键启动
-./run.sh
-#    首次会提示打开 noVNC 扫码：浏览器开 http://localhost:6080/vnc.html → Connect
-#    用【小号】手机微信扫码登录，登录后再次运行 ./run.sh
+./deploy.sh
 ```
 
-### 之后
+使用 GitHub Runner 已发布的镜像首次部署时，也只需一条命令：
+
 ```bash
-./run.sh          # 起容器(若停)→取密钥→解密→ http://localhost:5100
+./deploy.sh <your-registry>/wxbot-wechat:ubuntu-24.04
 ```
-微信重启后密钥会变，后台点「刷新密钥」或重跑 `./run.sh` 即可。
+
+脚本会自动检查 Docker、生成 `.env` 和随机 VNC 密码、拉取 Ubuntu 镜像，并在远程镜像不存在时
+回退到本机构建；随后启动容器并等待后台就绪。远程镜像缺少 `ubuntu-24.04` 标识时会拒绝使用，
+不会误启动其他系统镜像。
+
+首次启动后打开 `http://127.0.0.1:6080/vnc.html`，使用 `.env` 中的 `VNC_PASSWORD`
+进入桌面并扫码登录。管理后台是 `http://127.0.0.1:5100`，登录后在后台点一次“刷新密钥”。
+之后升级和重启仍然执行同一个 `./deploy.sh`。
+
+默认端口只绑定 `127.0.0.1`。远程服务器通过 SSH 隧道访问；不要把无鉴权的后台直接暴露到公网。
 
 ## API
 
@@ -161,14 +152,13 @@ python3 -m core.distill run <群@chatroom> <wxid> [名字]
 ## 命令行直用
 
 ```bash
-# 取密钥(容器内) → 解密(宿主)
+# 容器内手动提取密钥
 docker exec wxbot python3 /usr/local/bin/linux_keys.py \
-    /root/xwechat_files/<wxid>/db_storage /root/keys.json
-python3 -m core.decrypt
+    /home/wechat/xwechat_files/<wxid>/db_storage /app/accounts/<wxid>/keys.json
 
 # 读
-python3 -m core.contacts     # 联系人/群/成员
-python3 -m core.messages     # 会话/消息
+docker exec wxbot python3 -m core.contacts     # 联系人/群/成员
+docker exec wxbot python3 -m core.messages     # 会话/消息
 
 # 发送(容器内 xdotool)
 docker exec wxbot python3 /usr/local/bin/wx_send.py text  "某联系人" "你好"
@@ -183,59 +173,26 @@ docker exec wxbot python3 /usr/local/bin/wx_send.py image "某群名"  /tmp/pic.
 - **密钥时效**：微信重启后密钥变化，需重新 `linux_keys.py`（后台「刷新密钥」按钮）。
 - **窗口坐标**：`wx_send.py` 用固定窗口几何偏移点击侧栏搜索/文件按钮；若手动改了容器窗口大小可能需微调偏移。
 
-## 在 Linux 服务器部署（x86 / arm 一体化镜像，推荐）
+## GitHub Runner 构建镜像
 
-服务器上用**单个容器**同时跑 微信 + 后端（无需在宿主装 Python，也不用挂 docker.sock）。
-镜像已推到私有 registry：`<your-registry>/wxbot-wechat`（含 `amd64`/`arm64`）。
-
-### 一键起
+部署机器只需要运行 `./deploy.sh`。镜像由 GitHub Runner 构建时，在项目根目录执行：
 
 ```bash
-# 1) 装好 docker + docker compose 后，拿到 docker-compose.yml 和 .env.example
-cp .env.example .env
-vi .env            # 至少改 VNC_PASSWORD；要对外访问再把 BIND_HOST 改 0.0.0.0
-docker compose pull
-docker compose up -d
-docker compose logs -f     # 看启动日志
-```
-
-### 首次登录
-
-1. 浏览器开 `http://<服务器>:6080/vnc.html`（默认只绑 127.0.0.1，见下"安全"）→ 输入 `VNC_PASSWORD` → 用**小号**扫码登录容器里的微信。
-2. 开 `http://<服务器>:5100` 后台 → 点「刷新密钥」（容器内自动 `/proc/pid/mem` 取密钥并解密）。
-3. 之后就能看会话/消息、发送、配 AI/机器人了。数据存在 `wxdata`/`appdata` 两个卷里，重启不丢。
-
-### 端口与安全（重要）
-
-- 默认 `BIND_HOST=127.0.0.1`：`5100`(后台) 和 `6080`(noVNC) **只在服务器本机**，请用 **SSH 隧道**访问：
-  `ssh -L 5100:127.0.0.1:5100 -L 6080:127.0.0.1:6080 user@服务器`，然后本地开 `http://localhost:5100`。
-- 若要局域网/公网访问：`.env` 里 `BIND_HOST=0.0.0.0`，**务必设 `VNC_PASSWORD`**，并在前面加反向代理 + HTTP 认证 + HTTPS。后台 `5100` 本身无鉴权，别裸奔公网。
-- 容器需要 `seccomp=unconfined`(微信 CEF) 和 `SYS_PTRACE`(读内存取密钥)，compose 里已配好。
-
-### 自己构建 / 多架构
-
-```bash
-# 在项目根目录(Dockerfile 会按目标架构自动下载对应微信 deb)
-# 单架构(在对应架构的机器上直接构建最快)：
-docker build -f docker/Dockerfile -t <your-registry>/wxbot-wechat:latest .
-
-# 多架构一次构建并推送(需 buildx)：
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f docker/Dockerfile -t <your-registry>/wxbot-wechat:latest --push .
+  -f docker/Dockerfile \
+  -t <your-registry>/wxbot-wechat:ubuntu-24.04 \
+  -t <your-registry>/wxbot-wechat:latest \
+  --push .
 ```
 
-> 海外服务器构建慢的话，可 `--build-arg APT_MIRROR=deb.debian.org` 换回官方 apt 源。
+Runner 需要启用 QEMU 和 Docker Buildx，并拥有 registry 登录权限。首次部署时把完整镜像地址
+作为 `deploy.sh` 参数传入即可，脚本会保存到 `.env`；之后升级仍然只运行 `./deploy.sh`。
 
-### 宿主/开发模式（macOS）
-本仓库同时兼容"后端在宿主 + 微信在容器"的老模式（`run.sh` + `python3 server.py`），
-靠环境变量 `WXBOT_LOCAL` 区分：**不设=宿主模式(docker exec)**，**=1=容器内模式(本地执行)**。
-服务器一体化镜像里已设 `WXBOT_LOCAL=1`。
-
-## macOS 本机方案（历史/备选）
+## macOS 本机方案（历史代码）
 
 `core/keys.py`（内存扫描）+ `core/sender.py`（Accessibility）+ `core/cc_catch.py`（lldb 断点 CommonCrypto 取密钥）
 是早期直接操作 Mac 微信 4.1.13 的方案。因 macOS 4.1.x 密钥混淆，取密钥需 lldb 抓 `CCCryptorCreate`；
-发送用屏幕自动化不够稳。**已被 Docker 方案取代**，代码保留备查。
+发送用屏幕自动化不够稳。正式部署只使用 Ubuntu 容器，相关代码保留备查。
 
 
 ## 本轮修复后的路由、媒体与读取授权（代码待部署）

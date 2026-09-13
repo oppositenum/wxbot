@@ -100,6 +100,49 @@ class Jobs(unittest.TestCase):
             j.schedule(now+2);j.schedule(now+3)
         self.assertEqual(len(j.listing()),1)
 
+    def _seed_comment_job(self, state, extra=None):
+        """Ingest a friend post, schedule its comment job, then drive it to `state`."""
+        self.ready();self.seed()
+        now=1789207400
+        with patch('time.time',return_value=now):m.save_settings(dict(auto_comment=True,min_interval_minutes=0),0)
+        with patch('core.contacts.list_contacts',return_value=[dict(username='friend-A')]):
+            m.ingest([(-1,'friend-A',xml().replace('1789207200',str(now+1)))])
+            with patch('time.time',return_value=now+2):j.schedule(now+2)
+        jid=j.listing()[0]['id']
+        with patch('time.time',return_value=now+2):j.finish(jid,state,'transient')
+        if extra:
+            with j.db() as c:
+                p=json.loads(c.execute('SELECT payload FROM moments_jobs WHERE id=?',(jid,)).fetchone()[0])
+                p.update(extra);c.execute('UPDATE moments_jobs SET payload=? WHERE id=?',(m._json(p),jid))
+        return now,jid
+
+    def test_transient_comment_failure_retries_only_after_cooldown(self):
+        now,jid=self._seed_comment_job('failed')
+        with patch('core.contacts.list_contacts',return_value=[dict(username='friend-A')]):
+            # Before the cooldown elapses the buried comment is left alone.
+            with patch('time.time',return_value=now+3):j.schedule(now+3)
+            self.assertEqual(j.listing()[0]['state'],'failed')
+            # After the cooldown the same row is reset to queued for another attempt.
+            later=now+2+j.AUTO_RETRY_COOLDOWN+1
+            with patch('time.time',return_value=later):j.schedule(later)
+        row=j.listing()[0]
+        self.assertEqual(row['state'],'queued')
+        self.assertEqual(row['payload']['auto_attempts'],2)
+
+    def test_decided_skip_comment_is_never_auto_retried(self):
+        now,jid=self._seed_comment_job('skipped',dict(decided_skip=True))
+        with patch('core.contacts.list_contacts',return_value=[dict(username='friend-A')]):
+            later=now+2+j.AUTO_RETRY_COOLDOWN+10
+            with patch('time.time',return_value=later):j.schedule(later)
+        self.assertEqual(j.listing()[0]['state'],'skipped')
+
+    def test_comment_retries_are_capped(self):
+        now,jid=self._seed_comment_job('failed',dict(auto_attempts=j.MAX_AUTO_ATTEMPTS))
+        with patch('core.contacts.list_contacts',return_value=[dict(username='friend-A')]):
+            later=now+2+j.AUTO_RETRY_COOLDOWN+10
+            with patch('time.time',return_value=later):j.schedule(later)
+        self.assertEqual(j.listing()[0]['state'],'failed')
+
     def test_policy_rechecks_switch_revision_quiet_and_counts_uncertainty(self):
         now=datetime(2026,9,12,12,30,tzinfo=m.CHINA).timestamp()
         value=dict(m.DEFAULTS,auto_publish=True,revision=2,daily_publish_limit=1)

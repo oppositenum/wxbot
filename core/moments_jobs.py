@@ -11,6 +11,12 @@ from core import account_session as sessions, moments as m
 wake = threading.Event()
 _tick_lock = threading.Lock()
 
+# A comment whose job only failed transiently (throttle, quiet hours, expiry, a model
+# format hiccup or a UI miss) must not be buried forever by its dedup key. Re-enqueue it
+# on a cooldown, capped, unless the model deliberately decided it wasn't worth replying.
+AUTO_RETRY_COOLDOWN = 1800  # seconds between automatic retries of the same comment
+MAX_AUTO_ATTEMPTS = 5       # give up after this many automatic attempts
+
 
 @contextlib.contextmanager
 def db():
@@ -202,8 +208,20 @@ def schedule(now):
                 # Already answered by the account (including manual WeChat activity).
                 if any(q['author']==token['account'] and (not reply or q['reply_id']==reply) for q in item['comments']):continue
                 key='event:'+item['id']+':'+reply
-                if c.execute('SELECT 1 FROM moments_jobs WHERE dedup=?',(key,)).fetchone():continue
-                insert(c,key,'comment','automatic',dict(feed_id=item['id'],reply_id=reply,settings_revision=value['revision'],assets=[]),now)
+                prior=c.execute('SELECT id,state,payload,updated FROM moments_jobs WHERE dedup=?',(key,)).fetchone()
+                if prior is None:
+                    insert(c,key,'comment','automatic',dict(feed_id=item['id'],reply_id=reply,settings_revision=value['revision'],assets=[]),now)
+                    return
+                pp=json.loads(prior['payload'])
+                # In-flight, already sent, confirmed, or a deliberate "not worth replying"
+                # decision: leave it alone (never re-reply; line-203 also guards real sends).
+                if prior['state'] not in RETRYABLE or pp.get('decided_skip'):continue
+                attempts=pp.get('auto_attempts',1)
+                if attempts>=MAX_AUTO_ATTEMPTS or now-prior['updated']<AUTO_RETRY_COOLDOWN:continue
+                # Transient failure/throttle/expiry: reset the row to queued for another try.
+                pp.update(auto_attempts=attempts+1,settings_revision=value['revision']);pp.pop('retry_at',None)
+                c.execute("UPDATE moments_jobs SET state='queued',origin='automatic',created=?,updated=?,initiated=0,payload=?,message='等待重试' WHERE id=?",
+                          (now,now,m._json(pp),prior['id']))
                 return
 
 
@@ -288,7 +306,10 @@ def process_one():
             else:
                 item=m.detail(p['feed_id'])
                 result=moments_ai.generate(dict(feed_id=item['id'],feed_digest=item['digest'],reply_id=p['reply_id']),decide=True)
-                if result.get('skip'):finish(job['id'],'skipped',result['reason']);return
+                if result.get('skip'):
+                    p['decided_skip']=True  # a real decision not to reply — don't auto-retry this comment
+                    with db() as c:c.execute('UPDATE moments_jobs SET payload=? WHERE id=?',(m._json(p),job['id']))
+                    finish(job['id'],'skipped',result['reason']);return
                 p.update(text=result['text'],reply_id=result['reply_id'],snapshot=dict(digest=result['feed_digest']))
             with db() as c:c.execute('UPDATE moments_jobs SET payload=? WHERE id=?',(m._json(p),job['id']))
         if job['kind']=='publish' and job['origin']!='manual' and p.get('image_prompt') and not p.get('assets'):

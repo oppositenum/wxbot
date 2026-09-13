@@ -179,13 +179,18 @@ def generate_post(moods):
             '不要输出多余文字、解释或代码块标记。')
         material=dict(date=now.strftime('%Y-%m-%d'),mood=mood,tone=tone,recent_posts=previous)
         if news:material['news_headlines']=news
-        try:raw=llm.chat(system,[dict(role='user',content=json.dumps(material,ensure_ascii=False))],cfg=cfg)
-        except Exception as exc:raise moments.Unavailable('朋友圈 AI 文案生成失败，请检查模型设置') from exc
-        sessions.check(token)
-        text,image_prompt=_parse_post(raw)
-        if not 5<=len(text)<=500 or text in previous:
-            raise moments.Unavailable('文案为空、过长或与近期重复，本次未发布')
-        return dict(text=text,image_prompt=image_prompt if allow_image else '')
+        msgs=[dict(role='user',content=json.dumps(material,ensure_ascii=False))]
+        last=None
+        for _ in range(2):  # single_attempt only retries network errors; retry once on a truncated/empty/dup body
+            try:raw=llm.chat(system,msgs,cfg=cfg)
+            except Exception as exc:raise moments.Unavailable('朋友圈 AI 文案生成失败，请检查模型设置') from exc
+            sessions.check(token)
+            try:text,image_prompt=_parse_post(raw)
+            except moments.Unavailable as exc:last=exc;continue
+            if not 5<=len(text)<=500 or text in previous:
+                last=moments.Unavailable('文案为空、过长或与近期重复，本次未发布');continue
+            return dict(text=text,image_prompt=image_prompt if allow_image else '')
+        raise last
     finally:_generating.release()
 
 

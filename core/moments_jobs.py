@@ -176,10 +176,16 @@ def schedule(now):
     with db() as c:
         if c.execute("SELECT 1 FROM moments_jobs WHERE state IN ('queued','preparing','initiated')").fetchone():return
         if value['auto_publish']:
-            dt=datetime.fromtimestamp(now,m.CHINA);hh,mm=map(int,value['publish_time'].split(':'))
-            slot=dt.replace(hour=hh,minute=mm,second=0,microsecond=0).timestamp()
-            if value['publish_since']<=slot<=now<slot+1800:
-                insert(c,'daily:'+dt.strftime('%Y-%m-%d'),'publish','automatic',
+            # Publish on a rolling interval (default every 2–3h) rather than a fixed
+            # daily time; quiet hours are already excluded above. The gap is the
+            # configured interval plus up to an hour of jitter derived from the last
+            # attempt, so the cadence feels natural instead of clockwork. Pacing keys
+            # off the last automatic publish attempt (created), so a failed send still
+            # waits a full interval before retrying instead of hammering every tick.
+            last=c.execute("SELECT MAX(created) FROM moments_jobs WHERE kind='publish' AND origin='automatic'").fetchone()[0] or 0
+            gap=value['publish_interval_minutes']*60+int(last)%3600
+            if now-last>=gap:
+                insert(c,'interval:'+str(int(last)),'publish','automatic',
                        dict(settings_revision=value['revision'],moods=value['moods'],assets=[]),now)
         if not value['auto_comment']:return
         known=None

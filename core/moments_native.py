@@ -191,34 +191,51 @@ class Native:
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         proc.communicate(text.encode(), timeout=3)
 
+    # The comment context menu is a fixed vertical stack in this order.
+    MENU=['复制','搜一搜','回复','删除']
+
+    def _menu_open(self, x, y):
+        """Right-click a comment and OCR the popped-up context menu region."""
+        self.click(x, y, 3)
+        screen = self.shot()
+        box = (max(0,x-10), max(0,y-10), min(screen.width,x+190), min(screen.height,y+190))
+        return self.ocr(box)
+
+    def _menu_point(self, allrows, want):
+        """Locate a menu item's click point among the fixed 复制/搜一搜/回复/删除 stack.
+
+        OCR fuses the copy glyph into its label ("全复制"/"作复制") and, near the
+        screen bottom, bleed-through comment text garbles whichever item overlaps
+        it — so we match each label by substring on the short menu rows, then, if
+        the wanted item itself is unreadable, infer its position from the evenly
+        spaced neighbours (the order and row spacing are fixed).
+        """
+        idx={l:i for i,l in enumerate(self.MENU)}
+        found={}
+        for r in sorted(allrows,key=lambda r:r['y']):
+            nr=norm(r['text'])
+            if len(nr)>5:continue  # menu labels are short; skip bleed-through comment text
+            for l in self.MENU:
+                if l in nr and l not in found:found[l]=r
+        if not found:raise NativeError('复制菜单项无法唯一识别')
+        wi=idx[want]
+        if want in found:return dict(x=found[want]['x'],y=found[want]['y'])
+        anchors=sorted(((idx[l],r) for l,r in found.items()),key=lambda a:a[0])
+        if len(anchors)>=2:
+            two=sorted(anchors,key=lambda a:abs(a[0]-wi))[:2]
+            (i0,r0),(i1,r1)=sorted(two,key=lambda a:a[0])
+            spacing=(r1['y']-r0['y'])/(i1-i0)
+        else:
+            spacing=30.0
+        if not 18<=spacing<=60:raise NativeError('复制菜单项无法唯一识别')
+        base=min(anchors,key=lambda a:abs(a[0]-wi))
+        return dict(x=base[1]['x'],y=base[1]['y']+(wi-base[0])*spacing)
+
     def copy_at(self, x, y):
         original = self.clip(); sentinel = 'wx-moments-'+os.urandom(8).hex()
         try:
-            self.put_clip(sentinel); self.click(x, y, 3)
-            screen = self.shot()
-            box = (max(0,x-10), max(0,y-10), min(screen.width,x+190), min(screen.height,y+190))
-            # The right-click menu stacks 复制/搜一搜/回复/删除 on separate rows.
-            # OCR often fuses the copy glyph into the label ("全复制"/"作复制"), so
-            # match 复制 by substring and collapse rows sharing a line (same y is
-            # the same menu entry read twice), rather than requiring an exact hit.
-            allrows=self.ocr(box)
-            rows=[r for r in allrows if '复制' in norm(r['text'])]
-            rows=[r for i,r in enumerate(rows) if not any(abs(r['y']-q['y'])<12 for q in rows[:i])]
-            if len(rows)==1:
-                spot=rows[0]
-            else:
-                # Near the screen bottom the 复制 label overlaps bleed-through
-                # comment text and OCR garbles it, though the rest of the fixed
-                # menu (复制/搜一搜/回复/删除) still reads. 复制 is always the row
-                # directly above 搜一搜, so infer it from the evenly-spaced lower
-                # items rather than failing outright.
-                anchor=[r for r in allrows if '搜一搜' in norm(r['text'])]
-                if len(anchor)!=1:raise NativeError('复制菜单项无法唯一识别')
-                a=anchor[0]
-                below=sorted((r for r in allrows if '回复' in norm(r['text']) and r['y']>a['y']),key=lambda r:r['y'])
-                if not below or not 18<=below[0]['y']-a['y']<=60:
-                    raise NativeError('复制菜单项无法唯一识别')
-                spot=dict(x=a['x'], y=a['y']-(below[0]['y']-a['y']))
+            self.put_clip(sentinel)
+            spot=self._menu_point(self._menu_open(x, y),'复制')
             self.click(spot['x'], spot['y'])
             # WeChat writes the clipboard asynchronously after the click; poll
             # briefly so we read the copied text rather than the stale sentinel.
@@ -231,6 +248,16 @@ class Native:
             self.key('Escape'); return ''
         finally:
             self.put_clip(original)
+
+    def reply_at(self, x, y):
+        """Open the reply editor for the comment at (x,y) via its 回复 menu item.
+
+        A left-click on the comment is ambiguous — a short body puts the row centre
+        on the author's name, which opens their profile card instead of the editor.
+        The 回复 context-menu entry targets the exact comment unambiguously.
+        """
+        spot=self._menu_point(self._menu_open(x, y),'回复')
+        self.click(spot['x'], spot['y'])
 
     def open(self):
         self.proof = self.state()
@@ -370,12 +397,16 @@ class Native:
                 region_top=y+56  # previous post is already gone above the fold
                 below=list(avatars)  # smallest avatar is the next post
             bottom=min(below) if below else y+h-25
-            rows=self.ocr((x+78,region_top,x+w-20,bottom))
-            best=max(rows,key=_score,default=None)
-            # 0.8 clears real OCR noise (dropped/garbled glyphs score ~0.87-0.93)
-            # while a merely similar neighbouring comment stays below it; copy_at
-            # is the exact gate, so keep scrolling rather than grabbing a weak row.
-            if best is not None and _score(best)>=0.8:return best
+            # When the post header itself sits near the fold its comments are still
+            # entirely below the viewport, so the fenced region is empty (top>=bottom):
+            # skip OCR and scroll rather than crop an inverted box.
+            if bottom>region_top+10:
+                rows=self.ocr((x+78,region_top,x+w-20,bottom))
+                best=max(rows,key=_score,default=None)
+                # 0.8 clears real OCR noise (dropped/garbled glyphs score ~0.87-0.93)
+                # while a merely similar neighbouring comment stays below it; copy_at
+                # is the exact gate, so keep scrolling rather than grabbing a weak row.
+                if best is not None and _score(best)>=0.8:return best
             if own_top is None and below and min(below)<=y+120:break  # next post reached the top
             sig=tuple(round(t) for t in avatars)
             stall=stall+1 if sig==last_sig else 0;last_sig=sig
@@ -416,7 +447,7 @@ class Native:
             nc=norm(copied);nt=norm(target['text']);nn=norm(target['name'])
             if nc not in {nt,norm(target['name']+target['text'])} and not (nt and nt in nc and nn and nn in nc):
                 raise NativeError('目标评论正文核对失败')
-            self.click(hit['x'],hit['y'])
+            self.reply_at(hit['x'],hit['y'])
         else:
             rows=self.ocr((x+75,top+42,x+w-15,min(y+h,top+260)))
             times=[r for r in rows if any(t in r['text'] for t in ['分钟前','小时前','昨天','天前','刚刚','月','年'])]

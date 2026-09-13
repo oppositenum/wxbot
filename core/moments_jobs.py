@@ -161,7 +161,7 @@ def _target_intact(p, item):
 def policy(job, value, now):
     if job['origin']=='manual' or job['payload'].get('forced'):return ''
     kind=job['kind'];p=job['payload']
-    flag='chat_reflection' if job['origin']=='reflection' else ('auto_comment' if kind=='comment' else 'auto_publish')
+    flag='chat_reflection' if job['origin']=='reflection' else ('auto_comment' if kind=='comment' else ('auto_like' if kind=='like' else 'auto_publish'))
     if not value[flag]:return '自动开关已关闭'
     if value['revision']!=p['settings_revision']:return '设置已变化，旧任务已取消'
     if m.quiet_now(value,now):return '当前为免打扰时段'
@@ -170,7 +170,7 @@ def policy(job, value, now):
     with db() as c:
         count=c.execute("SELECT count(*) FROM moments_jobs WHERE kind=? AND initiated>=? AND state IN ('initiated','confirmed','uncertain')",(kind,start)).fetchone()[0]
         last=c.execute('SELECT MAX(initiated) FROM moments_jobs').fetchone()[0] or 0
-    limit=value['daily_comment_limit' if kind=='comment' else 'daily_publish_limit']
+    limit=value['daily_comment_limit' if kind=='comment' else ('daily_like_limit' if kind=='like' else 'daily_publish_limit')]
     if limit>0 and count>=limit:return '今日数量已达上限'
     if value['min_interval_minutes']>0 and now-last<value['min_interval_minutes']*60:return '距离上次互动过近'
     return ''
@@ -193,40 +193,68 @@ def schedule(now):
             if now-last>=gap:
                 insert(c,'interval:'+str(int(last)),'publish','automatic',
                        dict(settings_revision=value['revision'],moods=value['moods'],assets=[]),now)
-        if not value['auto_comment']:return
+        # 自动评论与自动点赞是两个独立开关,分别扫描;每 tick 只入队一条(单飞闸在上)。
         known=None
-        for r in c.execute('SELECT payload FROM feed ORDER BY created DESC LIMIT 100').fetchall():
-            item=json.loads(r[0]);own=item['author']==token['account']
-            targets=[(q['id'],q['author'],q['created']) for q in item['comments'] if q['id'] and q['author']!=token['account']] if own else [('',item['author'],item['created'])]
-            for reply,who,created in targets:
-                if not value['comment_since']<created<=now or now-created>86400:continue
+        def known_contacts():
+            nonlocal known
+            if known is None:
+                from core import contacts
+                known={v['username'] for v in contacts.list_contacts() if not v['username'].endswith('@chatroom')}
+            return known
+        if value['auto_comment']:
+            for r in c.execute('SELECT payload FROM feed ORDER BY created DESC LIMIT 100').fetchall():
+                item=json.loads(r[0]);own=item['author']==token['account']
+                targets=[(q['id'],q['author'],q['created']) for q in item['comments'] if q['id'] and q['author']!=token['account']] if own else [('',item['author'],item['created'])]
+                for reply,who,created in targets:
+                    if not value['comment_since']<created<=now or now-created>86400:continue
+                    if value['friend_allowlist'] and who not in value['friend_allowlist']:continue
+                    if who not in known_contacts():continue
+                    # Already answered by the account (including manual WeChat activity).
+                    if any(q['author']==token['account'] and (not reply or q['reply_id']==reply) for q in item['comments']):continue
+                    key='event:'+item['id']+':'+reply
+                    prior=c.execute('SELECT id,state,payload,updated FROM moments_jobs WHERE dedup=?',(key,)).fetchone()
+                    if prior is None:
+                        insert(c,key,'comment','automatic',dict(feed_id=item['id'],reply_id=reply,settings_revision=value['revision'],assets=[]),now)
+                        return
+                    pp=json.loads(prior['payload'])
+                    # In-flight, already sent, confirmed, or a deliberate "not worth replying"
+                    # decision: leave it alone (never re-reply; line-203 also guards real sends).
+                    if prior['state'] not in RETRYABLE or pp.get('decided_skip'):continue
+                    attempts=pp.get('auto_attempts',1)
+                    if attempts>=MAX_AUTO_ATTEMPTS or now-prior['updated']<AUTO_RETRY_COOLDOWN:continue
+                    # Transient failure/throttle/expiry: reset the row to queued for another try.
+                    # Drop the stale generated text + feed-digest snapshot so process_one
+                    # regenerates against the CURRENT thread; otherwise a since-grown digest
+                    # trips the '动态已变化' guard on every retry until attempts run out.
+                    pp.update(auto_attempts=attempts+1,settings_revision=value['revision'])
+                    for k in ('retry_at','text','snapshot','image_prompt','emotion'):pp.pop(k,None)
+                    # Re-pin to the current (live) session so recover() doesn't cancel the
+                    # requeued job — schedule() runs under sessions.bind(), so this is the
+                    # active account/generation.
+                    c.execute("UPDATE moments_jobs SET state='queued',origin='automatic',created=?,updated=?,initiated=0,session=?,payload=?,message='等待重试' WHERE id=?",
+                              (now,now,m._json(sessions.check()),m._json(pp),prior['id']))
+                    return
+        if value['auto_like']:
+            # 范围内全部点赞:对好友(白名单)新动态本身点赞,不接大模型判断。只点别人的,不点自己的。
+            for r in c.execute('SELECT payload FROM feed ORDER BY created DESC LIMIT 100').fetchall():
+                item=json.loads(r[0])
+                if item['author']==token['account']:continue  # 只给别人的动态点赞
+                who=item['author'];created=item['created']
+                if not value['like_since']<created<=now or now-created>86400:continue
                 if value['friend_allowlist'] and who not in value['friend_allowlist']:continue
-                if known is None:
-                    from core import contacts
-                    known={v['username'] for v in contacts.list_contacts() if not v['username'].endswith('@chatroom')}
-                if who not in known:continue
-                # Already answered by the account (including manual WeChat activity).
-                if any(q['author']==token['account'] and (not reply or q['reply_id']==reply) for q in item['comments']):continue
-                key='event:'+item['id']+':'+reply
+                if who not in known_contacts():continue
+                # 本账号(含手动操作)已点过赞:不重复点(微信里再点一次=取消赞)。
+                if any(q['author']==token['account'] for q in item['likes']):continue
+                key='like:'+item['id']
                 prior=c.execute('SELECT id,state,payload,updated FROM moments_jobs WHERE dedup=?',(key,)).fetchone()
                 if prior is None:
-                    insert(c,key,'comment','automatic',dict(feed_id=item['id'],reply_id=reply,settings_revision=value['revision'],assets=[]),now)
+                    insert(c,key,'like','automatic',dict(feed_id=item['id'],settings_revision=value['revision'],assets=[]),now)
                     return
                 pp=json.loads(prior['payload'])
-                # In-flight, already sent, confirmed, or a deliberate "not worth replying"
-                # decision: leave it alone (never re-reply; line-203 also guards real sends).
-                if prior['state'] not in RETRYABLE or pp.get('decided_skip'):continue
+                if prior['state'] not in RETRYABLE:continue
                 attempts=pp.get('auto_attempts',1)
                 if attempts>=MAX_AUTO_ATTEMPTS or now-prior['updated']<AUTO_RETRY_COOLDOWN:continue
-                # Transient failure/throttle/expiry: reset the row to queued for another try.
-                # Drop the stale generated text + feed-digest snapshot so process_one
-                # regenerates against the CURRENT thread; otherwise a since-grown digest
-                # trips the '动态已变化' guard on every retry until attempts run out.
-                pp.update(auto_attempts=attempts+1,settings_revision=value['revision'])
-                for k in ('retry_at','text','snapshot','image_prompt','emotion'):pp.pop(k,None)
-                # Re-pin to the current (live) session so recover() doesn't cancel the
-                # requeued job — schedule() runs under sessions.bind(), so this is the
-                # active account/generation.
+                pp.update(auto_attempts=attempts+1,settings_revision=value['revision']);pp.pop('retry_at',None)
                 c.execute("UPDATE moments_jobs SET state='queued',origin='automatic',created=?,updated=?,initiated=0,session=?,payload=?,message='等待重试' WHERE id=?",
                           (now,now,m._json(sessions.check()),m._json(pp),prior['id']))
                 return
@@ -237,6 +265,10 @@ def receipt(job, before, since):
     if job['kind']=='publish':
         matches=[i for i in m.catalog(100,author=token['account'])['items'] if i['id'] not in before and i['created']>=since-5 and i['text']==p['text'] and len(i['media'])==len(p.get('assets',[]))]
         return matches[0]['id'] if len(matches)==1 else ''
+    if job['kind']=='like':
+        # 回执极可靠:本账号在 before 之后新出现在点赞列表里即确认。
+        item=m.detail(p['feed_id'])
+        return p['feed_id'] if any(q['author']==token['account'] for q in item['likes']) and token['account'] not in before else ''
     item=m.detail(p['feed_id'])
     matches=[q for q in item['comments'] if q['id'] not in before and q['id'] and q['author']==token['account'] and q['text']==p['text'] and q['created']>=since-5 and (q['reply_id']==p.get('reply_id','') or (not p.get('reply_id') and not q['reply_to']))]
     return matches[0]['id'] if len(matches)==1 else ''
@@ -266,7 +298,9 @@ def make_publish_image(prompt):
 # Chat traffic always preempts Moments. An automatic job that keeps losing the
 # WeChat window would otherwise re-locate (and visibly re-copy) every tick forever,
 # so each yield is counted and spaced out, and we give up after MAX_CHAT_YIELD.
-MAX_CHAT_YIELD = 6
+# 聊天忙时朋友圈拿不到窗口,等太久目标动态早被刷走再定位也是白费——快速放弃(3×90s≈4.5分钟),
+# 且这是尽力而为的后台自动互动,放弃按"已跳过"而非"失败"处理,避免 UI 里刷屏红色失败。
+MAX_CHAT_YIELD = 3
 YIELD_BACKOFF = 90
 
 
@@ -274,8 +308,8 @@ def yield_to_chat(job, message):
     p=job['payload'];p['attempts']=p.get('attempts',0)+1
     with db() as c:
         if p['attempts']>=MAX_CHAT_YIELD:
-            c.execute("UPDATE moments_jobs SET state='failed',updated=?,payload=?,message=? WHERE id=?",
-                      (time.time(),m._json(p),'多次因聊天占用未能完成，已停止重试；未进入提交阶段',job['id']))
+            c.execute("UPDATE moments_jobs SET state='skipped',updated=?,payload=?,message=? WHERE id=?",
+                      (time.time(),m._json(p),'聊天一直在用微信,这条自动互动已跳过(目标可能已刷新)',job['id']))
         else:
             p['retry_at']=time.time()+YIELD_BACKOFF
             c.execute("UPDATE moments_jobs SET state='queued',updated=?,payload=?,message=? WHERE id=?",
@@ -298,7 +332,7 @@ def process_one():
         why=policy(job,m.settings(),time.time())
         if why:finish(job['id'],'skipped',why);return
         p=job['payload']
-        if job['origin']!='manual' and not p.get('text'):
+        if job['origin']!='manual' and job['kind']!='like' and not p.get('text'):
             if moments_ai._generating.locked():
                 with db() as c:c.execute("UPDATE moments_jobs SET state='queued',message='等待当前 AI 文案生成完成' WHERE id=?",(job['id'],))
                 return
@@ -334,6 +368,9 @@ def process_one():
                 if item['digest']!=p['snapshot']['digest'] and not _target_intact(p,item):
                     raise m.Conflict('动态已变化，未发送；请重新核对')
                 before={q['id'] for q in item['comments']};n.prepare_comment(item,p['reply_id'],p['text'])
+            elif job['kind']=='like':
+                item=m.detail(p['feed_id'])
+                before={q['author'] for q in item['likes']};n.prepare_like(item)
             else:
                 before={i['id'] for i in m.catalog(100,author=sessions.check()['account'])['items']}
                 n.prepare_publish(p['text'],[m.asset(a) for a in p.get('assets',[])])
@@ -364,7 +401,13 @@ def process_one():
             yield_to_chat(job,'聊天操作占用微信，稍后重试')
             return
         message=raw if isinstance(exc,(m.Conflict,m.Unavailable,ValueError)) else '客户端或模型操作异常'
-        finish(job['id'],'uncertain' if initiated else 'failed',message+('；可能已发送，不会自动重发' if initiated else '；未进入提交阶段'))
+        if initiated:
+            finish(job['id'],'uncertain',message+'；可能已发送，不会自动重发')
+        else:
+            # 尽力而为的自动互动定位失败(找不到目标/评论未完整/编辑框未识别等)按"已跳过"降噪;
+            # 手动操作是用户明确发起的,仍按"失败"如实呈现,便于用户知情重试。
+            soft = job['origin'] != 'manual'
+            finish(job['id'],'skipped' if soft else 'failed',message+'；未进入提交阶段')
 
 
 def tick():
@@ -376,7 +419,7 @@ def tick():
             from core.moments_reflection import prune
             prune();recover();process_one()
             value=m.settings();now=time.time()
-            if value['sync_enabled'] or value['auto_comment'] or value['auto_publish']:
+            if value['sync_enabled'] or value['auto_comment'] or value['auto_publish'] or value['auto_like']:
                 with db() as c:
                     last=m._get(c,'native_refresh_attempt',0)
                     due=now-last>=value['sync_interval_minutes']*60

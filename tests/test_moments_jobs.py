@@ -247,4 +247,89 @@ class Jobs(unittest.TestCase):
         self.assertFalse(b.acquire(False));a.release();self.assertFalse(b.acquire(False))
         a.release();self.assertTrue(b.acquire(False));b.release()
 
+class Likes(unittest.TestCase):
+    """自动点赞:范围内全部点赞(不接大模型),与自动评论独立开关。"""
+    setUp=fixtures.Moments.setUp
+    seed=fixtures.Moments.seed
+
+    def ready(self):
+        p=patch('core.moments.capabilities',return_value=dict(send=True));p.start();self.addCleanup(p.stop)
+
+    def _enable(self, now, **extra):
+        with patch('time.time',return_value=now-1):m.save_settings(dict(auto_like=True,**extra),0)
+
+    def test_like_scan_enqueues_for_unliked_friend_post(self):
+        self.ready();now=1789207400;self._enable(now)
+        with patch('core.contacts.list_contacts',return_value=[dict(username='friend-A')]):
+            m.ingest([(-1,'friend-A',xml().replace('1789207200',str(now+1)))])
+            j.schedule(now+2)
+        rows=j.listing();self.assertEqual(len(rows),1)
+        job=rows[0]
+        self.assertEqual((job['kind'],job['origin'],job['dedup']),('like','automatic','like:'+FID))
+        self.assertEqual(job['payload']['feed_id'],FID)
+        # 再扫一次不会重复入队(dedup + 单飞闸)。
+        j.schedule(now+3);self.assertEqual(len(j.listing()),1)
+
+    def test_like_scan_skips_when_already_liked(self):
+        self.ready();now=1789207400;self._enable(now)
+        already=xml().replace('1789207200',str(now+1)).replace('friend-C',self.account)
+        with patch('core.contacts.list_contacts',return_value=[dict(username='friend-A')]):
+            m.ingest([(-1,'friend-A',already)])
+            j.schedule(now+2)
+        self.assertEqual(j.listing(),[])
+
+    def test_like_scan_never_likes_own_post(self):
+        self.ready();now=1789207400;self._enable(now)
+        own=xml().replace('1789207200',str(now+1)).replace('friend-A',self.account)
+        with patch('core.contacts.list_contacts',return_value=[dict(username=self.account)]):
+            m.ingest([(-1,self.account,own)])
+            j.schedule(now+2)
+        self.assertEqual(j.listing(),[])
+
+    def test_auto_comment_off_still_likes(self):
+        # 独立开关:关掉自动评论,自动点赞仍应入队(验证 schedule 条件块改造)。
+        self.ready();now=1789207400
+        with patch('time.time',return_value=now-1):m.save_settings(dict(auto_like=True,auto_comment=False),0)
+        with patch('core.contacts.list_contacts',return_value=[dict(username='friend-A')]):
+            m.ingest([(-1,'friend-A',xml().replace('1789207200',str(now+1)))])
+            j.schedule(now+2)
+        rows=j.listing();self.assertEqual(len(rows),1);self.assertEqual(rows[0]['kind'],'like')
+
+    def test_like_scan_respects_activation_watermark(self):
+        # 刚开点赞不补赞历史旧动态(created<=like_since 的不点)。
+        self.ready();now=1789207400;self._enable(now)  # like_since=now-1
+        with patch('core.contacts.list_contacts',return_value=[dict(username='friend-A')]):
+            m.ingest([(-1,'friend-A',xml())])  # 原始 createTime 1789207200 < 水位
+            j.schedule(now+2)
+        self.assertEqual(j.listing(),[])
+
+    def test_like_policy_gates_flag_and_daily_limit(self):
+        now=datetime(2026,9,12,12,30,tzinfo=m.CHINA).timestamp()
+        value=dict(m.DEFAULTS,auto_like=True,revision=2,daily_like_limit=1)
+        job=dict(kind='like',origin='automatic',created=now,payload=dict(settings_revision=2))
+        self.assertEqual(j.policy(job,value,now),'')
+        self.assertEqual(j.policy(job,dict(value,auto_like=False),now),'自动开关已关闭')
+        with j.db() as c:
+            r=j.insert(c,'likecap','like','automatic',{},now,state='initiated')
+            c.execute('UPDATE moments_jobs SET initiated=? WHERE id=?',(now-100,r['id']))
+        self.assertIn('上限',j.policy(job,value,now))
+
+    def test_like_receipt_confirms_when_self_newly_appears(self):
+        item=self.seed();since=1789207300
+        job=dict(kind='like',payload=dict(feed_id=FID))
+        with patch('core.moments.detail',return_value=dict(item,likes=[dict(author='friend-C')])):
+            self.assertEqual(j.receipt(job,{'friend-C'},since),'')
+        with patch('core.moments.detail',return_value=dict(item,likes=[dict(author='friend-C'),dict(author=self.account)])):
+            self.assertEqual(j.receipt(job,{'friend-C'},since),FID)
+        # 若点赞前自己已在列表里(before 含自己),不算这次新增。
+        with patch('core.moments.detail',return_value=dict(item,likes=[dict(author=self.account)])):
+            self.assertEqual(j.receipt(job,{self.account},since),'')
+
+    def test_save_settings_validates_like_and_sets_watermark(self):
+        self.ready()
+        with patch('time.time',return_value=1000.0):s=m.save_settings(dict(auto_like=True,daily_like_limit=5),0)
+        self.assertTrue(s['auto_like']);self.assertEqual(s['daily_like_limit'],5);self.assertEqual(s['like_since'],1000.0)
+        with self.assertRaises(ValueError):m.save_settings(dict(daily_like_limit=99999),s['revision'])
+        with self.assertRaises(ValueError):m.save_settings(dict(like_since=5),s['revision'])  # 水位不可由前端直接设置
+
 if __name__=='__main__':unittest.main()

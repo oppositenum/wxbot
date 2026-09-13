@@ -564,6 +564,36 @@ class Pipeline(unittest.TestCase):
         self.assertEqual(updated['payload']['assets'], [aid])
         self.assertEqual(updated['state'], 'confirmed')
 
+    def test_process_one_like_prepares_and_confirms_without_model(self):
+        # 点赞:不调大模型、不生成文案,只 prepare_like→submit;回执命中即确认。
+        from core import docker_wx
+        p = patch('core.moments.capabilities', return_value=dict(send=True)); p.start(); self.addCleanup(p.stop)
+        seen = {}
+        class Fake:
+            def prepare_like(self_, item): seen['feed_id'] = item['id']
+            def submit(self_): seen['submitted'] = True
+            def cleanup(self_): pass
+        with j.db() as c:
+            task = j.insert(c, 'like:F1', 'like', 'automatic',
+                            dict(feed_id='F1', settings_revision=0, assets=[]), time.time())
+        # detail 首次(dispatch 取 before)不含自己,提交后(receipt)自己出现 → 确认。
+        calls = {'n': 0}
+        def detail(fid):
+            calls['n'] += 1
+            return dict(id='F1', likes=[] if calls['n'] == 1 else [dict(author='account-A')])
+        with patch.object(docker_wx, 'UI_LOCK', threading.RLock()), \
+             patch.object(docker_wx, 'priority_pending', return_value=False), \
+             patch('core.moments_native.Native', Fake), \
+             patch.object(j, 'policy', return_value=''), \
+             patch('core.moments_ai.generate', side_effect=AssertionError('like must not call the model')), \
+             patch('core.moments.detail', side_effect=detail), \
+             patch('core.moments.sync', return_value=None):
+            j.process_one()
+        self.assertEqual(seen, dict(feed_id='F1', submitted=True))
+        updated = next(x for x in j.listing() if x['id'] == task['id'])
+        self.assertEqual(updated['state'], 'confirmed')
+        self.assertEqual(updated['receipt'], 'F1')  # receipt() 用 feed_id 作回执串
+
 
 class ChatYield(unittest.TestCase):
     setUp = fixtures.Moments.setUp
@@ -589,8 +619,9 @@ class ChatYield(unittest.TestCase):
             job['payload'] = payload  # carry attempts forward like process_one does
         j.yield_to_chat(job, '聊天占用')
         state, payload, msg = self._state(job['id'])
-        self.assertEqual(state, 'failed')
-        self.assertIn('停止重试', msg)
+        # 聊天长期占用→快速放弃,按"已跳过"降噪(非"失败"),仍可在 UI 手动重试。
+        self.assertEqual(state, 'skipped')
+        self.assertIn('跳过', msg)
 
     def test_process_one_skips_until_backoff_elapses(self):
         job = self._job()

@@ -201,10 +201,25 @@ class Native:
             # OCR often fuses the copy glyph into the label ("全复制"/"作复制"), so
             # match 复制 by substring and collapse rows sharing a line (same y is
             # the same menu entry read twice), rather than requiring an exact hit.
-            rows=[r for r in self.ocr(box) if '复制' in norm(r['text'])]
+            allrows=self.ocr(box)
+            rows=[r for r in allrows if '复制' in norm(r['text'])]
             rows=[r for i,r in enumerate(rows) if not any(abs(r['y']-q['y'])<12 for q in rows[:i])]
-            if len(rows)!=1:raise NativeError('复制菜单项无法唯一识别')
-            self.click(rows[0]['x'], rows[0]['y'])
+            if len(rows)==1:
+                spot=rows[0]
+            else:
+                # Near the screen bottom the 复制 label overlaps bleed-through
+                # comment text and OCR garbles it, though the rest of the fixed
+                # menu (复制/搜一搜/回复/删除) still reads. 复制 is always the row
+                # directly above 搜一搜, so infer it from the evenly-spaced lower
+                # items rather than failing outright.
+                anchor=[r for r in allrows if '搜一搜' in norm(r['text'])]
+                if len(anchor)!=1:raise NativeError('复制菜单项无法唯一识别')
+                a=anchor[0]
+                below=sorted((r for r in allrows if '回复' in norm(r['text']) and r['y']>a['y']),key=lambda r:r['y'])
+                if not below or not 18<=below[0]['y']-a['y']<=60:
+                    raise NativeError('复制菜单项无法唯一识别')
+                spot=dict(x=a['x'], y=a['y']-(below[0]['y']-a['y']))
+            self.click(spot['x'], spot['y'])
             # WeChat writes the clipboard asynchronously after the click; poll
             # briefly so we read the copied text rather than the stale sentinel.
             result = self.clip()

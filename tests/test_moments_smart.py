@@ -353,6 +353,59 @@ class ScrollToComment(unittest.TestCase):
         self.assertEqual(clicked, [])
 
 
+class CopyMenu(unittest.TestCase):
+    """copy_at must still find 复制 when its own glyph is unreadable.
+
+    Near the screen bottom the 复制 label overlaps bleed-through comment text and
+    OCR garbles it, while the rest of the fixed menu (搜一搜/回复/删除) still reads.
+    复制 is always the row directly above 搜一搜, so it is inferred from spacing.
+    """
+    class _Screen:
+        width = 1360
+        height = 900
+
+    def _native(self, rows, copied):
+        from unittest.mock import MagicMock
+        from core import moments_native
+        n = moments_native.Native()
+        n.clip = MagicMock(side_effect=['orig', copied])
+        n.put_clip = MagicMock()
+        n.shot = MagicMock(return_value=self._Screen())
+        n.ocr = MagicMock(return_value=rows)
+        n.key = MagicMock()
+        n.clicks = []
+        n.click = MagicMock(side_effect=lambda x, y, *a: n.clicks.append((x, y, a)))
+        return n
+
+    def test_clean_copy_row_is_clicked_directly(self):
+        rows = [dict(text='复制', x=707, y=686),
+                dict(text='搜一搜', x=703, y=716),
+                dict(text='回复', x=707, y=746)]
+        n = self._native(rows, '张三：目标评论')
+        self.assertEqual(n.copy_at(679, 663), '张三：目标评论')
+        # The right-click plus the 复制 click, in order; 复制 clicked at its own row.
+        self.assertEqual(n.clicks[-1][:2], (707, 686))
+
+    def test_infers_copy_from_search_anchor_when_its_glyph_is_garbled(self):
+        # Real bottom-edge frame: no readable 复制 row; 搜一搜 read as '9搜一搜'.
+        rows = [dict(text='1太单调了吧', x=828, y=692),
+                dict(text='9搜一搜', x=703, y=716),
+                dict(text='等着，我尽', x=832, y=715),
+                dict(text='回复', x=707, y=746),
+                dict(text='删除', x=707, y=786)]
+        n = self._native(rows, '叮～人间小清醒上线：画个帅气的自己')
+        self.assertEqual(n.copy_at(679, 663), '叮～人间小清醒上线：画个帅气的自己')
+        # 复制 inferred one row (716-686=30 above) up from 搜一搜, at its x column.
+        self.assertEqual(n.clicks[-1][:2], (703, 686))
+
+    def test_no_menu_at_all_returns_empty_without_crashing(self):
+        rows = [dict(text='1太单调了吧', x=828, y=692)]
+        n = self._native(rows, 'irrelevant')
+        self.assertEqual(n.copy_at(679, 663), '')  # NativeError swallowed -> ''
+        # Only the right-click happened; no blind 复制 click.
+        self.assertEqual(len(n.clicks), 1)
+
+
 class PublishImage(unittest.TestCase):
     setUp = fixtures.Moments.setUp
 

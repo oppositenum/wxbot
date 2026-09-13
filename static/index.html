@@ -70,6 +70,7 @@
   <button id="aiBtn">蒸馏/AI</button>
   <button id="personalizationBtn" class="primary">画像与人设</button>
   <button id="watchBtn">监听设置</button>
+  <button id="adminBtn">管理员设置</button>
   <button id="followBtn">跟发设置</button>
   <button id="pushBtn">监听推送</button>
   <button id="scheduleBtn">定时任务</button>
@@ -110,6 +111,7 @@
 <div class="members" id="membersPanel"></div>
 <div class="members" id="aiPanel" style="width:340px"></div>
 <div class="members" id="watchPanel" style="width:340px"></div>
+<div class="members" id="adminPanel" style="width:360px"></div>
 <div class="members" id="followPanel" style="width:340px"></div>
 <div class="members" id="pushPanel" style="width:380px"></div>
 <div class="members" id="schedulePanel" style="width:380px"></div>
@@ -691,6 +693,43 @@ async function renderWatch(){
   p.classList.add("show");
 }
 $("#watchBtn").onclick=()=>{ const p=$("#watchPanel"); if(p.classList.contains("show")){p.classList.remove("show");return;} $("#aiPanel").classList.remove("show");$("#membersPanel").classList.remove("show");$("#followPanel").classList.remove("show"); renderWatch(); };
+
+async function renderAdmin(){
+  const p=$("#adminPanel");
+  const [ss,botr]=await Promise.all([
+    (await fetch("/api/sessions")).json(),
+    (await fetch("/api/bot")).json()
+  ]);
+  const admins=new Set((botr.rules&&botr.rules.admins)||[]);
+  const isOfficial=u=>u.startsWith("gh_")||u.endsWith("@openim")||u.includes("@kefu")||["brandsessionholder","weixin","filehelper","newsapp"].includes(u);
+  const privs=ss.filter(s=>!s.is_group && !isOfficial(s.username));
+  const rowHtml=s=>`<label class="row" style="cursor:pointer"><input type="checkbox" class="adchk" value="${s.username}" ${admins.has(s.username)?"checked":""} style="margin-right:8px"><div style="min-width:0"><div class="name">${escape_(s.name||s.username)}</div></div></label>`;
+  p.innerHTML=`<h3>管理员设置 <span style="float:right;cursor:pointer;color:#999" onclick="closePanel('#adminPanel')">✕</span></h3>
+    <div class="sub" style="margin-bottom:6px">勾选的人可在与机器人的<b>会话里</b>发 <code>/命令</code> 直接触发系统功能（私聊任意、群里需 @我）。请只授权你信任的账号。</div>
+    <div style="margin:6px 0;padding:8px;border:1px solid #ddd;font-size:12px;line-height:1.7">
+      <b>可用命令</b><br>
+      <code>/朋友圈 内容</code> 发朋友圈（内容留空=自动生成）<br>
+      <code>/配图朋友圈 内容</code> 发图文朋友圈（用内容生成配图）<br>
+      <code>/同步朋友圈</code> 立即同步<br>
+      <code>/朋友圈状态</code> 查看同步与自动化状态<br>
+      <code>/设置 项 开|关</code> 项：自动评论/自动发布/聊天反思/配图/网络观点/同步<br>
+      <code>/发 联系人 内容</code> 代发一条消息<br>
+      <code>/帮助</code> 查看全部命令
+    </div>
+    <input id="adfilter" placeholder="过滤…" style="width:100%;padding:5px;margin-bottom:6px">
+    <button id="adsave" class="primary">保存管理员</button>
+    <div style="margin-top:8px"><b>联系人 (${privs.length})</b></div>
+    <div id="adlist">${privs.map(rowHtml).join("")}</div>`;
+  $("#adfilter").oninput=()=>{ const f=$("#adfilter").value.trim();
+    document.querySelectorAll("#adminPanel label.row").forEach(l=>{ l.style.display=(!f||l.textContent.includes(f))?"":"none"; }); };
+  $("#adsave").onclick=async()=>{
+    const a=[...document.querySelectorAll(".adchk:checked")].map(c=>c.value);
+    const r=await(await fetch("/api/bot/admins",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admins:a})})).json();
+    toast("已保存管理员 "+r.admins.length+" 人");
+  };
+  p.classList.add("show");
+}
+$("#adminBtn").onclick=()=>{ const p=$("#adminPanel"); if(p.classList.contains("show")){p.classList.remove("show");return;} $("#aiPanel").classList.remove("show");$("#membersPanel").classList.remove("show");$("#watchPanel").classList.remove("show");$("#followPanel").classList.remove("show"); renderAdmin(); };
 
 async function renderFollow(){
   const p=$("#followPanel");

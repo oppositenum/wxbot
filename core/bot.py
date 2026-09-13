@@ -30,6 +30,7 @@ _GLOBAL_RULES = os.path.join(config.PROJECT_DIR, "bot_rules.json")
 
 
 from core import account_session as sessions, send_ledger, personalization, conversation_state, reply_policy
+from core import admin_commands
 
 def rules_file():
     return os.path.join(config.account_dir(), "bot_rules.json")
@@ -1172,6 +1173,8 @@ def run_once(rules, state, log=print):
     push_on = bool(push_cfg.get("enabled")) and bool(_push_targets(push_cfg))
     push_self = push_cfg.get("include_self", include_self)
     watch_set = set(_expand_watch(rules.get("watch", [])))
+    # 管理员私聊即使未加入监听也要能收命令（且不因此触发普通自动回复）。
+    admin_set = {a for a in (rules.get("admins") or []) if not a.endswith("@chatroom")}
     process_futures = []
     # push.sources 缺省=监听列表本身;含 '*' 展开为所有群
     push_src = set(_expand_watch(push_cfg.get("sources") or list(watch_set))) if push_on else set()
@@ -1179,7 +1182,7 @@ def run_once(rules, state, log=print):
     if push_src:
         tgt_names = {t["to"] for t in _push_targets(push_cfg) if t["type"] == "wechat"}
         push_src = {c for c in push_src if send_name_for(c) not in tgt_names}
-    for chat in (watch_set | push_src):
+    for chat in (watch_set | push_src | admin_set):
         msgs = messages.get_messages(chat, limit=40)
         if not msgs:
             continue
@@ -1223,6 +1226,14 @@ def run_once(rules, state, log=print):
             # 监听推送：来自监听会话的任何消息(不管类型)推给微信好友/webhook
             if push_on and chat in push_src and (push_self or not m["is_self"]):
                 _do_push(m, chat, push_cfg, log)
+            # 管理员命令：来自已配置管理员的 /命令(私聊任意、群里@我)直接执行系统功能，
+            # 执行后跳过本条的普通处理。放在游标推进之后，天然幂等；也在 watch 过滤之前，
+            # 让纯管理员会话即使未监听也能收命令。非管理员的 /命令 不拦截、不暴露。
+            if not m["is_self"] and m["type"] in (1, 49) and admin_commands.is_admin(m.get("sender"), rules):
+                if (m.get("content") or "").lstrip().startswith("/"):
+                    engage = (not is_group) or m.get("at_me") or m.get("quote_me")
+                    if engage and admin_commands.dispatch(chat, m, is_group, rules, log):
+                        continue
             if chat not in watch_set:
                 continue                      # 仅推送、不参与自动回复的会话
             if m["is_self"]:

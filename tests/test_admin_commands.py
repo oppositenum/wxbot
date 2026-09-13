@@ -72,14 +72,20 @@ class Handlers(Base):
         self.assertIn('含配图', out)
 
     def test_moment_image_command(self):
+        # 主题经大模型润色成正文；配图按润色后的画面描述生成，而非照抄输入
         with patch('core.moments.capabilities', return_value={'image_publish': True}), \
-             patch('core.llm.gen_image', return_value=b'JPEGBYTES'), \
+             patch('core.moments_ai.compose_from_topic',
+                   return_value={'text': '润色后的正文', 'image_prompt': 'a cozy cat by the window'}) as cp, \
+             patch('core.llm.gen_image', return_value=b'JPEGBYTES') as gi, \
              patch('core.llm.load_cfg', return_value={}), \
              patch('core.moments.upload', return_value={'id': 'aid'}) as up, \
              patch('core.moments.save_draft', return_value={'id': 'w', 'revision': 1}) as sd, \
              patch('core.moments_jobs.enqueue_draft', return_value={'state': 'queued'}):
             out = ac._cmd_moment_image('一只猫', self.ctx())
+        cp.assert_called_once_with('一只猫')
+        self.assertEqual(gi.call_args[0][0], 'a cozy cat by the window')   # 用画面描述生成，非原文
         up.assert_called_once()
+        self.assertEqual(sd.call_args[0][0]['text'], '润色后的正文')
         self.assertEqual(sd.call_args[0][0]['assets'], ['aid'])
         self.assertIn('图文', out)
 
@@ -91,6 +97,8 @@ class Handlers(Base):
 
     def test_moment_image_gen_failure_is_honest(self):
         with patch('core.moments.capabilities', return_value={'image_publish': True}), \
+             patch('core.moments_ai.compose_from_topic',
+                   return_value={'text': 'T', 'image_prompt': 'P'}), \
              patch('core.llm.load_cfg', return_value={}), \
              patch('core.llm.gen_image', side_effect=RuntimeError('403 无权限')):
             out = ac._cmd_moment_image('一只猫', self.ctx())

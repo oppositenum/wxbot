@@ -25,6 +25,11 @@ def norm(text):
     return re.sub(r'[^\w\u4e00-\u9fff]', '', text).lower()
 
 
+# Emoji / pictograph / symbol ranges that corrupt OCR of a tiny name strip.
+_EMOJI = re.compile('[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF'
+                    '\u2190-\u21ff\u2b00-\u2bff\u2300-\u23ff\ufe0f\u200d]')
+
+
 class NativeError(m.Unavailable):
     pass
 
@@ -348,17 +353,23 @@ class Native:
                     # match it fuzzily and, when OCR reads nothing at all, defer to the
                     # unique-body proof rather than hard-failing a correct target.
                     authors=self.ocr((x+75,top-15,x+w-40,top+13),psm=6)
-                    names={norm(item['name'])}
+                    raw_names={item['name']}
                     from core import contacts
                     for c in contacts.list_contacts():
                         if c['username']==item['author']:
-                            names.update(norm(c.get(k) or '') for k in ['name','nick_name','remark'])
-                    names.discard('')
+                            raw_names.update(c.get(k) or '' for k in ['name','nick_name','remark'])
+                    raw_names.discard('')
+                    names={norm(n) for n in raw_names};names.discard('')
                     read=[norm(r['text']) for r in authors];read=[t for t in read if t]
                     def _name_ok(t):
                         return any(t==nm or (min(len(t),len(nm))>=2 and (t in nm or nm in t))
                                    or difflib.SequenceMatcher(None,t,nm).ratio()>=0.6 for nm in names)
-                    if read and not any(_name_ok(t) for t in read):
+                    # Emoji/pictograph-heavy display names (e.g. "🐮🐮🌱besos") OCR into
+                    # noise on the tiny name strip, so a non-match there is not proof of a
+                    # wrong target. Only veto when at least one expected name is emoji-free
+                    # (reliably OCR-able); otherwise trust the unique-body proof above.
+                    reliable=any(nm and not _EMOJI.search(nm) for nm in raw_names)
+                    if reliable and read and not any(_name_ok(t) for t in read):
                         raise NativeError('动态作者名称未能核对，未发送')
                     self.check(True)
                     return dict(x=x,y=y,w=w,h=h,top=top,body=(x+96,top+38))

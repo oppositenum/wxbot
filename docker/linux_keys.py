@@ -3,7 +3,7 @@
   1) 文本形式 x'<64/96 hex>'
   2) 原始 32 字节 key —— 用第 1 页 SQLite 头做校验 oracle
 匹配到各库 salt，输出 keys.json。
-用法： python3 linux_keys.py /root/xwechat_files/<wxid>/db_storage [out.json]
+用法： python3 linux_keys.py /home/wechat/xwechat_files/<wxid>/db_storage [out.json]
 """
 import os, re, sys, json, struct
 from Crypto.Cipher import AES

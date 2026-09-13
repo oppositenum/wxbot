@@ -6,10 +6,8 @@ from flask import Blueprint, Flask, jsonify, request, send_from_directory
 
 
 PROFILES = {
-    "ubuntu": {"id": "ubuntu", "name": "Ubuntu 微信", "container": "wxbot-ubuntu-manual",
-               "port": 6082, "system": "Ubuntu 24.04 · XFCE", "home": "/home/wechat"},
-    "legacy": {"id": "legacy", "name": "原 Debian 微信", "container": "wxbot",
-               "port": 6080, "system": "Debian 12", "home": "/root"},
+    "ubuntu": {"id": "ubuntu", "name": "Ubuntu 微信", "container": "wxbot",
+               "port": 6080, "system": "Ubuntu 24.04 · XFCE", "home": "/home/wechat"},
 }
 STATIC = Path(__file__).resolve().parents[1] / "static"
 

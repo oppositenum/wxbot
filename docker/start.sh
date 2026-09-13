@@ -1,66 +1,61 @@
-#!/bin/bash
-# 一体化启动：虚拟X + 窗口管理器 + VNC(可选密码) + noVNC + 微信 + 后端(Flask)
-set -e
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
 
-SCREEN=${SCREEN:-1360x900x24}
-export DISPLAY=:0
+STATE_DIR="$HOME/.local/state/wxbot"
+RUNTIME_DIR="/tmp/runtime-$(id -u)"
+mkdir -p "$STATE_DIR" "$RUNTIME_DIR" "$HOME/Desktop" /app/accounts /app/work
+chmod 700 "$RUNTIME_DIR"
+export XDG_RUNTIME_DIR="$RUNTIME_DIR"
 
-echo "[start] Xvfb $SCREEN"
-Xvfb :0 -screen 0 "$SCREEN" -ac +extension GLX +render -noreset >/var/log/xvfb.log 2>&1 &
-sleep 2
+Xvfb "$DISPLAY" -screen 0 "$SCREEN" -ac +extension GLX +render -noreset \
+  >"$STATE_DIR/xvfb.log" 2>&1 &
+for _ in $(seq 1 40); do
+  if xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.25
+done
+xdpyinfo -display "$DISPLAY" >/dev/null
 
-# dbus（微信需要）
-mkdir -p /run/dbus
-dbus-daemon --system --fork 2>/dev/null || true
-export $(dbus-launch) 2>/dev/null || true
+eval "$(dbus-launch --sh-syntax)"
+xset s off
+xset -dpms || true
+xfce4-session >"$STATE_DIR/desktop.log" 2>&1 &
+pulseaudio --start --exit-idle-time=-1 || true
+fcitx5 -d >"$STATE_DIR/input.log" 2>&1 || true
 
-echo "[start] fluxbox"
-fluxbox >/var/log/fluxbox.log 2>&1 &
-sleep 1
-
-# VNC：设了 VNC_PASSWORD 就开密码，否则无密码(仅建议本机/内网)
-if [ -n "$VNC_PASSWORD" ]; then
-  x11vnc -storepasswd "$VNC_PASSWORD" /root/.vncpass >/dev/null 2>&1
-  echo "[start] x11vnc :0 -> 5900 (密码保护)"
-  x11vnc -display :0 -forever -shared -rfbauth /root/.vncpass -rfbport 5900 -bg -o /var/log/x11vnc.log
+VNC_ARGS=(-display "$DISPLAY" -forever -shared -noxdamage -rfbport 5900)
+if [[ -n "${VNC_PASSWORD:-}" ]]; then
+  x11vnc -storepasswd "$VNC_PASSWORD" "$STATE_DIR/vnc.pass" >/dev/null
+  VNC_ARGS+=(-rfbauth "$STATE_DIR/vnc.pass")
 else
-  echo "[start] x11vnc :0 -> 5900 (无密码! 建议设 VNC_PASSWORD 或只绑内网)"
-  x11vnc -display :0 -forever -shared -nopw -rfbport 5900 -bg -o /var/log/x11vnc.log
+  VNC_ARGS+=(-nopw)
+  echo "[wxbot] WARNING: VNC_PASSWORD is empty"
+fi
+x11vnc "${VNC_ARGS[@]}" >"$STATE_DIR/vnc.log" 2>&1 &
+websockify --web=/usr/share/novnc 6080 localhost:5900 \
+  >"$STATE_DIR/novnc.log" 2>&1 &
+
+sleep 2
+wechat >"$STATE_DIR/wechat.log" 2>&1 &
+
+if [[ "${WXBOT_MEDIA_CAPTURE:-1}" == "1" ]] \
+    && [[ -f /app/docker/frida_capture_supervisor.py ]]; then
+  (sleep 15; python3 /app/docker/frida_capture_supervisor.py \
+    >"$STATE_DIR/frida-capture.log" 2>&1) &
 fi
 
-echo "[start] noVNC -> 6080"
-websockify --web=/usr/share/novnc 6080 localhost:5900 >/var/log/novnc.log 2>&1 &
-sleep 1
+backend_supervisor() {
+  while true; do
+    echo "[$(date -Is)] starting backend" >>"$STATE_DIR/backend.log"
+    (cd /app && python3 /app/server.py) >>"$STATE_DIR/backend.log" 2>&1 || true
+    echo "[$(date -Is)] backend exited; restarting in 2s" >>"$STATE_DIR/backend.log"
+    sleep 2
+  done
+}
+backend_supervisor &
 
-# 定位并拉起微信
-WX=""
-for c in /opt/wechat/wechat /usr/bin/wechat /opt/tencent/wechat/wechat /usr/local/bin/wechat; do
-  [ -x "$c" ] && WX="$c" && break
-done
-[ -z "$WX" ] && WX=$(command -v wechat || true)
-echo "[start] wechat bin = ${WX:-NOT FOUND}"
-( "$WX" --no-sandbox >/var/log/wechat.log 2>&1 || "$WX" >/var/log/wechat.log 2>&1 ) &
-
-# 媒体文件观察：账号隔离、本地捕获，不操作微信界面。
-CAP=""
-for c in /root/wxbot-hooks/current/frida_capture_supervisor.py /app/docker/frida_capture_supervisor.py; do
-  [ -f "$c" ] && CAP="$c" && break
-done
-if [ -n "$CAP" ] && [ "${WXBOT_MEDIA_CAPTURE:-1}" = "1" ]; then
-  echo "[start] frida capture supervisor = $CAP"
-  ( sleep 15; python3 "$CAP" >/var/log/frida_capture.log 2>&1 ) &
-else
-  echo "[start] frida capture supervisor NOT FOUND (跳过)"
-fi
-
-# 后端(Flask)：与微信同容器，本地驱动 xdotool/解密
-echo "[start] backend -> :5100"
-mkdir -p /app/accounts
-cd /app
-export WXBOT_LOCAL=1 WXBOT_BIND=0.0.0.0
-( python3 server.py >/var/log/wxbot.log 2>&1 ) &
-
-echo "[start] ready. noVNC http://<host>:6080/vnc.html  后台 http://<host>:5100"
-# 保活 + 输出日志便于 docker logs 观察
-sleep 2
-tail -F /var/log/wxbot.log /var/log/wechat.log 2>/dev/null
+echo "[wxbot] Ubuntu desktop, WeChat and backend started"
+echo "[wxbot] noVNC :6080, management backend :5100"
+wait

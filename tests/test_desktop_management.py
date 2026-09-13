@@ -10,13 +10,12 @@ class DesktopManagement(unittest.TestCase):
     def setUp(self):
         self.client = create_app().test_client()
 
-    def test_default_is_ubuntu_and_profiles_are_separate(self):
+    def test_only_ubuntu_instance_is_available(self):
         data = self.client.get('/api/desktop/instances').json
         self.assertEqual(data['default_instance'], 'ubuntu')
-        self.assertEqual([p['port'] for p in data['instances']], [6082, 6080])
-        self.assertIn(':6082/', self.client.post('/api/login').json['novnc_url'])
-        self.assertIn(':6080/', self.client.post('/api/login?instance=legacy').json['novnc_url'])
-        self.assertIn(':6082/', self.client.post('/api/login').json['novnc_url'])
+        self.assertEqual([p['port'] for p in data['instances']], [6080])
+        self.assertIn(':6080/', self.client.post('/api/login').json['novnc_url'])
+        self.assertEqual(self.client.post('/api/login?instance=legacy').status_code, 400)
 
     def test_stale_tabs_cannot_read_old_accounts_or_control_automation(self):
         for method, path in [('post','/api/send'), ('post','/api/bot/start'),
@@ -43,7 +42,7 @@ class DesktopManagement(unittest.TestCase):
         self.assertTrue(state['wechat_running'])
         self.assertIsNone(state['logged_in'])
         self.assertEqual(state['login_state'], 'unknown')
-        self.assertTrue(all('wxbot-ubuntu-manual' in c.args[0] for c in run.call_args_list))
+        self.assertTrue(all('wxbot' in c.args[0] for c in run.call_args_list))
 
     @patch('core.desktop_management.subprocess.run', side_effect=subprocess.TimeoutExpired('docker',4))
     def test_timeout_is_reported_without_false_online_state(self, run):

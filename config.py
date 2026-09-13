@@ -34,12 +34,12 @@ ACCOUNTS_DIR = os.path.join(PROJECT_DIR, "accounts")
 DOCKER_DATA = os.path.join(PROJECT_DIR, "docker", "wxdata")
 
 
-# 容器内单容器部署时，微信数据在 /root/xwechat_files；宿主模式在 docker/wxdata
+# 容器内路径由镜像设置；宿主开发模式仍从 docker/wxdata 读取。
 _XWECHAT_ROOT = os.environ.get("WXBOT_XWECHAT_ROOT", "/root/xwechat_files")
 
 
 def _detect_docker_db_storage():
-    """在 docker/wxdata(宿主) 或 /root/xwechat_files(容器内) 里找已登录账号的 db_storage。"""
+    """在宿主挂载目录或容器内微信目录查找已登录账号的 db_storage。"""
     bases = [os.path.join(DOCKER_DATA, "xwechat_files"), _XWECHAT_ROOT]
     best, best_m = None, -1
     for base in bases:

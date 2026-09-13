@@ -1,53 +1,34 @@
+# Compatibility entrypoint for the existing wxbot-ubuntu-manual data volume.
+# New installations use ../../deploy.sh and ../../docker-compose.yml.
 services:
   ubuntu-wechat:
-    image: wxbot-ubuntu-manual:24.04
+    image: ${WXBOT_IMAGE:-wxbot-wechat:ubuntu-24.04}
     build:
       context: ../..
-      dockerfile: docker/ubuntu-manual/Dockerfile
-      args:
-        APT_PROXY: ${APT_PROXY:-DIRECT}
-        HTTP_PROXY: ""
-        HTTPS_PROXY: ""
-        http_proxy: ""
-        https_proxy: ""
-        ALL_PROXY: ""
-        all_proxy: ""
+      dockerfile: docker/Dockerfile
     container_name: wxbot-ubuntu-manual
-    platform: linux/arm64
     init: true
-    restart: "no"
+    restart: unless-stopped
     shm_size: 1gb
     security_opt:
       - seccomp=unconfined
     cap_add:
       - SYS_PTRACE
     environment:
-      TZ: Asia/Shanghai
-      http_proxy: ""
-      https_proxy: ""
-      HTTP_PROXY: ""
-      HTTPS_PROXY: ""
-      ALL_PROXY: ""
-      all_proxy: ""
-      SCREEN: 1360x900x24
-      XDG_CURRENT_DESKTOP: XFCE
-      XDG_SESSION_TYPE: x11
-      DESKTOP_SESSION: xfce
-      no_proxy: "localhost,127.0.0.1,::1"
-      NO_PROXY: "localhost,127.0.0.1,::1"
-      WXBOT_BOT_AUTOSTART: "1"
-      WXBOT_LOCAL_ADMIN: "1"
-      WXBOT_MEDIA_CAPTURE: "0"
-      WXBOT_NOVNC_URL: "http://localhost:6082/vnc.html?autoconnect=true&resize=scale&view_only=false"
-      WXBOT_ADMIN_READ_TOKEN: "123"
+      VNC_PASSWORD: ${VNC_PASSWORD:-}
+      SCREEN: ${SCREEN:-1360x900x24}
+      TZ: ${TZ:-Asia/Shanghai}
+      WXBOT_BOT_AUTOSTART: ${WXBOT_BOT_AUTOSTART:-1}
+      WXBOT_MEDIA_CAPTURE: ${WXBOT_MEDIA_CAPTURE:-1}
+      WXBOT_NOVNC_URL: http://localhost:6082/vnc.html?autoconnect=true&resize=scale&view_only=false
     ports:
-      - "127.0.0.1:5100:5100"
-      - "127.0.0.1:6082:6080"
-      - "127.0.0.1:5902:5900"
+      - 127.0.0.1:5100:5100
+      - 127.0.0.1:6082:6080
+      - 127.0.0.1:5902:5900
     volumes:
       - ubuntu-wechat-home:/home/wechat
       - ../../accounts:/app/accounts
-      - ../../output/ubuntu-manual-images:/home/wechat/Pictures:ro
+
 volumes:
   ubuntu-wechat-home:
     name: wxbot-ubuntu-manual-home

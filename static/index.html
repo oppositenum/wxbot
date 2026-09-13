@@ -74,6 +74,7 @@
   <button id="followBtn">跟发设置</button>
   <button id="pushBtn">监听推送</button>
   <button id="scheduleBtn">定时任务</button>
+  <button id="greetBtnPanel">定时问候</button>
   <button id="accountsBtn">多账号管理</button>
   <button onclick="location.href='/moments'">朋友圈</button>
   <button id="configExportBtn">导出配置</button>
@@ -115,6 +116,7 @@
 <div class="members" id="followPanel" style="width:340px"></div>
 <div class="members" id="pushPanel" style="width:380px"></div>
 <div class="members" id="schedulePanel" style="width:380px"></div>
+<div class="members" id="greetPanel" style="width:380px"></div>
 <div id="personalizationPane" hidden style="position:fixed;inset:0;z-index:900;background:var(--bg)">
   <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 20px;background:white;border-bottom:1px solid var(--line)"><strong>联系人画像与专属人设</strong><button id="closePersonalization">返回聊天</button></div>
   <iframe id="personalizationFrame" title="联系人画像与专属人设管理" style="width:100%;flex:1;min-height:0;border:0"></iframe>
@@ -883,6 +885,73 @@ async function renderSchedule(){
       if(r.ok){ toast("已更新"); renderSchedule(); }
       else{ msg.textContent="⚠️ "+(r.message||"保存失败"); }
     }catch(e){ msg.textContent="出错:"+e; }
+  });
+}
+
+$("#greetBtnPanel").onclick=()=>{ const p=$("#greetPanel"); if(p.classList.contains("show")){p.classList.remove("show");return;} document.querySelectorAll(".members").forEach(x=>x.classList.remove("show")); renderGreeting(); p.classList.add("show"); };
+const _CRON2INT={"*/30 * * * *":"30m","0 * * * *":"1h","0 */2 * * *":"2h","0 */3 * * *":"3h"};
+const _INT_LABEL={"30m":"每30分钟","1h":"每1小时","2h":"每2小时","3h":"每3小时"};
+async function renderGreeting(edit){
+  const p=$("#greetPanel");
+  let d={tasks:[]}; try{ d=await(await fetch("/api/greeting")).json(); }catch(e){}
+  let ss=[]; try{ ss=await(await fetch("/api/sessions")).json(); }catch(e){}
+  const isOfficial=u=>u.startsWith("gh_")||u.endsWith("@openim")||u.includes("@kefu")||["brandsessionholder","weixin","filehelper","newsapp"].includes(u);
+  const privs=ss.filter(s=>!s.is_group && !isOfficial(s.username));
+  const e=edit||{};
+  const qs=(e.quiet&&e.quiet.start)||"23:00", qe=(e.quiet&&e.quiet.end)||"08:00";
+  const curInt=_CRON2INT[e.cron||""]||"1h";
+  const opts=privs.map(s=>`<option value="${escape_(s.username)}" ${e.target_username===s.username?"selected":""}>${escape_(s.name||s.username)}</option>`).join("");
+  const rows=(d.tasks||[]).map(t=>`<div class="row" style="align-items:flex-start;flex-wrap:wrap">
+      <div style="flex:1;min-width:0">
+        <div class="name">${escape_(t.target_display||t.target||'')} 👤 ${t.enabled===false?'<span class="sub">(已停用)</span>':''}</div>
+        <div class="sub" style="white-space:normal">${escape_(_INT_LABEL[_CRON2INT[t.cron||'']]||t.schedule_desc||'')}${t.quiet?(' · 免打扰 '+escape_(t.quiet.start)+'–'+escape_(t.quiet.end)):''} · 下次 ${escape_(t.next||'?')}</div>
+      </div>
+      <button class="grEdit" data-id="${t.id}" title="编辑">改</button>
+      <button class="grRun" data-id="${t.id}" title="立即试发一次" style="margin-left:4px">▶</button>
+      <button class="grDel" data-id="${t.id}" style="margin-left:4px">删</button>
+    </div>`).join("") || '<div class="sub">还没有定时问候</div>';
+  p.innerHTML=`<h3>定时问候 <span style="float:right;cursor:pointer;color:#999" onclick="closePanel('#greetPanel')">✕</span></h3>
+    <div class="sub" style="margin-bottom:8px">到点会按当前时段、用该会话的聊天人设，自由发一句"就在身边"的陪伴问候（想你了/早餐做好了/陪你在床头…）。免打扰时段内不发；对方正在聊天时本次自动跳过。</div>
+    <div style="padding:8px;border:1px solid #ddd;border-radius:6px;margin-bottom:8px">
+      <input type="hidden" id="grId" value="${e.id||''}">
+      <label class="sub">问候对象</label>
+      <select id="grTarget" style="width:100%;padding:5px;margin:2px 0 6px">${opts||'<option value="">（无联系人）</option>'}</select>
+      <label class="sub">频率</label>
+      <select id="grInt" style="width:100%;padding:5px;margin:2px 0 6px">
+        ${Object.keys(_INT_LABEL).map(k=>`<option value="${k}" ${curInt===k?"selected":""}>${_INT_LABEL[k]}</option>`).join("")}
+      </select>
+      <label class="sub">免打扰（不发问候）</label>
+      <div style="display:flex;gap:6px;align-items:center;margin:2px 0 6px">
+        <input type="time" id="grQs" value="${qs}" style="flex:1;padding:5px">
+        <span class="sub">到</span>
+        <input type="time" id="grQe" value="${qe}" style="flex:1;padding:5px">
+      </div>
+      <label class="row" style="cursor:pointer;margin-bottom:6px"><input type="checkbox" id="grEn" ${e.enabled===false?"":"checked"} style="margin-right:8px">启用</label>
+      <button id="grSave" class="primary">${e.id?'保存修改':'新建问候'}</button>
+      ${e.id?'<button id="grNew" style="margin-left:4px">取消编辑</button>':''}
+      <span id="grMsg" class="sub" style="margin-left:6px"></span>
+    </div>
+    <h3>已设问候 <span class="sub" style="font-weight:normal">${(d.tasks||[]).length} 条</span></h3>
+    ${rows}`;
+  $("#grSave").onclick=async()=>{
+    const body={ id:$("#grId").value||undefined, target:$("#grTarget").value,
+      interval:$("#grInt").value, quiet_start:$("#grQs").value, quiet_end:$("#grQe").value,
+      enabled:$("#grEn").checked };
+    if(!body.target){ $("#grMsg").textContent="请选择对象"; return; }
+    $("#grMsg").textContent="保存中…";
+    try{
+      const r=await(await fetch("/api/greeting",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
+      if(r.ok){ toast("已保存"); renderGreeting(); } else { $("#grMsg").textContent="⚠️ "+(r.message||"保存失败"); }
+    }catch(err){ $("#grMsg").textContent="出错:"+err; }
+  };
+  if($("#grNew")) $("#grNew").onclick=()=>renderGreeting();
+  document.querySelectorAll(".grDel").forEach(b=>b.onclick=async()=>{
+    await fetch("/api/schedule/"+b.dataset.id+"/delete",{method:"POST"}); toast("已删除"); renderGreeting();
+  });
+  document.querySelectorAll(".grRun").forEach(b=>b.onclick=async()=>{
+    await fetch("/api/schedule/"+b.dataset.id+"/run",{method:"POST"}); toast("已试发(看聊天)"); });
+  document.querySelectorAll(".grEdit").forEach(b=>b.onclick=()=>{
+    const t=(d.tasks||[]).find(x=>String(x.id)===b.dataset.id); if(t) renderGreeting(t);
   });
 }
 

@@ -163,6 +163,8 @@ def _next_hint(t):
 
 # ---------------- 触发 ----------------
 def _compute_text(t):
+    if t.get("kind") == "greeting":
+        return _compute_greeting(t)
     prompt = t.get("prompt") or ""
     if not t.get("use_llm"):
         return prompt
@@ -179,6 +181,82 @@ def _compute_text(t):
     result=llm.chat(system,[{'role':'user','content':json.dumps(data,ensure_ascii=False)}])
     if not isinstance(result,str) or not result.strip():raise ValueError('定时文案生成为空')
     return result.strip()
+
+
+# ---------------- 陪伴型问候 ----------------
+_PERIODS = [(5, '深夜'), (8, '清晨'), (11, '上午'), (13, '中午'), (17, '下午'), (19, '傍晚'), (23, '夜晚')]
+
+
+def _period(hour):
+    for h, name in _PERIODS:
+        if hour < h:
+            return name
+    return '深夜'
+
+
+def _compute_greeting(t):
+    """陪伴型问候：带人设、按当前时段自由发挥一句自然的关心/想念/分享；不带提醒框架、不报时。
+
+    人设按会话聊天人设(resolve_persona)沿用；也可用任务里显式指定的 persona slug。
+    """
+    from core import distill, personalization
+    moment = datetime.fromtimestamp(t.get('_trigger_at', time.time()), CHINA)
+    period = _period(moment.hour)
+    target = t.get('target_username')
+    slug = t.get('persona')
+    persona = None
+    if slug:
+        p = distill.load_persona(slug)
+        if p and isinstance(p.get('persona'), str) and p['persona'].strip():
+            persona = p
+    if persona is None:
+        persona = personalization.resolve_persona(target)['persona']
+    role = personalization.role_context(target, persona)
+    system = (role +
+        '\n\n【任务】你此刻就像陪在 TA 身边的人，主动给 TA 发一句自然的问候/关心/想念，'
+        '或分享一件此刻想到的好玩小事。要有"就在 TA 身边"的陪伴感，随当前时段自由发挥：'
+        '清晨可以说早餐做好了等 TA 起来吃、上午道声早、午间提醒吃饭、傍晚问今天怎么样、'
+        '夜晚说陪 TA 待着、深夜道晚安陪 TA 入睡……口语 1~2 句，温柔自然、每次都不一样、不要报时、'
+        '不要翻旧账、不要自我介绍、不要出现"提醒/定时"这类字眼，也不要编造未真实发生的具体经历'
+        '（没去过的地方、没吃过的饭都不要说）。只输出这句话本身。')
+    data = dict(now_china=moment.strftime('%Y-%m-%d %H:%M'), period=period)
+    result = llm.chat(system, [{'role': 'user',
+        'content': '现在是' + period + '。请自然地发一句此刻的陪伴问候。' + json.dumps(data, ensure_ascii=False)}])
+    if not isinstance(result, str) or not result.strip():
+        raise ValueError('问候文案生成为空')
+    return result.strip()
+
+
+def _in_quiet(quiet, tm):
+    """当前(struct_time)是否落在免打扰窗内。quiet={'start':'23:00','end':'08:00'}，允许跨零点。"""
+    if not quiet:
+        return False
+    try:
+        sh, sm = (int(x) for x in str(quiet.get('start', '')).split(':'))
+        eh, em = (int(x) for x in str(quiet.get('end', '')).split(':'))
+    except (ValueError, AttributeError):
+        return False
+    cur = tm.tm_hour * 60 + tm.tm_min
+    start, end = sh * 60 + sm, eh * 60 + em
+    if start == end:
+        return False
+    if start < end:
+        return start <= cur < end
+    return cur >= start or cur < end          # 跨零点窗口(23:00→08:00)
+
+
+def _recent_inbound(username, within=600):
+    """目标最近 within 秒内是否有来信(正在聊天就先别用问候打断)。"""
+    if not username:
+        return False
+    from core import messages
+    try:
+        msgs = messages.get_messages(username, limit=20)
+    except Exception:  # noqa: BLE001
+        return False
+    now = time.time()
+    return any((not m.get('is_self')) and now - (m.get('create_time') or 0) <= within
+               for m in msgs)
 
 
 # ---------------- 定时消息标识 ----------------
@@ -296,7 +374,8 @@ def fire(t, occurrence=None, session=None):
             sessions.check(token)
             if not text or not t.get('target_username'):
                 return ledger.view(ledger.update(jid, 'not_sent', 'missing_content_or_target'))
-            if not text.startswith(PREFIX):
+            # 陪伴问候不加【定时提醒】前缀(破坏"就在身边"的沉浸感)；仍靠执行记录被 is_scheduled_msg 排除。
+            if t.get('kind') != 'greeting' and not text.startswith(PREFIX):
                 text = PREFIX + text
             uname = t['target_username']
             disp = t.get('target_display') or t.get('target')
@@ -347,6 +426,10 @@ def tick():
                     due = False
             elif t.get("cron"):
                 due = cron_match(t["cron"], tm) and t.get("last_min") != cur_min
+            # 陪伴问候：免打扰时段内、或对方正在聊天(近 10 分钟有来信)→本次跳过(不置 last_min,下个周期再看)
+            if due and t.get("kind") == "greeting" and (
+                    _in_quiet(t.get("quiet"), tm) or _recent_inbound(t.get("target_username"))):
+                due = False
             if due:
                 occurrence = ('once:' + t['once_at']) if t.get('once_at') else ('cron:' + str(cur_min))
                 r = fire(t, occurrence=occurrence, session=sessions.capture())
@@ -392,7 +475,8 @@ def _new_id(tasks):
 
 
 def add_task(title, target, prompt, cron=None, once_at=None, mention=None,
-             use_llm=False, persona=None, creator_wxid=None, creator_name=None):
+             use_llm=False, persona=None, creator_wxid=None, creator_name=None,
+             kind="reminder", quiet=None):
     """创建任务，自动解析目标/被@成员。返回 (task, error)。"""
     uname, is_group, disp = resolve_target(target)
     if not uname:
@@ -410,12 +494,26 @@ def add_task(title, target, prompt, cron=None, once_at=None, mention=None,
          "is_group": bool(is_group), "mention": mention, "mention_wxid": mention_wxid,
          "mention_display": mention_disp, "cron": cron, "once_at": once_at,
          "prompt": prompt, "use_llm": bool(use_llm), "persona": persona,
+         "kind": kind, "quiet": quiet,
          "creator_wxid": creator_wxid, "creator_name": creator_name,
          "enabled": True, "created": time.strftime("%Y-%m-%d %H:%M")}
     tasks.append(t)
     save_tasks(tasks)
     _log(f"新建任务[{t['title']}] -> {disp} @{describe_schedule(t)}")
     return t, None
+
+
+def add_greeting(target, cron, quiet=None, persona=None,
+                 creator_wxid=None, creator_name=None, title=None):
+    """创建一条陪伴型定时问候(kind=greeting,LLM 按时段生成)。返回 (task, error)。"""
+    return add_task(title or "定时问候", target, prompt="", cron=cron, use_llm=True,
+                    persona=persona, kind="greeting", quiet=quiet,
+                    creator_wxid=creator_wxid, creator_name=creator_name)
+
+
+def list_greetings():
+    """列出所有陪伴型问候任务(供 UI 单独管理)。"""
+    return [t for t in list_view() if t.get("kind") == "greeting"]
 
 
 _EDITABLE = ("title", "prompt", "cron", "once_at", "use_llm", "target", "mention", "persona")
@@ -478,6 +576,10 @@ def update_task(id, fields, creator_wxid=None):
             t[k] = (upd[k] or "").strip() or (t.get(k) if k != "prompt" else "")
     if "use_llm" in upd:
         t["use_llm"] = bool(upd["use_llm"])
+    if "quiet" in fields:                 # 免打扰窗口(陪伴问候用)
+        t["quiet"] = fields["quiet"] or None
+    if "enabled" in fields:               # 启用/停用开关
+        t["enabled"] = bool(fields["enabled"])
     if "fired" in t:                      # 一次性任务改了时间→允许再次触发
         t.pop("fired", None)
     save_tasks(tasks)

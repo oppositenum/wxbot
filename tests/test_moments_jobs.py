@@ -56,6 +56,17 @@ class Jobs(unittest.TestCase):
         with self.assertRaises(m.Conflict):j.retry(uncertain['id'])
         with self.assertRaises(ValueError):j.retry('nope')
 
+    def test_forced_retry_tolerates_thread_growth_but_needs_target(self):
+        item=dict(id='f',digest='new',comments=[dict(id='227',text='原文')])
+        # Non-forced: any digest change still blocks.
+        self.assertFalse(j._target_intact(dict(reply_id='227',snapshot=dict(digest='old')),item))
+        # Forced reply whose target comment survives the growth: allowed.
+        self.assertTrue(j._target_intact(dict(forced=True,reply_id='227'),item))
+        # Forced reply whose target comment was deleted: still blocked.
+        self.assertFalse(j._target_intact(dict(forced=True,reply_id='999'),item))
+        # Forced top-level comment on the post: allowed despite added comments.
+        self.assertTrue(j._target_intact(dict(forced=True,reply_id=''),item))
+
     def test_retry_reopens_cancelled_draft(self):
         self.ready();d=m.save_draft(dict(kind='publish',text='想法'))
         task=j.enqueue_draft(d['id'],1);j.cancel(task['id'])

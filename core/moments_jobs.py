@@ -135,6 +135,23 @@ def refresh():
     return m.sync()
 
 
+def _target_intact(p, item):
+    """Whether a forced (human-retried) comment job may proceed despite a feed
+    digest change. Unrelated thread growth (new comments, incl. our own just-sent
+    replies) shifts the digest but must not block an explicit retry. We only need
+    the thing we are about to reply to still be there: the target comment for a
+    reply (matched by id — a deletion is a real reason to re-check; text identity
+    is re-verified downstream by prepare_comment/copy_at), or the post itself for
+    a top-level comment. Automatic (non-forced) jobs keep the strict guard.
+    """
+    if not p.get('forced'):
+        return False
+    rid=p.get('reply_id')
+    if not rid:
+        return True  # commenting on the post; digest drift is just added comments
+    return sum(1 for c in item['comments'] if c['id']==rid)==1
+
+
 def policy(job, value, now):
     if job['origin']=='manual' or job['payload'].get('forced'):return ''
     kind=job['kind'];p=job['payload']
@@ -280,7 +297,8 @@ def process_one():
             n=Native()
             if job['kind']=='comment':
                 item=m.detail(p['feed_id'])
-                if item['digest']!=p['snapshot']['digest']:raise m.Conflict('动态已变化，未发送；请重新核对')
+                if item['digest']!=p['snapshot']['digest'] and not _target_intact(p,item):
+                    raise m.Conflict('动态已变化，未发送；请重新核对')
                 before={q['id'] for q in item['comments']};n.prepare_comment(item,p['reply_id'],p['text'])
             else:
                 before={i['id'] for i in m.catalog(100,author=sessions.check()['account'])['items']}

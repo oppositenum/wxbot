@@ -46,6 +46,11 @@ class Jobs(unittest.TestCase):
         # attempts / retry_at cleared so the job runs promptly with a fresh budget.
         self.assertNotIn('retry_at',again[failed['id']]['payload'])
         self.assertNotIn('attempts',again[failed['id']]['payload'])
+        # A human retry is forced: it bypasses the automatic-only staleness/quiet/
+        # limit guards so a long-expired auto job still runs instead of re-skipping.
+        job=again[failed['id']];self.assertTrue(job['payload']['forced'])
+        job['created']=time.time()-999999
+        self.assertEqual(j.policy(job,m.settings(),time.time()),'')
         # An initiated (possibly-live) or uncertain send is never replayable.
         with self.assertRaises(m.Conflict):j.retry(initiated['id'])
         with self.assertRaises(m.Conflict):j.retry(uncertain['id'])

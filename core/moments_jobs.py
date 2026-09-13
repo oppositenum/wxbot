@@ -100,6 +100,10 @@ def retry(jid):
         if not r:raise ValueError('任务不存在')
         if r['state'] not in RETRYABLE:raise m.Conflict('仅失败、已取消或已跳过的任务可以重试')
         p=json.loads(r['payload']);p.pop('retry_at',None);p.pop('attempts',None)
+        # A human clicking 重试 is an explicit send-now, like a manual draft submit,
+        # so it bypasses the automatic-only policy guards (staleness window, quiet
+        # hours, daily limits) — see policy(). The initiated-replay ban still holds.
+        p['forced']=True
         # Re-pin to the current account so process_one (which only runs jobs for
         # the active session) will actually pick this up now.
         c.execute("UPDATE moments_jobs SET state='queued',message='已重新排队，等待处理',payload=?,session=?,updated=? WHERE id=?",
@@ -132,7 +136,7 @@ def refresh():
 
 
 def policy(job, value, now):
-    if job['origin']=='manual':return ''
+    if job['origin']=='manual' or job['payload'].get('forced'):return ''
     kind=job['kind'];p=job['payload']
     flag='chat_reflection' if job['origin']=='reflection' else ('auto_comment' if kind=='comment' else 'auto_publish')
     if not value[flag]:return '自动开关已关闭'

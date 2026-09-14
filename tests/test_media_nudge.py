@@ -62,6 +62,11 @@ bot.send_name_for = lambda u: "朋友"
 bot._sender_name = lambda w: "朋友"
 bot._enrich_media = lambda c, m: (m.get("content") or "")
 bot._media_result = lambda c, m: bot.media_read.Result("success", "图片", "离线模拟图片描述")
+# 本用例精确断言去抖窗口边界(MEDIA_SETTLE/SETTLE),把拟人化的随机抖动/打字延迟/
+# 深夜跳过固定为中性,使时序确定、不真的 sleep(拟人化本身另有 test_humanize.py 覆盖)。
+bot.humanize.settle_factor = lambda: 1.0
+bot.humanize.typing_delay = lambda *a, **k: 0
+bot.humanize.night_drop = lambda *a, **k: False
 decrypt.run = lambda force=False: None
 schedule.is_scheduled_msg = lambda m, chat=None: bool(
     m.get("is_self") and (m.get("content") or "").startswith("【定时提醒】"))

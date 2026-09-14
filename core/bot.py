@@ -30,7 +30,7 @@ _GLOBAL_RULES = os.path.join(config.PROJECT_DIR, "bot_rules.json")
 
 
 from core import account_session as sessions, send_ledger, personalization, conversation_state, reply_policy
-from core import admin_commands, battle_mode
+from core import admin_commands, battle_mode, humanize
 
 def rules_file():
     return os.path.join(config.account_dir(), "bot_rules.json")
@@ -437,6 +437,7 @@ def _reply_pat(chat, m, rules, log):
     if not text:
         text = "嗯?拍我干嘛"
     target = send_name_for(chat)
+    time.sleep(humanize.typing_delay(text, chat))
     r = sender.send_text(target, text, chat_username=chat,
         job_id=send_ledger.stable_id(sessions.capture()["account"], "pat", chat, m.get("local_id")))
     log(f"[拍一拍回应] -> {target}: {text!r} => ok={r.get('ok')}")
@@ -479,6 +480,7 @@ def greet(chat_username):
     target = send_name_for(chat_username)
     if not conversation_state.allowed(gate):
         return {"ok": False, "status": "not_sent", "reason": "proactive_context_changed"}
+    time.sleep(humanize.typing_delay(text, chat_username))
     with reply_policy.scope(chat_username, [], msgs, mode='greeting'):
         r = sender.send_text(target, text, chat_username=chat_username, proactive_ticket=gate)
     if r.get('status') in ('confirmed', 'submitted'):
@@ -525,6 +527,9 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
         parts = parts[:2]
         r = None
         for index, part in enumerate(parts, 1):
+            _td = humanize.typing_delay(part, chat_username)
+            log(f"  [拟人] 打字延迟 {_td:.1f}s")
+            time.sleep(_td)     # 敲字时间在 send_text 之外,不占 SEND_LOCK/UI_LOCK
             r = sender.send_text(target, part, chat_username=chat_username,
                                  job_id=send_ledger.stable_id(sessions.capture()['account'], chat_username, 'reply_part', [msg.get('local_id'), index]))
             log(f"  AI回复[{persona['name']}] 第{index}条 -> {target}: {part!r} => {r}")
@@ -1092,6 +1097,7 @@ def enqueue_pending(chat, msg, context, rule, now):
     from core import reply_context
     p['msgs'] = reply_context.unique(p['msgs'] + carry + [msg])
     p.setdefault('first_seen', now)
+    p.setdefault('_settle_factor', humanize.settle_factor())  # 去抖窗口随机抖动(每批固定)
     p.update(ctx=context, rule=rule, last_seen=now)
     return p
 
@@ -1203,6 +1209,7 @@ def run_once(rules, state, log=print):
     if state.get('_session') != sessions.capture():
         raise sessions.StaleAccount('state_session_changed')
     decrypt.run(force=False)
+    humanize.configure(rules)     # 热加载拟人化参数(bot_rules.json 的 humanize 段)
     include_self = rules.get("include_self", False)
     now = time.time()
     push_cfg = rules.get("push") or {}
@@ -1338,15 +1345,26 @@ def run_once(rules, state, log=print):
             _pending.pop(chat, None)
             continue
         elapsed = now - p.get("first_seen", p.get("last_seen", 0))
-        if elapsed >= _settle_for(p["msgs"], rules):
+        if elapsed >= _settle_for(p["msgs"], rules) * p.get("_settle_factor", 1.0):
             # 纯语音批：微信「转文字」是异步写库的，批次快照定格时可能还没有转写。
             # 触发前先按库里最新转写补进快照；仍缺且未开自带 STT，就在宽限期内继续等，
             # 别急着回落到"这条语音我没能读取"。
             if elapsed < VOICE_GRACE and _voice_batch_waiting(chat, p["msgs"]):
                 continue
+            _is_battle = (p.get("rule") or {}).get("name") == "战斗模式"
+            # 战斗模式限速:距上次回击不够最小间隔就先不派发,留批继续累积(不丢内容)。
+            if _is_battle and not humanize.battle_ready(chat, now):
+                continue
+            # 深夜偶尔不回(仅普通会话,战斗模式不跳过)。
+            if not _is_battle and humanize.night_drop(chat, now):
+                log(f"[拟人] 深夜跳过一批 {chat}（{len(p['msgs'])}条）")
+                _pending.pop(chat, None)
+                continue
             trig = p["msgs"][-1]
             if not p.get('send_status'):
                 log(f"[待回复批次] {chat} 综合 {len(p['msgs'])} 条")
+            if _is_battle:
+                humanize.battle_mark(chat, now)
             # Freeze this batch and hand slow model/UI work to a worker. New
             # inbound messages can immediately create the next batch.
             send_ledger.Ledger().hold_reply(chat, p)

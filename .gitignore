@@ -30,3 +30,5 @@ __pycache__/
 
 # 旧版全局人设目录(已迁移到 accounts/，含真实人物)
 personas/
+output/
+.playwright-mcp/

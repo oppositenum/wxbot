@@ -4,9 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>微信桌面 · wxbot 管理后台</title>
+<link rel="stylesheet" href="/static/nav.css">
 <style>
-*{box-sizing:border-box}body{margin:0;height:100dvh;display:flex;flex-direction:column;font:14px/1.6 -apple-system,"PingFang SC",sans-serif;color:#202b25;background:#f5f7f6}
-header{padding:14px 22px;background:white;border-bottom:1px solid #dde4df;display:flex;gap:16px;align-items:center;flex-wrap:wrap}h1{font-size:17px;margin:0}select,button,a.action{font:inherit;border:1px solid #cdd8d0;border-radius:6px;padding:6px 12px;background:white;color:inherit;text-decoration:none}select,button{cursor:pointer}a.primary{background:#078c49;color:white;border-color:#078c49}.actions{display:flex;gap:8px;margin-left:auto}.status{padding:9px 22px;display:flex;gap:18px;align-items:center;flex-wrap:wrap;border-bottom:1px solid #e1e7e3}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#b0b9b3;margin-right:6px}.dot.ok{background:#07a85a}.muted{color:#647269}#error{color:#ad3c27}main{flex:1;min-height:240px;position:relative;background:#1c252d}iframe{width:100%;height:100%;border:0;display:block}footer{padding:9px 22px;font-size:12px;color:#526159;background:white}footer strong{font-weight:600;color:#2e4135}.tip{color:#647269}#empty{padding:40px;color:white;text-align:center}a:focus-visible,button:focus-visible,select:focus-visible{outline:3px solid #88d7ad;outline-offset:2px}@media(max-width:720px){header{padding:10px;gap:8px}.actions{margin-left:0}.status,footer{padding:8px 10px}.tip{display:none}}
+*{box-sizing:border-box}body{margin:0;height:100dvh;display:flex;flex-direction:column;font:14px/1.6 -apple-system,"PingFang SC",sans-serif;color:#202b25;background:#f5f7f4}
+header{padding:14px 22px;background:white;border-bottom:1px solid #dde4df;display:flex;gap:16px;align-items:center;flex-wrap:wrap}h1{font-size:17px;margin:0}select,button,a.action{font:inherit;border:1px solid #cdd8d0;border-radius:6px;padding:6px 12px;background:white;color:inherit;text-decoration:none}select,button{cursor:pointer}a.primary{background:#23815a;color:white;border-color:#23815a}.actions{display:flex;gap:8px;margin-left:auto}.status{padding:9px 22px;display:flex;gap:18px;align-items:center;flex-wrap:wrap;border-bottom:1px solid #e1e7e3}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#b0b9b3;margin-right:6px}.dot.ok{background:#07a85a}.muted{color:#647269}#error{color:#ad3c27}main{flex:1;min-height:240px;position:relative;background:#1c252d}iframe{width:100%;height:100%;border:0;display:block}footer{padding:9px 22px;font-size:12px;color:#526159;background:white}footer strong{font-weight:600;color:#2e4135}.tip{color:#647269}#empty{padding:40px;color:white;text-align:center}a:focus-visible,button:focus-visible,select:focus-visible{outline:3px solid #88d7ad;outline-offset:2px}@media(max-width:720px){header{padding:10px;gap:8px}.actions{margin-left:0}.status,footer{padding:8px 10px}.tip{display:none}}
 </style>
 </head>
 <body>
@@ -67,5 +68,6 @@ $('reconnect').onclick=()=>{if(selected)connect();};
 })();
 setInterval(()=>{if(!document.hidden)refreshStatus();},10000);
 </script>
+<script src="/static/nav.js"></script>
 </body>
 </html>

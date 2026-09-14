@@ -388,6 +388,9 @@ def _accounts_auth():
 from core.moments_api import create_blueprint as create_moments_blueprint
 app.register_blueprint(create_moments_blueprint(_accounts_auth))
 
+from core.desktop_management import bp as desktop_bp
+app.register_blueprint(desktop_bp)
+
 @app.get('/moments')
 def moments_page():
     return send_from_directory(os.path.join(config.PROJECT_DIR, 'static'), 'moments.html')
@@ -1240,6 +1243,16 @@ def api_messages():
 @app.get('/static/avatar-placeholder.svg')
 def avatar_placeholder():
     return send_file(os.path.join(config.PROJECT_DIR, 'static', 'avatar-placeholder.svg'))
+
+
+@app.get('/static/nav.css')
+def nav_css():
+    return send_file(os.path.join(config.PROJECT_DIR, 'static', 'nav.css'), mimetype='text/css')
+
+
+@app.get('/static/nav.js')
+def nav_js():
+    return send_file(os.path.join(config.PROJECT_DIR, 'static', 'nav.js'), mimetype='application/javascript')
 
 
 @app.get("/api/avatar")

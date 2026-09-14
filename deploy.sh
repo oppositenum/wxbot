@@ -66,6 +66,14 @@ if ! is_ubuntu_image; then
 fi
 is_ubuntu_image || die "image validation failed: expected Ubuntu 24.04 wxbot image"
 
+# Ensure the host-side docker helper (for multi-account start/stop) is installed
+# and its token is in .env before Compose reads the environment.
+if [[ -x tools/install_host_agent.sh ]]; then
+  echo "[deploy] setting up multi-account host helper"
+  ./tools/install_host_agent.sh || echo "[deploy] WARN: host helper setup skipped (multi-account start/stop may be unavailable)"
+  set -a; source .env; set +a
+fi
+
 docker compose up -d --no-build --remove-orphans
 
 echo "[deploy] waiting for management backend"

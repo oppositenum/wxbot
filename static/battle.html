@@ -1,0 +1,63 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>战斗模式</title><link rel="stylesheet" href="/static/nav.css">
+<style>
+:root{font:15px system-ui;color:#24362e;background:#f5f7f4}body{margin:0}main{max-width:860px;margin:auto;padding:32px}
+h1{font-size:30px;margin:0 0 4px}.muted{color:#718078}a{color:#23815a}
+section{background:#fff;border:1px solid #dbe6df;border-radius:14px;padding:20px;margin:18px 0;box-shadow:0 4px 18px #173b2810}
+h2{font-size:18px;margin:0 0 10px}
+textarea{width:100%;box-sizing:border-box;min-height:190px;padding:12px;border:1px solid #bfd0c6;border-radius:10px;font:14px/1.6 system-ui;resize:vertical}
+button{padding:9px 15px;border:1px solid #bfd0c6;background:#fff;border-radius:8px;cursor:pointer}
+button.primary{background:#23815a;color:#fff;border-color:#23815a}button:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}
+.redline{background:#fdf3f0;border:1px solid #f0d3ca;color:#a3432b;border-radius:10px;padding:12px 14px;font-size:13px;line-height:1.7;margin-top:14px}
+.chat{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 12px;border:1px solid #e4ece7;border-radius:10px;margin-top:8px}
+.chat .id{font:12px ui-monospace;color:#8a978f}
+.tag{display:inline-block;font-size:12px;color:#23815a;background:#eaf5ef;border-radius:20px;padding:2px 10px;margin-left:8px}
+.empty{color:#718078;padding:8px 0}#msg{margin-left:8px;color:#23815a}#err{color:#a33232}
+code{background:#eef3f0;border-radius:5px;padding:1px 6px;font-size:13px}
+</style>
+<main>
+<h1>⚔️ 战斗模式</h1>
+<p class="muted">开启后，指定会话里对方的每条消息都会被自动逐条回击、据理力争——<b>不用 @ 或引用也回</b>。这里配置吵架时用的“人设/语气”。</p>
+<p id="gate" class="muted">正在连接本机后台…</p>
+<div id="wrap" hidden>
+
+<section>
+  <h2>吵架人设（语气/风格）<span id="customTag" class="tag" hidden>已自定义</span></h2>
+  <p class="muted">决定机器人吵架时的<b>说话风格</b>：多犀利、阴阳还是讲理、要不要反问等。留空=用默认。</p>
+  <textarea id="persona" placeholder="例如：语气强硬犀利，逐点戳穿对方逻辑漏洞，多用反问，绝不认输，但只讲道理不骂人…"></textarea>
+  <div class="row">
+    <button class="primary" id="save">保存人设</button>
+    <button id="reset">恢复默认</button>
+    <span id="msg"></span><span id="err"></span>
+  </div>
+  <div class="redline"><b>🚧 安全红线（强制，不可通过人设绕过）：</b><br><span id="redline"></span></div>
+</section>
+
+<section>
+  <h2>正在战斗的会话</h2>
+  <p class="muted">用微信里给机器人发 <code>/开启战斗模式</code>（当前会话）或 <code>/开启战斗模式 群名/联系人</code> 开启；这里可随时收兵。</p>
+  <div id="chats"><p class="empty">加载中…</p></div>
+</section>
+
+</div>
+</main>
+<script>
+const $=s=>document.querySelector(s),esc=s=>String(s||'').replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
+const H={'X-Wxbot-Local-Admin':'1'};
+let def='';
+async function api(path,body){const o={headers:{...H}};if(body!==undefined){o.method='POST';o.headers['Content-Type']='application/json';o.body=JSON.stringify(body);}const r=await fetch('/api/battle'+path,o);const d=await r.json();if(!r.ok)throw Error(d.error||'请求失败');return d;}
+function drawChats(chats){
+  $('#chats').innerHTML = chats.length ? chats.map(c=>`<div class="chat"><div><div>${esc(c.name||c.username)}</div><div class="id">${esc(c.username)}</div></div><button data-off="${esc(c.username)}">收兵</button></div>`).join('')
+    : '<p class="empty">当前没有会话在战斗模式。</p>';
+  document.querySelectorAll('[data-off]').forEach(b=>b.onclick=async()=>{b.disabled=true;try{await api('/off',{chat:b.dataset.off});await load();}catch(e){$('#err').textContent=e.message;b.disabled=false;}});
+}
+async function load(){const d=await api('');def=d.default_persona;$('#persona').value=d.persona;$('#redline').textContent=d.red_line;$('#customTag').hidden=!d.is_custom;drawChats(d.chats);}
+$('#save').onclick=async()=>{$('#err').textContent='';$('#msg').textContent='';try{const d=await api('/persona',{persona:$('#persona').value});$('#persona').value=d.persona;$('#customTag').hidden=!d.is_custom;$('#msg').textContent='已保存 ✓';setTimeout(()=>$('#msg').textContent='',2000);}catch(e){$('#err').textContent=e.message;}};
+$('#reset').onclick=async()=>{$('#err').textContent='';try{const d=await api('/persona',{persona:''});$('#persona').value=d.persona;$('#customTag').hidden=true;$('#msg').textContent='已恢复默认 ✓';setTimeout(()=>$('#msg').textContent='',2000);}catch(e){$('#err').textContent=e.message;}};
+fetch('/api/admin/access',{headers:H}).then(r=>r.json()).then(async a=>{
+  if(!a.local_admin){$('#gate').textContent='此页仅限本机后台访问。';return;}
+  $('#gate').hidden=true;$('#wrap').hidden=false;
+  try{await load();}catch(e){$('#err').textContent=e.message;}
+}).catch(()=>{$('#gate').textContent='无法连接后台。';});
+</script>
+<script src="/static/nav.js"></script></html>

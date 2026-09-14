@@ -19,6 +19,19 @@ def is_admin(wxid, rules):
     return bool(wxid) and wxid in set((rules or {}).get('admins') or [])
 
 
+# 群里发命令常带前导 @机器人（含微信的   分隔），识别前先剥掉。
+_LEAD_AT = re.compile(r'^\s*(?:@[^\s ]+[\s ]+)+')
+
+
+def command_text(content):
+    """剥掉前导 @提及后的正文；用于判断/解析 `/命令`。"""
+    return _LEAD_AT.sub('', content or '').lstrip()
+
+
+def looks_command(content):
+    return command_text(content).startswith('/')
+
+
 # ---------- 各命令处理器 ----------
 
 def _cmd_moment(args, ctx):
@@ -137,6 +150,67 @@ def _cmd_send(args, ctx):
     return f"✅ 已发送给 {display}：{content[:40]}"
 
 
+def _resolve_chat(name):
+    """把名字解析成会话 username（群或联系人）；唯一命中才返回 (username, 显示名)。
+
+    未命中返回 (None, 'none')，多个命中返回 (None, 'multi:名字、名字…')。
+    """
+    from core import contacts
+    name = (name or '').strip()
+    if not name:
+        return None, 'none'
+    hits = {}
+    for g in contacts.list_groups():
+        if name in (g.get('name') or '') or name == g.get('username'):
+            hits[g.get('username')] = g.get('name') or g.get('username')
+    for c in contacts.list_contacts():
+        if name == c.get('username') or any(
+                name in (c.get(k) or '') for k in ('remark', 'name', 'nick_name', 'alias')):
+            hits[c.get('username')] = c.get('remark') or c.get('name') or c.get('username')
+    if not hits:
+        return None, 'none'
+    if len(hits) > 1:
+        return None, 'multi:' + '、'.join(list(hits.values())[:5])
+    u = next(iter(hits))
+    return u, hits[u]
+
+
+def _battle_target(args, ctx):
+    """战斗命令的目标：给了名字就解析，否则=当前会话。返回 (chat, 显示名, 错误串或None)。"""
+    from core import bot
+    target = (args or '').strip()
+    if not target:
+        chat = ctx['chat']
+        return chat, bot.send_name_for(chat), None
+    chat, info = _resolve_chat(target)
+    if chat:
+        return chat, info, None
+    if info == 'none':
+        return None, None, f'⚠️ 未找到会话「{target}」'
+    return None, None, f'⚠️「{target}」匹配到多个（{info[6:]}…），请用更精确的名字'
+
+
+def _cmd_battle_on(args, ctx):
+    """/开启战斗模式 [会话]：对该会话逐条自动回击、据理力争（不@也回）。默认当前会话。"""
+    from core import battle_mode
+    chat, disp, err = _battle_target(args, ctx)
+    if err:
+        return err
+    battle_mode.enable(chat)
+    return (f"⚔️ 已对「{disp}」开启战斗模式：这个会话的每条消息都会自动回击、据理力争，"
+            "不用@也回。只在观点上开火，不会爆粗口/人身攻击。收兵发 /关闭战斗模式。")
+
+
+def _cmd_battle_off(args, ctx):
+    """/关闭战斗模式 [会话]：收兵，停止对该会话的自动回击。默认当前会话。"""
+    from core import battle_mode
+    chat, disp, err = _battle_target(args, ctx)
+    if err:
+        return err
+    battle_mode.disable(chat)
+    return f"🕊️ 已对「{disp}」关闭战斗模式，收兵。"
+
+
 def _cmd_help(args, ctx):
     """/帮助：列出全部命令。"""
     return '可用命令：\n' + _help_text()
@@ -151,6 +225,8 @@ COMMANDS = {
     '朋友圈状态': (_cmd_status, '/朋友圈状态  查看同步与自动化状态'),
     '设置': (_cmd_set, '/设置 <项> <开|关>  项：自动评论/自动发布/聊天反思/配图/网络观点/同步'),
     '发': (_cmd_send, '/发 <联系人> <内容>  代发一条消息给联系人'),
+    '开启战斗模式': (_cmd_battle_on, '/开启战斗模式 [会话]  对该会话逐条自动回击、据理力争（默认当前会话）'),
+    '关闭战斗模式': (_cmd_battle_off, '/关闭战斗模式 [会话]  收兵，停止自动回击（默认当前会话）'),
     '帮助': (_cmd_help, '/帮助  查看全部命令'),
 }
 
@@ -187,7 +263,7 @@ def dispatch(chat, m, is_group, rules, log=print):
 
     调用前应已确认发送者是管理员（见 is_admin）。这里只负责解析 `/命令`、执行、发回执。
     """
-    text = (m.get('content') or '').lstrip()
+    text = command_text(m.get('content'))
     if not text.startswith('/'):
         return False
     body = text[1:].strip()

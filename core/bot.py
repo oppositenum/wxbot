@@ -30,7 +30,7 @@ _GLOBAL_RULES = os.path.join(config.PROJECT_DIR, "bot_rules.json")
 
 
 from core import account_session as sessions, send_ledger, personalization, conversation_state, reply_policy
-from core import admin_commands
+from core import admin_commands, battle_mode
 
 def rules_file():
     return os.path.join(config.account_dir(), "bot_rules.json")
@@ -381,6 +381,10 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
         if style_hint:
             system += "\n" + style_hint + "；只用于调整回应语气，不要向对方透露你在做画像。"
 
+    # 战斗模式：在该会话上叠加"据理力争、不示弱"的语气指令（人设可 UI 配置，红线强制）。
+    if battle_mode.is_on(chat_username):
+        system += battle_mode.system_text()
+
     acfg = agent.agent_config(rules)
     if acfg["enabled"]:
         # agent 模式：可自主联网/查历史/查画像/查知识库后再以人设风格作答
@@ -400,6 +404,10 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
 
 _last_pat = {}            # chat -> ts，拍一拍回应节流(防连拍刷屏)
 _PAT_COOLDOWN = 60
+
+# 战斗模式合成规则：让该会话的每条消息都走 reply_ai（语气增强在 _ai_reply 里叠加）。
+_BATTLE_RULE = {"name": "战斗模式", "match": {"type": "all"},
+                "action": {"type": "reply_ai"}}
 
 
 @sessions.task
@@ -1201,6 +1209,8 @@ def run_once(rules, state, log=print):
     push_on = bool(push_cfg.get("enabled")) and bool(_push_targets(push_cfg))
     push_self = push_cfg.get("include_self", include_self)
     watch_set = set(_expand_watch(rules.get("watch", [])))
+    # 战斗模式的会话即使不在监听列表也要轮询并参与回复（吵架现场可能是任意群/私聊）。
+    watch_set |= set(battle_mode.active_chats())
     # 管理员私聊即使未加入监听也要能收命令（且不因此触发普通自动回复）。
     admin_set = {a for a in (rules.get("admins") or []) if not a.endswith("@chatroom")}
     process_futures = []
@@ -1258,7 +1268,7 @@ def run_once(rules, state, log=print):
             # 执行后跳过本条的普通处理。放在游标推进之后，天然幂等；也在 watch 过滤之前，
             # 让纯管理员会话即使未监听也能收命令。非管理员的 /命令 不拦截、不暴露。
             if not m["is_self"] and m["type"] in (1, 49) and admin_commands.is_admin(m.get("sender"), rules):
-                if (m.get("content") or "").lstrip().startswith("/"):
+                if admin_commands.looks_command(m.get("content")):
                     engage = (not is_group) or m.get("at_me") or m.get("quote_me")
                     if engage and admin_commands.dispatch(chat, m, is_group, rules, log):
                         continue
@@ -1292,6 +1302,12 @@ def run_once(rules, state, log=print):
             # 私聊里图片/语音/视频也可触发AI回复(进去抖队列;纯媒体批用更长等待窗,
             # 见 _settle_for——先等对方补文字,等不到就带着识别出的图意回)。群聊媒体不触发(没法@)。
             media_like = (not is_group) and m["type"] in (3, 34, 43)
+            # 战斗模式：该会话逐条回击，不看是否 @/引用；发令的管理员自己不打。
+            if text_like and battle_mode.is_on(chat) and not m["is_self"] \
+                    and not admin_commands.is_admin(m.get("sender"), rules):
+                enqueue_pending(chat, m, msgs, _BATTLE_RULE, now)
+                log(f"[战斗模式] {chat} +1条 → 回击队列")
+                continue
             for rule in rules.get("rules", []):
                 mt = (rule.get("match") or {}).get("type")
                 is_cat_rule = mt in ("category", "types")

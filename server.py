@@ -106,6 +106,45 @@ def admin_access():
     return jsonify(local_admin=local_management_access())
 
 
+@app.get("/battle")
+def battle_page():
+    return send_from_directory(os.path.join(config.PROJECT_DIR, "static"), "battle.html")
+
+
+@app.get("/api/battle")
+def api_battle_get():
+    if not local_management_access():
+        return jsonify(error="仅本机后台可访问"), 403
+    from core import battle_mode, bot
+    chats = [{"username": c, "name": bot.send_name_for(c)} for c in battle_mode.active_chats()]
+    return jsonify(persona=battle_mode.get_persona(),
+                   default_persona=battle_mode.DEFAULT_PERSONA,
+                   is_custom=battle_mode.is_custom_persona(),
+                   red_line=battle_mode.RED_LINE.strip(), chats=chats)
+
+
+@app.post("/api/battle/persona")
+def api_battle_persona():
+    if not local_management_access():
+        return jsonify(error="仅本机后台可访问"), 403
+    from core import battle_mode
+    data = request.get_json(silent=True) or {}
+    saved = battle_mode.set_persona(data.get("persona", ""))
+    return jsonify(ok=True, persona=saved or battle_mode.DEFAULT_PERSONA, is_custom=bool(saved))
+
+
+@app.post("/api/battle/off")
+def api_battle_off():
+    if not local_management_access():
+        return jsonify(error="仅本机后台可访问"), 403
+    from core import battle_mode
+    chat = ((request.get_json(silent=True) or {}).get("chat") or "").strip()
+    if not chat:
+        return jsonify(error="缺少会话"), 400
+    battle_mode.disable(chat)
+    return jsonify(ok=True)
+
+
 @app.before_request
 def authorize_private_management():
     """Separate owner access to full profiles/KB; never inferred from absent tool context."""

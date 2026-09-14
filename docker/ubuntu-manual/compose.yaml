@@ -9,6 +9,10 @@ services:
     container_name: wxbot-ubuntu-manual
     init: true
     restart: unless-stopped
+    # 降"机器人/容器"指纹:真实主机名 + 真实网卡厂商 MAC(Intel OUI 00:1b:21),
+    # 别再暴露容器 12 位哈希主机名与随机本地管理位 MAC。
+    hostname: ${WXBOT_HOSTNAME:-ubuntu-pc}
+    mac_address: ${WXBOT_MAC:-00:1b:21:3a:7c:9e}
     shm_size: 1gb
     security_opt:
       - seccomp=unconfined
@@ -16,7 +20,7 @@ services:
       - SYS_PTRACE
     environment:
       VNC_PASSWORD: ${VNC_PASSWORD:-}
-      SCREEN: ${SCREEN:-1360x900x24}
+      SCREEN: ${SCREEN:-1920x1080x24}
       TZ: ${TZ:-Asia/Shanghai}
       WXBOT_BOT_AUTOSTART: ${WXBOT_BOT_AUTOSTART:-1}
       WXBOT_MEDIA_CAPTURE: ${WXBOT_MEDIA_CAPTURE:-1}

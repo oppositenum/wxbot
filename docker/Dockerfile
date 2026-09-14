@@ -14,7 +14,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANGUAGE=zh_CN:zh \
     LC_ALL=zh_CN.UTF-8 \
     DISPLAY=:0 \
-    SCREEN=1360x900x24 \
+    SCREEN=1920x1080x24 \
     HOME=/home/wechat \
     XMODIFIERS=@im=fcitx \
     GTK_IM_MODULE=fcitx \
@@ -46,6 +46,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-zstandard python3-flask python3-pil sqlite3 gdb libcap2-bin ffmpeg \
     && sed -i 's/# *\(zh_CN.UTF-8\)/\1/' /etc/locale.gen \
     && locale-gen \
+    && ln -snf /usr/share/zoneinfo/${TZ} /etc/localtime \
+    && echo "${TZ}" > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \

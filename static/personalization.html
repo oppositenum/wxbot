@@ -1,7 +1,8 @@
 <!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>联系人画像与专属人设</title>
+<link rel="stylesheet" href="/static/nav.css">
 <style>
-body{font:15px/1.6 system-ui,sans-serif;color:#23302a;background:#f8faf9;margin:0}main{max-width:1050px;margin:auto;padding:28px}h1{font-size:26px}h2{font-size:19px;margin-top:26px}section{border-top:1px solid #d5dfd8;padding:16px 0}input,select,button{font:inherit;padding:6px;margin:4px;border:1px solid #b9c9bf;border-radius:4px}button{background:#edf4ef;cursor:pointer}button:disabled{opacity:.5}label{display:inline-block;margin-right:10px}.muted{color:#60756a;font-size:13px}.error{color:#9b302d;white-space:pre-wrap}table{border-collapse:collapse;width:100%}td,th{text-align:left;border-bottom:1px solid #dde5df;padding:8px;vertical-align:top}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#edf2ee;padding:12px}#contacts{width:100%;max-width:600px}details{margin:8px 0}a{color:#176747}.evidence{font-size:12px;max-width:300px;overflow-wrap:anywhere}
+body{font:15px/1.6 system-ui,sans-serif;color:#24362e;background:#f5f7f4;margin:0}main{max-width:1050px;margin:auto;padding:28px}h1{font-size:26px}h2{font-size:19px;margin-top:26px}section{border-top:1px solid #d5dfd8;padding:16px 0}input,select,button{font:inherit;padding:6px;margin:4px;border:1px solid #b9c9bf;border-radius:4px}button{background:#edf4ef;cursor:pointer}button:disabled{opacity:.5}label{display:inline-block;margin-right:10px}.muted{color:#60756a;font-size:13px}.error{color:#9b302d;white-space:pre-wrap}table{border-collapse:collapse;width:100%}td,th{text-align:left;border-bottom:1px solid #dde5df;padding:8px;vertical-align:top}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#edf2ee;padding:12px}#contacts{width:100%;max-width:600px}details{margin:8px 0}a{color:#23815a}.evidence{font-size:12px;max-width:300px;overflow-wrap:anywhere}
 </style><main>
 <h1>联系人画像与专属人设</h1><p>画像帮助选择表达方式，人设决定机器人角色。事实记忆仍在原有画像中，本页不复制聊天或事实。</p>
 <label id="tokenLabel">管理员 Token <input id="token" type="password" autocomplete="off"></label><button id="unlock">加载管理数据</button>
@@ -149,4 +150,6 @@ fetch('/api/admin/access',{headers:{'X-Wxbot-Local-Admin':'1'}}).then(r=>r.json(
   $('#authHelp').textContent='已连接本机账号。选择联系人即可管理角色和偏好；分析历史只在你明确批准后执行。';
   await run(load)();
 }).catch(()=>{});
-</script></html>
+</script>
+<script src="/static/nav.js"></script>
+</html>

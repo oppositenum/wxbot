@@ -14,12 +14,19 @@ services:
       - seccomp=unconfined          # 微信(CEF)需要
     cap_add:
       - SYS_PTRACE                   # 读 /proc/<pid>/mem 提取数据库密钥
+    extra_hosts:
+      # Docker Desktop 自带；Linux 宿主靠这行让容器能回连宿主的多账号助手
+      - "host.docker.internal:host-gateway"
     environment:
       VNC_PASSWORD: ${VNC_PASSWORD:?VNC_PASSWORD must be set in .env}
       SCREEN: ${SCREEN:-1360x900x24}
       TZ: ${TZ:-Asia/Shanghai}
       WXBOT_BOT_AUTOSTART: ${WXBOT_BOT_AUTOSTART:-1}
       WXBOT_MEDIA_CAPTURE: ${WXBOT_MEDIA_CAPTURE:-1}
+      # 多账号 启动/停止/重启 通过宿主助手执行（容器内无 docker CLI）。
+      WXBOT_SELF_CONTAINER: ${WXBOT_SELF_CONTAINER:-wxbot}
+      WXBOT_HOST_AGENT_URL: ${WXBOT_HOST_AGENT_URL:-http://host.docker.internal:5199}
+      WXBOT_HOST_AGENT_TOKEN: ${WXBOT_HOST_AGENT_TOKEN:-}
     ports:
       # 默认只绑 127.0.0.1（安全）。要局域网/公网访问改 BIND_HOST=0.0.0.0 并务必设 VNC_PASSWORD + 反代加认证
       - "${BIND_HOST:-127.0.0.1}:5100:5100"   # 后台 Web

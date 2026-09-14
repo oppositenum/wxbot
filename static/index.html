@@ -4,17 +4,22 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>wxbot 微信后台</title>
+<link rel="stylesheet" href="/static/nav.css">
 <style>
-  :root { --bg:#f5f6f7; --panel:#fff; --line:#e4e6eb; --brand:#07c160; --muted:#8a8f99; }
+  :root { --bg:#f5f7f4; --panel:#fff; --line:#e4e9e5; --brand:#23815a; --muted:#748078; }
   * { box-sizing:border-box; }
   body { margin:0; font:14px/1.5 -apple-system,"PingFang SC",sans-serif; background:var(--bg); color:#1d1f23; }
   header { flex-wrap:wrap; display:flex; align-items:center; gap:14px; padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--line); }
-  header h1 { font-size:15px; margin:0; }
+  header h1 { font-size:15px; margin:0 4px 0 0; font-weight:600; }
+  header .hgroup { display:flex; align-items:center; gap:6px; padding:5px 10px 5px 8px; border:1px solid var(--line); border-radius:10px; background:#fafbfc; }
+  header .hgroup > .glabel { font-size:11px; color:var(--muted); font-weight:600; margin-right:2px; white-space:nowrap; }
   .dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:5px; }
   .ok{background:var(--brand)} .bad{background:#e0554e} .warn{background:#e6a23c}
   .pill { background:#f0f1f3; border-radius:12px; padding:3px 10px; font-size:12px; color:#555; }
-  button { font:inherit; border:none; border-radius:6px; padding:6px 12px; cursor:pointer; background:#eaecef; }
-  button.primary { background:var(--brand); color:#fff; }
+  button { font:inherit; border:1px solid var(--line); border-radius:7px; padding:6px 12px; cursor:pointer; background:#fff; color:#24362e; }
+  button:hover { background:#edf3ee; }
+  button.primary { background:var(--brand); color:#fff; border-color:var(--brand); }
+  button.primary:hover { background:#1e704e; }
   button:disabled { opacity:.5; cursor:default; }
   body { height:100vh; display:flex; flex-direction:column; }
   main { flex:1; min-height:0; display:grid; grid-template-columns:300px 1fr; height:auto; }
@@ -27,7 +32,7 @@
   .list { overflow-y:auto; flex:1; }
   .row { display:flex; align-items:center; gap:9px; padding:9px 11px; cursor:pointer; border-bottom:1px solid #f2f3f5; }
   .row:hover { background:#f7f8fa; }
-  .row.active { background:#eaf7ef; }
+  .row.active { background:#eaf5ef; }
   .avatar { width:36px; height:36px; border-radius:6px; background:#dcdfe4; flex:none; object-fit:cover; }
   .row .name { font-weight:500; }
   .row .sub { color:var(--muted); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:200px; }
@@ -58,27 +63,35 @@
 </head>
 <body>
 <header>
-  <h1>wxbot 微信后台</h1>
-  <span class="pill" id="loginState">加载中…</span>
-  <span class="pill" id="keyState"></span>
-  <span class="pill" id="syncState"></span>
-  <button id="loginBtn">扫码登录(noVNC)</button>
-  <button id="keyBtn">刷新密钥</button>
-  <button id="imgKeyBtn" title="切换微信账号后,注入抓取该账号的图片解密密钥">抓图片密钥</button>
-  <button id="syncBtn">立即同步</button>
-  <button id="botBtn">机器人：…</button>
-  <button id="aiBtn">蒸馏/AI</button>
-  <button id="personalizationBtn" class="primary">画像与人设</button>
-  <button id="watchBtn">监听设置</button>
-  <button id="adminBtn">管理员设置</button>
-  <button id="followBtn">跟发设置</button>
-  <button id="pushBtn">监听推送</button>
-  <button id="scheduleBtn">定时任务</button>
-  <button id="greetBtnPanel">定时问候</button>
-  <button id="accountsBtn">多账号管理</button>
-  <button onclick="location.href='/moments'">朋友圈</button>
-  <button id="configExportBtn">导出配置</button>
-  <button id="configImportBtn">导入配置</button><input id="configImportFile" type="file" accept=".zip" hidden>
+  <h1>会话</h1>
+  <div class="hgroup"><span class="glabel">连接</span>
+    <span class="pill" id="loginState">加载中…</span>
+    <span class="pill" id="keyState"></span>
+    <span class="pill" id="syncState"></span>
+    <button id="loginBtn">扫码登录(noVNC)</button>
+    <button id="keyBtn">刷新密钥</button>
+    <button id="imgKeyBtn" title="切换微信账号后,注入抓取该账号的图片解密密钥">抓图片密钥</button>
+    <button id="syncBtn">立即同步</button>
+  </div>
+  <div class="hgroup"><span class="glabel">机器人</span>
+    <button id="botBtn">机器人：…</button>
+    <button id="aiBtn">蒸馏/AI</button>
+    <button id="personalizationBtn" class="primary">画像与人设</button>
+  </div>
+  <div class="hgroup"><span class="glabel">规则</span>
+    <button id="watchBtn">监听设置</button>
+    <button id="followBtn">跟发设置</button>
+    <button id="pushBtn">监听推送</button>
+    <button id="adminBtn">管理员设置</button>
+  </div>
+  <div class="hgroup"><span class="glabel">定时</span>
+    <button id="scheduleBtn">定时任务</button>
+    <button id="greetBtnPanel">定时问候</button>
+  </div>
+  <div class="hgroup"><span class="glabel">配置</span>
+    <button id="configExportBtn">导出配置</button>
+    <button id="configImportBtn">导入配置</button><input id="configImportFile" type="file" accept=".zip" hidden>
+  </div>
   <span class="pill" id="mediaState">媒体：连接中</span>
 </header>
 <main>
@@ -987,5 +1000,6 @@ setInterval(loadStatus, 8000); setInterval(loadBot, 8000);
 setInterval(()=>{ if(current && !sending) loadMessages(); }, 1200);
 setInterval(refreshSessions, 3000);
 </script>
+<script src="/static/nav.js"></script>
 </body>
 </html>

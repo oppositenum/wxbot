@@ -1,8 +1,8 @@
 """拟人化节奏控制 —— 让自动回复不再"瞬发/秒回",降低机器/骚扰风控特征。
 
-集中所有回复节奏逻辑:打字延迟、去抖窗口抖动、深夜变慢/偶尔不回、战斗模式限速。
+集中所有回复节奏逻辑:打字延迟、去抖窗口抖动、深夜变慢、账号级发送间隔、战斗模式限速。
 参数默认见 DEFAULTS,可被 bot_rules.json 的 `humanize` 段覆盖(rules 每轮热加载)。
-per-chat 节奏状态用进程内 dict(重启即清,无持久化)。
+per-chat / 账号节奏状态用进程内 dict(重启即清,无持久化)。
 """
 
 import os
@@ -16,24 +16,23 @@ except Exception:  # pragma: no cover - zoneinfo 总在,兜底避免导入炸
     _TZ = None
 
 DEFAULTS = {
-    # 打字延迟(温和档):base + per_char*字数,乘深夜系数,叠抖动,clamp 到 [min, cap]
-    "per_char": 0.15,
-    "base": 0.6,
-    "min": 0.8,
-    "cap": 15.0,
-    "jitter": 0.25,        # ±25% 随机抖动
-    # 深夜时段 [night_start, night_end)(本地 Asia/Shanghai 小时)
+    # 节奏限制默认全关:不打字等待、不随机丢回复、不限发送间隔。
+    "per_char": 0.0,
+    "base": 0.0,
+    "min": 0.0,
+    "cap": 0.0,
+    "jitter": 0.0,
     "night_start": 0,
     "night_end": 7,
-    "night_factor": 1.6,   # 深夜延迟拉长倍数
-    "night_drop_prob": 0.08,  # 深夜普通回复"偶尔不回"概率(战斗模式不受此影响)
-    # 去抖窗口抖动倍数(每批取一次)
+    "night_factor": 1.0,
+    "night_drop_prob": 0.0,
     "settle_min": 1.0,
-    "settle_max": 1.8,
-    # 战斗模式限速:两次回击最小间隔随机 [gap_min, gap_max] 秒 + 软小时上限
-    "battle_gap_min": 15.0,
-    "battle_gap_max": 40.0,
-    "battle_hourly_cap": 40,
+    "settle_max": 1.0,
+    "min_send_gap": 0.0,
+    "hourly_cap": 0,       # 0 = 不限
+    "battle_gap_min": 0.0,
+    "battle_gap_max": 0.0,
+    "battle_hourly_cap": 0,
 }
 
 # 允许 rules 覆盖的运行时配置(load 时刷新)
@@ -42,6 +41,8 @@ _cfg = dict(DEFAULTS)
 # per-chat 战斗回击时间戳(单调时钟秒),用于最小间隔;小时窗口用挂钟秒
 _battle_last = {}          # chat -> monotonic ts of last dispatched battle reply
 _battle_hits = {}          # chat -> list[wallclock ts] in the last hour
+_send_last = None          # monotonic ts of last account-level UI send
+_send_hits = []            # wallclock ts of account-level UI sends in the last hour
 
 
 def configure(rules):
@@ -79,14 +80,19 @@ def night_factor(now=None):
 
 
 def typing_delay(text, chat=None, now=None):
-    """按字数模拟真人敲字所需秒数:base + per_char*len,×深夜系数,±抖动,clamp。"""
+    """按字数模拟真人敲字所需秒数。cap<=0 表示不延迟。"""
+    if _cfg["cap"] <= 0 and _cfg["min"] <= 0:
+        return 0.0
     n = len((text or "").strip())
     secs = _cfg["base"] + _cfg["per_char"] * n
     secs *= night_factor(now)
     j = _cfg["jitter"]
     if j:
         secs *= random.uniform(1 - j, 1 + j)
-    return max(_cfg["min"], min(_cfg["cap"], secs))
+    lo, hi = _cfg["min"], _cfg["cap"]
+    if hi <= 0:
+        return max(0.0, lo)
+    return max(lo, min(hi, secs))
 
 
 def settle_factor():
@@ -117,9 +123,14 @@ def battle_ready(chat, now=None):
     last = _battle_last.get(chat)
     if last is None:
         return True
-    gap = random.uniform(_cfg["battle_gap_min"], _cfg["battle_gap_max"])
+    lo, hi = _cfg["battle_gap_min"], _cfg["battle_gap_max"]
+    if hi <= 0:
+        gap = 0.0
+    else:
+        gap = random.uniform(lo, hi)
     hits = _prune_hits(chat, wall)
-    if len(hits) >= _cfg["battle_hourly_cap"]:
+    cap = _cfg["battle_hourly_cap"]
+    if cap and len(hits) >= cap:
         gap *= 3   # 超小时上限:退避而非丢弃
     return (mono - last) >= gap
 
@@ -132,9 +143,47 @@ def battle_mark(chat, now=None):
     _prune_hits(chat, wall)
 
 
+def _prune_sends(wall):
+    global _send_hits
+    _send_hits = [t for t in _send_hits if wall - t < 3600]
+    return _send_hits
+
+
+def send_ready(now=None):
+    """账号级小时上限:满了先不派发新批次,待处理消息留在队列里。hourly_cap<=0 不限。"""
+    cap = _cfg["hourly_cap"]
+    if not cap:
+        return True
+    wall = time.time() if now is None else now
+    return len(_prune_sends(wall)) < cap
+
+
+def wait_gap():
+    """两条自动发送之间补齐最小间隔。min_send_gap<=0 时不睡。"""
+    last = _send_last
+    gap = _cfg["min_send_gap"]
+    if last is None or gap <= 0:
+        return 0.0
+    need = gap - (time.monotonic() - last)
+    if need <= 0:
+        return 0.0
+    time.sleep(min(need, gap))
+    return need
+
+
+def send_mark(now=None):
+    """记录一次真实界面发送(供间隔与小时计数)。"""
+    global _send_last
+    _send_last = time.monotonic()
+    wall = time.time() if now is None else now
+    _prune_sends(wall).append(wall)
+
+
 def _reset_for_test():
     """单测隔离:清空 per-chat 状态并恢复默认参数。"""
-    global _cfg
+    global _cfg, _send_last
     _cfg = dict(DEFAULTS)
     _battle_last.clear()
     _battle_hits.clear()
+    _send_last = None
+    _send_hits.clear()

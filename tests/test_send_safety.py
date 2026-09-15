@@ -53,6 +53,8 @@ class Isolated(unittest.TestCase):
                               ('core.llm.gen_image', forbidden), ('core.llm.load_cfg', lambda: {})]:
             p=patch(target,value);p.start();self.addCleanup(p.stop)
         sessions._current=None
+        from core import humanize
+        humanize._reset_for_test()
         self.token=sessions.capture()
         self.adapter=Adapter(self.token)
         p=patch.object(sender,'_adapter',self.adapter);p.start();self.addCleanup(p.stop)

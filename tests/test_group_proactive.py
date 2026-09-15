@@ -6,6 +6,14 @@ from test_send_safety import Isolated
 from core import bot
 
 class Group(Isolated):
+    def test_nudge_requires_explicit_private_share(self):
+        now=datetime(2026,9,12,14,tzinfo=ZoneInfo('Asia/Shanghai')).timestamp()
+        rows=[dict(local_id=1,content='hi',is_self=True,create_time=now-3*3600),
+              dict(local_id=2,content='hi',is_self=False,create_time=now-4*3600)]
+        with patch('core.bot.llm.available',return_value=True), patch('core.bot.sender.preflight',return_value=None):
+            self.assertFalse(bot._maybe_nudge('friend-A',rows,{'proactive':{'enabled':True}},{},lambda x:None,now))
+            self.assertFalse(bot._maybe_nudge('friend-A',rows,{'proactive':{'enabled':True,'private_share_enabled':False}},{},lambda x:None,now))
+
     def test_opt_in_wait_cooldown_and_next_inbound(self):
         now=datetime(2026,9,12,14,tzinfo=ZoneInfo('Asia/Shanghai')).timestamp()
         rows=[dict(local_id=1,content='今天真开心',is_self=False,create_time=now-301)]
@@ -33,3 +41,31 @@ class Group(Isolated):
         bot.enqueue_pending('chat-A',{'local_id':2},[],rule,104)
         self.assertEqual(p['first_seen'],100)
         self.assertEqual(bot._settle_for([{'type':1}]),5)
+
+    def test_group_auto_reply_off_by_default(self):
+        from core import decrypt, messages, conversation_state, personalization
+        room='g@chatroom'
+        store={'msgs':[dict(local_id=1,type=1,is_self=False,sender='wxid_other',
+                            content='hi',create_time=0,at_me=True,quote_me=False)]}
+        queued=[]
+        patches=[
+            patch.object(decrypt,'run',lambda force=False:None),
+            patch.object(messages,'get_messages',lambda chat,limit=40:list(store['msgs']) if chat==room else []),
+            patch.object(conversation_state,'observe',lambda *a,**k:None),
+            patch.object(personalization,'learn_live',lambda *a,**k:None),
+            patch.object(bot,'_proactive_worker',lambda *a,**k:None),
+            patch.object(bot,'enqueue_pending',lambda chat,m,msgs,rule,now:queued.append(chat) or {'msgs':[m]}),
+        ]
+        for p in patches:p.start();self.addCleanup(p.stop)
+        rules={'include_self':False,'watch':[room],'poll_interval':5,
+               'rules':[{'name':'r','match':{'type':'auto'},'action':{'type':'reply_ai'}}]}
+        state=bot.load_state();bot.load_pending();bot._pending.clear()
+        bot.run_once(rules,state,log=lambda *_:None)
+        store['msgs'].append(dict(store['msgs'][0],local_id=2,content='@me',create_time=1))
+        bot.run_once(rules,state,log=lambda *_:None)
+        self.assertEqual(queued,[])
+        rules['group_auto_reply']=True
+        bot.run_once(rules,state,log=lambda *_:None)
+        store['msgs'].append(dict(store['msgs'][0],local_id=3,content='@me again',create_time=2))
+        bot.run_once(rules,state,log=lambda *_:None)
+        self.assertEqual(queued,[room])

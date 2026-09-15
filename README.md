@@ -112,13 +112,18 @@ run.sh                  deploy.sh 的兼容别名
 
 让机器人在群里被 **@** 或 **被引用** 时，用某个人的说话风格自动回复。
 
-### 1. 配置大模型（Claude 或 GPT）
-编辑 `llm_config.json`（或后台「AI设置」）：
+### 1. 配置大模型（Claude / GPT / Grok）
+编辑 `llm_config.json`（或后台「AI设置」），三套独立中转：
 ```json
-{ "provider":"claude", "api_key":"sk-ant-...", "model":"claude-sonnet-5",
-  "gpt_model":"gpt-4o", "proxy":"http://127.0.0.1:7890", "temperature":0.9 }
+{
+  "provider": "grok",
+  "claude": {"base_url": "https://api.anthropic.com", "api_key": "sk-ant-...", "model": "claude-sonnet-5"},
+  "gpt": {"base_url": "https://api.openai.com/v1", "api_key": "sk-...", "model": "gpt-4o"},
+  "grok": {"base_url": "https://api.x.ai/v1", "api_key": "xai-...", "model": "grok-4.5"},
+  "proxy": "http://127.0.0.1:7890", "temperature": 0.9
+}
 ```
-`provider` 填 `claude` 或 `gpt`；海外 API 需 `proxy`（走你主机的代理）。
+`provider` 填 `claude`、`gpt` 或 `grok`。Grok 走 xAI 的 OpenAI 兼容接口（`https://api.x.ai/v1`），key 也可设环境变量 `XAI_API_KEY`。海外 API 需 `proxy`（走你主机的代理）。
 
 ### 2. 蒸馏目标人（需该人在群里发言够多）
 ```bash

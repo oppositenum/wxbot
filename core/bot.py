@@ -23,6 +23,8 @@ from core import imgdec, media, sender, agent, memory, schedule, media_read, sen
 
 _DEFAULT_RULES = {
     "poll_interval": 5, "include_self": False, "watch": [],
+    "group_auto_reply": False,
+    "proactive": {"enabled": False, "private_share_enabled": False, "group_enabled": False},
     "rules": [{"name": "style-reply", "match": {"type": "auto"},
                "action": {"type": "reply_ai", "persona": ""}}],
 }
@@ -286,20 +288,18 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
     增强：注入对方长期画像；开启 agent 模式时可联网/查历史/查知识库后再答。
     """
     system = (personalization.BEHAVIOR +
-              "\n\n【风格 vs 内容·最高优先】本轮角色设定只决定你【说话的语气/风格】,"
-              "不决定你是否理会对方。无论对方是否熟人,你都必须真正读懂并回应对方这条消息的"
-              "【实际内容和请求】,绝不能把人当陌生人/敌人无视、绝不能用"
-              "'没空/晾着/不理你/账号不对劲/我没发过'之类敷衍搪塞、也不能重复同一句话。"
-              "\n- 对方提问:先给真实、切题的答案,再谈态度;答案不能被人设情绪(吃醋/防备)顶掉;"
-              "\n- 对方要你做的事(查资料/画图等):能做就去做,把结果按你的风格给他;确实做不到就直说做不到。"
-              "\n\n【别翻旧账·重要】聊什么由对方【这条消息】决定;下面可能给你一些关于对方的背景资料,"
-              "那只是【供你理解】的参考,不是让你主动说出来的话题。别用'我记得你以前…''上次你说…'"
-              "去主动翻旧事显示记性;只有对方这次的话真的用得上某条旧信息时,才自然带一句。"
-              "熟悉感体现在你能贴切接住他当下的话,不是靠复述过去。他明确问起过去/让你回忆时,才照实回答。"
-              "\n\n【多条消息】如果自然语气确实需要停顿或补充，可以输出两段，并用单独一行 [[NEXT]] 分隔；否则只输出一段。不要为了凑数量拆句。"
-              "\n\n【表达】像真人聊天,只输出回复正文(不要解释/引号/复述对方原话/重复问候)。"
-              "闲聊寒暄就简短口语几句,别凑长;当对方要你说明图片内容、答疑或给结果时,"
-              "再把信息说清楚,别为凑短而漏掉该给的内容。")
+              "\n\n【角色执行·最高优先】【本轮机器人角色】是你的身份、尺度、主动性和说话方式，不只是语气滤镜。"
+              "完整执行角色正文里写明的能力与禁区；不要用通用助手、说教、含蓄或客服短句把角色削薄。"
+              "无论对方是否熟人,都必须真正读懂并回应对方这条消息的【实际内容和请求】,"
+              "绝不能把人当陌生人/敌人无视、绝不能用'没空/晾着/不理你/账号不对劲/我没发过'之类敷衍,也不能重复同一句话。"
+              "\n- 对方要查资料/画图等:能做就去做,再按角色口吻给结果;确实做不到就直说做不到。"
+              "\n- 对方提问:先接住问题;角色要求先调情、先损、先进入场景时,把答案嵌进角色里,不要用人设情绪把问题顶掉,也不要跳出角色改口成客服。"
+              "\n- 角色允许的亲密称呼、脏话、主动推进、加档、连发,按角色做;对方喊停或改尺度立刻跟上。"
+              "\n\n【别翻旧账】微信画像/记忆里的现实资料只供理解,不要为炫耀记性主动翻对方的旧事;"
+              "角色自己的偏好、称呼、尺度和正在进行的扮演可以接着用。他明确问起过去时再照实回答。"
+              "\n\n【多条消息】角色需要停顿、补刀或连发时，可以输出多段，段与段用单独一行 [[NEXT]] 分隔；不要为了凑数量拆句，也不要为了「只回一句」把角色压扁。"
+              "\n\n【表达】只输出回复正文(不要解释/引号/复述对方原话/系统旁白)。"
+              "长度、荤素和展开程度跟角色正文与对方这句走：闲聊可以短，角色要求具体、加档、Dirty Talk 时就把话说到位。")
     system += media_read.HONESTY
     # Memoize failures within this reply too: direct/said/context must agree, no triple requests.
     media_results = {}
@@ -437,7 +437,9 @@ def _reply_pat(chat, m, rules, log):
     if not text:
         text = "嗯?拍我干嘛"
     target = send_name_for(chat)
-    time.sleep(humanize.typing_delay(text, chat))
+    delay = humanize.typing_delay(text, chat)
+    if delay:
+        time.sleep(delay)
     r = sender.send_text(target, text, chat_username=chat,
         job_id=send_ledger.stable_id(sessions.capture()["account"], "pat", chat, m.get("local_id")))
     log(f"[拍一拍回应] -> {target}: {text!r} => ok={r.get('ok')}")
@@ -480,7 +482,9 @@ def greet(chat_username):
     target = send_name_for(chat_username)
     if not conversation_state.allowed(gate):
         return {"ok": False, "status": "not_sent", "reason": "proactive_context_changed"}
-    time.sleep(humanize.typing_delay(text, chat_username))
+    delay = humanize.typing_delay(text, chat_username)
+    if delay:
+        time.sleep(delay)
     with reply_policy.scope(chat_username, [], msgs, mode='greeting'):
         r = sender.send_text(target, text, chat_username=chat_username, proactive_ticket=gate)
     if r.get('status') in ('confirmed', 'submitted'):
@@ -528,8 +532,9 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
         r = None
         for index, part in enumerate(parts, 1):
             _td = humanize.typing_delay(part, chat_username)
-            log(f"  [拟人] 打字延迟 {_td:.1f}s")
-            time.sleep(_td)     # 敲字时间在 send_text 之外,不占 SEND_LOCK/UI_LOCK
+            if _td:
+                log(f"  [拟人] 打字延迟 {_td:.1f}s")
+                time.sleep(_td)
             r = sender.send_text(target, part, chat_username=chat_username,
                                  job_id=send_ledger.stable_id(sessions.capture()['account'], chat_username, 'reply_part', [msg.get('local_id'), index]))
             log(f"  AI回复[{persona['name']}] 第{index}条 -> {target}: {part!r} => {r}")
@@ -803,7 +808,7 @@ def _maybe_nudge(chat, msgs, rules, state, log, now=None):
     对方一说话立即重置。只在私聊+配了 reply_ai 人设时生效。"""
     now = now or time.time()
     pcfg = rules.get("proactive") or {}
-    if pcfg.get("enabled") is not True or pcfg.get('private_share_enabled', True) is not True or chat in _pending or chat in _processing:
+    if pcfg.get("enabled") is not True or pcfg.get('private_share_enabled') is not True or chat in _pending or chat in _processing:
         return False
     if sender.preflight(chat):
         return False
@@ -1287,6 +1292,9 @@ def run_once(rules, state, log=print):
                     continue
                 if not include_self:
                     continue
+            # 默认不在群里自动回(含拍一拍);要群内@回复时在 rules 里开 group_auto_reply。
+            if is_group and rules.get("group_auto_reply") is not True:
+                continue
             # 拍一拍(拍了拍【我】才应,拍别人不掺和)：简短招呼一句,不走整段AI长回复
             # 实测拍一拍以 type49 appmsg 出现(也兼容 10000 系统消息形态)
             _c_pat = m.get("content") or ""
@@ -1352,13 +1360,7 @@ def run_once(rules, state, log=print):
             if elapsed < VOICE_GRACE and _voice_batch_waiting(chat, p["msgs"]):
                 continue
             _is_battle = (p.get("rule") or {}).get("name") == "战斗模式"
-            # 战斗模式限速:距上次回击不够最小间隔就先不派发,留批继续累积(不丢内容)。
             if _is_battle and not humanize.battle_ready(chat, now):
-                continue
-            # 深夜偶尔不回(仅普通会话,战斗模式不跳过)。
-            if not _is_battle and humanize.night_drop(chat, now):
-                log(f"[拟人] 深夜跳过一批 {chat}（{len(p['msgs'])}条）")
-                _pending.pop(chat, None)
                 continue
             trig = p["msgs"][-1]
             if not p.get('send_status'):

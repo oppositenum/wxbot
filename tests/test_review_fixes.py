@@ -54,13 +54,14 @@ class Isolated(unittest.TestCase):
 
 class Routes(Isolated):
     cfg = {"provider": "gpt", "gpt": {"base_url": "https://gateway.invalid", "api_key": "SECRET_G", "model": "configured-gpt-name"},
-           "claude": {"base_url": "https://gateway.invalid", "api_key": "SECRET_C", "model": "configured-claude-name"}}
+           "claude": {"base_url": "https://gateway.invalid", "api_key": "SECRET_C", "model": "configured-claude-name"},
+           "grok": {"base_url": "https://api.x.ai/v1", "api_key": "SECRET_K", "model": "configured-grok-name"}}
     specs = [{"name": "lookup", "description": "test", "input_schema": {"type": "object", "properties": {}}}]
 
     def responses(self, values):
         self.requests = []
         values = iter(values)
-        def post(url, headers, body, proxy):
+        def post(url, headers, body, proxy, **_kw):
             self.requests.append((url, copy.deepcopy(body)))
             return next(values)
         p = patch.object(llm, "_post", post); p.start(); self.addCleanup(p.stop)
@@ -107,9 +108,39 @@ class Routes(Isolated):
                 llm.chat_tools("sys", [], self.specs, blocked, self.cfg)
             self.assertEqual(post.call_count, 1)
 
+    def test_grok_uses_openai_compat_and_does_not_fall_back(self):
+        self.responses([self.gpt_call(), self.gpt_text()])
+        cfg = dict(self.cfg, provider="grok")
+        out = llm.chat_tools("PRIVATE_PROMPT", [{"role": "user", "content": "PRIVATE_BODY"}], self.specs,
+                             lambda n, a: "result", cfg, max_rounds=1)
+        self.assertEqual(out, "done")
+        self.assertTrue(all(u.endswith("chat/completions") and b["model"] == "configured-grok-name"
+                            for u, b in self.requests))
+        self.assertTrue(all("api.x.ai" in u for u, _ in self.requests))
+        self.responses([self.gpt_text("hi")])
+        llm.chat("private", [], cfg)
+        self.assertEqual(self.requests[-1][1]["model"], "configured-grok-name")
+        self.assertEqual(self.requests[-1][1].get("reasoning_effort"), "low")
+        self.assertTrue(self.requests[-1][0].endswith("chat/completions"))
+        diag = json.dumps(llm.route_diagnostics())
+        self.assertIn("configured-grok-name", diag)
+        self.assertNotIn("SECRET", diag)
+
+    def test_grok_env_key_and_default_base(self):
+        cfg = {"provider": "grok"}
+        with patch.dict(os.environ, {"XAI_API_KEY": "ENV_GROK_KEY"}, clear=False):
+            base, key, model = llm.creds(cfg, "grok")
+        self.assertEqual(key, "ENV_GROK_KEY")
+        self.assertEqual(model, "grok-4.5")
+        self.responses([self.gpt_text("ok")])
+        with patch.dict(os.environ, {"XAI_API_KEY": "ENV_GROK_KEY"}, clear=False):
+            self.assertEqual(llm.chat("sys", [{"role": "user", "content": "hi"}], cfg), "ok")
+        self.assertTrue(self.requests[-1][0].startswith("https://api.x.ai/v1/"))
+
     def test_main_chat_diagnostics_and_explicit_tools_do_not_change_chat(self):
         self.responses([self.gpt_text()])
         llm.chat("private", [], dict(self.cfg, tools_provider="claude"))
+        self.assertNotIn("reasoning_effort", self.requests[-1][1])
         self.assertEqual(llm.route_diagnostics()[0]["provider"], "gpt")
         self.assertEqual(llm.route_diagnostics()[0]["phase"], "chat")
 
@@ -365,12 +396,16 @@ class Authorization(Isolated):
             saved = json.loads(path.read_text())
             self.assertEqual(saved["gpt"], cfg["gpt"])
             self.assertEqual(saved["claude"], cfg["claude"])
+            self.assertEqual(saved["grok"], cfg["grok"])
             self.assertEqual(client.get("/api/llm").json["tool_route"]["model"], "literal-custom-name")
             self.assertEqual(client.post("/api/llm/config", json={"provider": ""}).status_code, 400)
             self.assertEqual(client.post("/api/llm/config", json={"tools_provider": "unknown"}).status_code, 400)
             self.assertEqual(client.post("/api/llm/config", json={"tools_model": {"api_key": "bad"}}).status_code, 400)
+            self.assertEqual(client.post("/api/llm/config", json={"provider": "grok"}).status_code, 200)
+            self.assertEqual(json.loads(path.read_text())["provider"], "grok")
             client.post("/api/llm/config", json={"tools_provider": "", "tools_model": ""})
-            self.assertEqual(client.get("/api/llm").json["tool_route"]["model"], "configured-gpt-name")
+            self.assertEqual(client.get("/api/llm").json["tool_route"]["provider"], "grok")
+            self.assertEqual(client.get("/api/llm").json["tool_route"]["model"], "configured-grok-name")
 
 
 if __name__ == "__main__":

@@ -8,6 +8,10 @@ mkdir -p "$STATE_DIR" "$RUNTIME_DIR" "$HOME/Desktop" /app/accounts /app/work
 chmod 700 "$RUNTIME_DIR"
 export XDG_RUNTIME_DIR="$RUNTIME_DIR"
 
+# 关容器后 /tmp/.X0-lock 常会留下，Xvfb 再起会 Fatal 并让整个容器退出。
+disp="${DISPLAY#:}"
+rm -f "/tmp/.X${disp}-lock" "/tmp/.X11-unix/X${disp}"
+
 # -dpi 96 让虚拟屏幕汇报常见桌面 DPI(96),避免默认 75 这种"服务器/无头"特征值。
 Xvfb "$DISPLAY" -screen 0 "$SCREEN" -dpi 96 -ac +extension GLX +render -noreset \
   >"$STATE_DIR/xvfb.log" 2>&1 &

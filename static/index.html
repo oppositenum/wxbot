@@ -493,12 +493,12 @@ async function renderAI(){
     <div class="sub">${escape_(profs.error||kb.error||'')}</div>
     ` : ""}
     ${llm.contact_personalization ? '<p><button onclick="openPersonalization()">联系人画像与专属人设</button></p>' : ''}
-    <h3>AI 设置 <span class="sub" style="font-weight:normal">Claude / GPT 两套独立中转</span></h3>
-    <div class="sub" style="margin-bottom:6px">状态：${llm.configured?'已配置 ✅':'未配置'} · Claude ${llm.claude&&llm.claude.has_key?'🔑':'—'} · GPT ${llm.gpt&&llm.gpt.has_key?'🔑':'—'}</div>
+    <h3>AI 设置 <span class="sub" style="font-weight:normal">Claude / GPT / Grok 三套独立中转</span></h3>
+    <div class="sub" style="margin-bottom:6px">状态：${llm.configured?'已配置 ✅':'未配置'} · Claude ${llm.claude&&llm.claude.has_key?'🔑':'—'} · GPT ${llm.gpt&&llm.gpt.has_key?'🔑':'—'} · Grok ${llm.grok&&llm.grok.has_key?'🔑':'—'}</div>
     <label class="sub">${llm.tool_route ? "主用（聊天及未独立配置的工具/视觉）" : "主用聊天 provider"}</label>
-    <select id="llmProv" style="width:100%;padding:5px;margin:2px 0 6px"><option value="claude">Claude</option><option value="gpt">GPT</option></select>
+    <select id="llmProv" style="width:100%;padding:5px;margin:2px 0 6px"><option value="claude">Claude</option><option value="gpt">GPT</option><option value="grok">Grok</option></select>
     <label class="sub">视觉用(留空=跟随主用)</label>
-    <select id="llmVis" style="width:100%;padding:5px;margin:2px 0 8px"><option value="">跟随主用</option><option value="claude">Claude</option><option value="gpt">GPT</option></select>
+    <select id="llmVis" style="width:100%;padding:5px;margin:2px 0 8px"><option value="">跟随主用</option><option value="claude">Claude</option><option value="gpt">GPT</option><option value="grok">Grok</option></select>
     <div style="background:#f7f8fa;border-radius:6px;padding:8px;margin-bottom:6px">
       <b style="font-size:13px">Claude 中转</b>
       <input id="cBase" placeholder="Base URL" style="width:100%;margin:4px 0;padding:5px" value="${(llm.claude&&llm.claude.base_url)||''}">
@@ -511,15 +511,21 @@ async function renderAI(){
       <input id="gKey" placeholder="GPT API key(留空=不改)" style="width:100%;margin-bottom:4px;padding:5px">
       <input id="gModel" placeholder="模型 如 gpt-6-astra" style="width:100%;padding:5px" value="${(llm.gpt&&llm.gpt.model)||''}">
     </div>
+    <div style="background:#f7f8fa;border-radius:6px;padding:8px;margin-bottom:6px">
+      <b style="font-size:13px">Grok 中转</b>
+      <input id="kBase" placeholder="Base URL 如 https://api.x.ai/v1" style="width:100%;margin:4px 0;padding:5px" value="${(llm.grok&&llm.grok.base_url)||''}">
+      <input id="kKey" placeholder="Grok API key(留空=不改，也可用 XAI_API_KEY)" style="width:100%;margin-bottom:4px;padding:5px">
+      <input id="kModel" placeholder="模型 如 grok-4.5" style="width:100%;padding:5px" value="${(llm.grok&&llm.grok.model)||''}">
+    </div>
     ${llm.tool_route ? `
     <div class="sub">工具调用：未独立指定时跟随主用，整轮及最终回复使用同一路由。</div>
-    <select id="llmToolsProv" style="width:100%;padding:5px;margin:2px 0 6px"><option value="">跟随主用 provider</option><option value="claude">Claude</option><option value="gpt">GPT</option></select>
+    <select id="llmToolsProv" style="width:100%;padding:5px;margin:2px 0 6px"><option value="">跟随主用 provider</option><option value="claude">Claude</option><option value="gpt">GPT</option><option value="grok">Grok</option></select>
     <input id="llmToolsModel" placeholder="独立工具模型（留空使用该 provider 的模型）" style="width:100%;margin-bottom:6px;padding:5px" value="${escape_(llm.tools_model||'')}">
     <div class="sub">实际请求路由：${escape_(llm.tool_route?.provider||llm.provider)} / ${escape_(llm.tool_route?.model||'')}；这是请求字段，不代表中转底层模型认证。</div>
     ` : ""}
     <input id="llmProxy" placeholder="代理(可选,留空=不走代理)" style="width:100%;margin-bottom:6px;padding:5px" value="${llm.proxy||''}">
     <button id="llmSave" class="primary">保存 AI 配置</button>
-    <button id="llmTest">测试两套</button>
+    <button id="llmTest">测试三套</button>
     <div id="llmTestMsg" class="sub" style="margin-top:4px"></div>
     <hr style="margin:12px 0;border:none;border-top:1px solid #eee">
     <h3>Agent 模式 <span class="sub" style="font-weight:normal">(机器人可联网/查历史/查画像/查知识库后再答)</span></h3>
@@ -599,8 +605,8 @@ async function renderAI(){
   });
   document.querySelectorAll(".pDel").forEach(b=>b.onclick=async()=>{
     if(!confirm("删除人设 "+b.dataset.s+"?")) return;
-    await fetch("/api/personas/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({slug:b.dataset.s})});
-    toast("已删除"); renderAI();
+    const r=await(await fetch("/api/personas/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({slug:b.dataset.s})})).json();
+    toast(r.ok?"人设已删除，画像中的失效绑定已清除":(r.error||"删除失败")); renderAI();
   });
   if(llm.provider) $("#llmProv").value=llm.provider;
   if($("#llmToolsProv")) $("#llmToolsProv").value=llm.tools_provider||"";
@@ -625,14 +631,23 @@ async function renderAI(){
     const body={provider:$("#llmProv").value, vision_provider:$("#llmVis").value,
       ...(llm.tool_route ? {tools_provider:$("#llmToolsProv").value, tools_model:$("#llmToolsModel").value.trim()} : {}), proxy:$("#llmProxy").value.trim(),
       claude:{base_url:$("#cBase").value.trim(), model:$("#cModel").value.trim(), api_key:$("#cKey").value.trim()},
-      gpt:{base_url:$("#gBase").value.trim(), model:$("#gModel").value.trim(), api_key:$("#gKey").value.trim()}};
+      gpt:{base_url:$("#gBase").value.trim(), model:$("#gModel").value.trim(), api_key:$("#gKey").value.trim()},
+      grok:{base_url:$("#kBase").value.trim(), model:$("#kModel").value.trim(), api_key:$("#kKey").value.trim()}};
     const r=await(await fetch("/api/llm/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
     toast(r.configured?"AI 已配置 ✅":"已保存"); renderAI();
   };
   $("#llmTest").onclick=async()=>{
-    $("#llmTestMsg").textContent="测试中…";
-    const r=await(await fetch("/api/llm/test",{method:"POST"})).json();
-    $("#llmTestMsg").innerHTML="Claude: "+(r.claude||'?')+"<br>GPT: "+(r.gpt||'?')+"<br>视觉: "+(r.vision||'?');
+    const msg=$("#llmTestMsg"), btn=$("#llmTest");
+    msg.textContent="测试中（每套限时，请稍候）…";
+    btn.disabled=true;
+    const ac=new AbortController();
+    const timer=setTimeout(()=>ac.abort(), 45000);
+    try{
+      const r=await(await fetch("/api/llm/test",{method:"POST",signal:ac.signal})).json();
+      msg.innerHTML="Claude: "+(r.claude||'?')+"<br>GPT: "+(r.gpt||'?')+"<br>Grok: "+(r.grok||'?')+"<br>视觉: "+(r.vision||'?');
+    }catch(e){
+      msg.textContent=(e&&e.name==="AbortError")?"测试超时。聊天接口可能仍可用；Grok 推理较慢，可把视觉改到 GPT 后再测。":("测试失败："+(e.message||e));
+    }finally{ clearTimeout(timer); btn.disabled=false; }
   };
   $("#distPrivBtn").onclick=async()=>{
     const sel=$("#distPriv"); const uname=sel.value; if(!uname){ toast("没有可蒸馏的私聊"); return; }

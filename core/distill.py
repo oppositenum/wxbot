@@ -370,11 +370,21 @@ def import_persona(name, persona, samples=None, slug=None):
 
 
 def delete_persona(slug):
-    p = os.path.join(config.personas_dir(), slug + ".json")
-    if os.path.exists(p):
-        os.remove(p)
-        return True
-    return False
+    """Remove the persona file and drop account-local role bindings to it."""
+    from core import account_session as sessions, personalization as p
+    if not slug or "/" in slug or "\\" in slug or slug in (".", ".."):
+        return {"ok": False, "released": {}}
+    path = os.path.join(config.personas_dir(), slug + ".json")
+    released = {}
+    try:
+        released = p.detach_persona(slug)
+    except sessions.StaleAccount:
+        released = {}
+    existed = os.path.exists(path)
+    if existed:
+        os.remove(path)
+    released = released or {}
+    return {"ok": bool(existed or any(released.values())), "released": released}
 
 
 def main():

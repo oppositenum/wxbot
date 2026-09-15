@@ -34,6 +34,7 @@ LABELS = {
     'reply_snapshot_unavailable': '消息快照暂不可核对，保留待处理记录',
     'recent_reply_duplicate': '与近期发言重复，跳过本次回复',
     'bot_stopped_before_send': '机器人已停止，取消待发回复',
+    'account_hourly_cap': '本小时自动发送已达上限，稍后继续',
 }
 
 

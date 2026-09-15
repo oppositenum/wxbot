@@ -42,7 +42,7 @@ CHAT = "wxid_friend01"
 NOW = time.mktime((2026, 9, 9, 14, 0, 0, 0, 0, -1))
 
 RULES = {"include_self": False, "watch": [CHAT], "poll_interval": 5,
-         "proactive": {"enabled": True},
+         "proactive": {"enabled": True, "private_share_enabled": True},
          "rules": [{"name": "style-reply", "match": {"type": "auto"},
                     "action": {"type": "reply_ai", "persona": "P"}}]}
 
@@ -67,6 +67,9 @@ bot._media_result = lambda c, m: bot.media_read.Result("success", "图片", "离
 bot.humanize.settle_factor = lambda: 1.0
 bot.humanize.typing_delay = lambda *a, **k: 0
 bot.humanize.night_drop = lambda *a, **k: False
+bot.humanize.send_ready = lambda *a, **k: True
+bot.humanize.wait_gap = lambda: 0.0
+bot.humanize.send_mark = lambda *a, **k: None
 decrypt.run = lambda force=False: None
 schedule.is_scheduled_msg = lambda m, chat=None: bool(
     m.get("is_self") and (m.get("content") or "").startswith("【定时提醒】"))

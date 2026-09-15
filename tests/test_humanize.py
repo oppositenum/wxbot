@@ -40,20 +40,17 @@ def test_night_factor_boundaries():
     assert humanize.night_factor(DAY) == 1.0
 
 
-def test_typing_delay_bounds():
-    d = humanize.DEFAULTS
-    # 短文本不低于 min
-    assert humanize.typing_delay("嗯", now=DAY) >= d["min"]
-    # 长文本被 cap 截住
-    long = "字" * 500
-    assert humanize.typing_delay(long, now=DAY) <= d["cap"]
-    # 空/None 也安全
-    assert d["min"] <= humanize.typing_delay("", now=DAY) <= d["cap"]
-    assert d["min"] <= humanize.typing_delay(None, now=DAY) <= d["cap"]
+def test_typing_delay_off_by_default():
+    assert humanize.typing_delay("嗯", now=DAY) == 0.0
+    assert humanize.typing_delay("字" * 500, now=NIGHT) == 0.0
+    humanize.configure({"humanize": {"min": 0.8, "cap": 15, "base": 0.6, "per_char": 0.15, "jitter": 0}})
+    assert humanize.typing_delay("嗯", now=DAY) >= 0.8
+    assert humanize.typing_delay("字" * 500, now=DAY) <= 15
 
 
 def test_typing_delay_night_longer():
-    # 关掉抖动后,深夜应严格更慢(同文本)
+    humanize.configure({"humanize": {"min": 0.5, "cap": 20, "base": 1, "per_char": 0.1,
+                                     "jitter": 0, "night_factor": 1.6}})
     with mock.patch("core.humanize.random.uniform", return_value=1.0):
         text = "一段中等长度的测试文本用来对比昼夜"
         assert humanize.typing_delay(text, now=NIGHT) > humanize.typing_delay(text, now=DAY)
@@ -68,36 +65,55 @@ def test_settle_factor_range():
 
 def test_night_drop():
     assert humanize.night_drop("c", now=DAY) is False    # 白天恒不跳过
+    assert humanize.DEFAULTS["night_drop_prob"] == 0.0   # 陪聊默认不随机丢
+    with mock.patch("core.humanize.random.random", return_value=0.01):
+        assert humanize.night_drop("c", now=NIGHT) is False
+    humanize.configure({"humanize": {"night_drop_prob": 0.08}})
     with mock.patch("core.humanize.random.random", return_value=0.01):
         assert humanize.night_drop("c", now=NIGHT) is True    # < prob → 跳过
     with mock.patch("core.humanize.random.random", return_value=0.99):
         assert humanize.night_drop("c", now=NIGHT) is False   # >= prob → 不跳过
 
 
-def test_battle_ready_min_gap():
+def test_account_send_gap_and_hourly_cap_off_by_default():
+    assert humanize.send_ready(now=DAY) is True
+    with mock.patch("core.humanize.time.sleep") as slept:
+        humanize.send_mark(now=DAY)
+        assert humanize.wait_gap() == 0.0
+        slept.assert_not_called()
+    humanize.configure({"humanize": {"hourly_cap": 4, "min_send_gap": 8}})
+    with mock.patch("core.humanize.time.sleep") as slept:
+        humanize.send_mark(now=DAY)
+        humanize.wait_gap()
+        slept.assert_called_once()
+    for i in range(4):
+        humanize.send_mark(now=DAY)
+    assert humanize.send_ready(now=DAY) is False
+    assert humanize.send_ready(now=DAY + 3601) is True
+
+
+def test_battle_ready_unlimited_by_default():
     chat = "g@chatroom"
-    assert humanize.battle_ready(chat) is True    # 首次总允许
+    assert humanize.battle_ready(chat) is True
     humanize.battle_mark(chat)
-    # 刚回击完,最小间隔内不允许(patch monotonic 让时间几乎不动)
+    with mock.patch("core.humanize.time.monotonic", return_value=time.monotonic()):
+        assert humanize.battle_ready(chat) is True
+    humanize.configure({"humanize": {"battle_gap_min": 15, "battle_gap_max": 40, "battle_hourly_cap": 40}})
+    humanize.battle_mark(chat)
     with mock.patch("core.humanize.time.monotonic", return_value=time.monotonic()):
         assert humanize.battle_ready(chat) is False
-    # 快进超过最大间隔 → 允许
-    future = time.monotonic() + humanize.DEFAULTS["battle_gap_max"] + 5
-    with mock.patch("core.humanize.time.monotonic", return_value=future):
-        assert humanize.battle_ready(chat) is True
 
 
 def test_battle_hourly_cap_backoff():
     chat = "g2@chatroom"
-    cap = humanize.DEFAULTS["battle_hourly_cap"]
+    humanize.configure({"humanize": {"battle_gap_min": 15, "battle_gap_max": 40, "battle_hourly_cap": 40}})
+    cap = 40
     base_mono = 1000.0
-    # 塞满小时上限的回击(都在同一秒,间隔用 monotonic 控制)
     for i in range(cap):
         with mock.patch("core.humanize.time.monotonic", return_value=base_mono + i * 100):
             humanize.battle_mark(chat, now=DAY + i)
-    # 距上次 gap_max 秒:未超上限本应允许,但超上限后需 3×gap 退避 → 仍不允许
     last_mono = base_mono + (cap - 1) * 100
-    probe = last_mono + humanize.DEFAULTS["battle_gap_max"] + 2
+    probe = last_mono + 42
     with mock.patch("core.humanize.time.monotonic", return_value=probe):
         assert humanize.battle_ready(chat, now=DAY) is False
 
@@ -107,7 +123,7 @@ def test_configure_override():
     assert humanize._cfg["per_char"] == 1.0
     assert humanize._cfg["cap"] == 99
     # 未覆盖项沿用默认
-    assert humanize._cfg["base"] == humanize.DEFAULTS["base"]
+    assert humanize._cfg["base"] == 0.0
     # 非法/未知键忽略
     humanize.configure({"humanize": {"bogus": 5, "per_char": "x"}})
     assert humanize._cfg["per_char"] == humanize.DEFAULTS["per_char"]

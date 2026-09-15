@@ -32,7 +32,7 @@ class Isolated(unittest.TestCase):
         self.account = 'account-A'
         self.roles = {'P': {'name': '角色 P', 'persona': 'ROLE_P', 'samples': []},
                       'Q': {'name': '角色 Q', 'persona': 'ROLE_Q', 'samples': []}}
-        self.rules = {'watch': ['friend-A'], 'proactive': {'enabled': True},
+        self.rules = {'watch': ['friend-A'], 'proactive': {'enabled': True, 'private_share_enabled': True},
                       'rules': [{'name': 'old', 'match': {'type': 'auto'},
                                  'action': {'type': 'reply_ai', 'persona': 'P'}}]}
         for target, value in [('config.ACCOUNTS_DIR', self.tmp.name+'/accounts'), ('config.WORK_DIR', self.tmp.name+'/work'),
@@ -91,6 +91,37 @@ class Personas(Isolated):
         self.change('friend-A', persona_id='P')
         self.account = 'account-A';sessions.observe()
         self.assertEqual(self.role()['persona_id'], 'Q')
+
+    def test_delete_persona_releases_bindings_and_unblocks_new_choice(self):
+        from core import distill, bot, schedule
+        p.set_global('P', 0, self.rules)
+        self.change('friend-A', persona_id='Q')
+        rules = copy.deepcopy(self.rules)
+        rules['rules'][0]['action']['persona'] = 'Q'
+        Path(bot.rules_file()).parent.mkdir(parents=True, exist_ok=True)
+        Path(bot.rules_file()).write_text(json.dumps(rules), encoding='utf-8')
+        persona_dir = Path(config.personas_dir()); persona_dir.mkdir(parents=True, exist_ok=True)
+        (persona_dir / 'Q.json').write_text(json.dumps({'slug':'Q','name':'角色 Q','persona':'ROLE_Q'}), encoding='utf-8')
+        schedule.save_tasks([{'id': 1, 'persona': 'Q', 'title': 't'}])
+        out = distill.delete_persona('Q')
+        self.assertTrue(out['ok'])
+        self.assertEqual(out['released']['contacts'], 1)
+        self.assertFalse(out['released']['global_'])
+        self.assertEqual(p.get('friend-A')['persona_id'], None)
+        self.assertEqual(self.role()['persona_id'], 'P')
+        self.assertEqual(json.loads(Path(bot.rules_file()).read_text(encoding='utf-8'))['rules'][0]['action']['persona'], '')
+        self.assertIsNone(schedule.load_tasks()[0]['persona'])
+        self.change('friend-A', persona_id='P')
+        self.assertEqual(self.role()['persona_id'], 'P')
+        self.assertFalse((persona_dir / 'Q.json').exists())
+
+    def test_missing_legacy_unique_does_not_block_global_choice(self):
+        self.rules['rules'][0]['action']['persona'] = 'Q'
+        del self.roles['Q']
+        p.set_global('P', 0, self.rules)
+        self.assertEqual(p.get('__global__')['persona_id'], 'P')
+        with self.assertRaises(ValueError):
+            self.change('friend-A', persona_id='Q')
 
     def test_deleted_corrupt_and_no_global_fallback(self):
         self.change('friend-A', persona_id='Q')
@@ -366,7 +397,20 @@ class Entries(Isolated):
         system,user=captured[0]
         self.assertNotIn('ROLE_P',system);self.assertIn('旧机器人回复只供理解',system)
         self.assertNotIn('回复长度：简短',system);self.assertNotIn('回 1~2 句',user[0]['content'])
-        self.assertIn('请详细说明每一步',user[0]['content'])
+
+    def test_immersive_persona_is_executed_not_reduced_to_tone_filter(self):
+        captured=[]
+        with patch('core.llm.chat',side_effect=lambda s,m:captured.append(s) or 'mock'), \
+                patch('core.bot._sender_name',return_value='对方'),patch('core.memory.select_memories',return_value=[]), \
+                patch('core.agent.agent_config',return_value={'enabled':False}):
+            bot._ai_reply({'name':'成人3','persona':'按对方要的尺度说话，把气氛做起来。'},
+                          'friend-A',msg(text='太素了，你不会荤话'),[],self.rules)
+        system=captured[0]
+        self.assertIn('角色执行·最高优先',system)
+        self.assertNotIn('只决定你【说话的语气/风格】',system)
+        self.assertNotIn('闲聊寒暄就简短口语几句,别凑长',system)
+        self.assertIn('按对方要的尺度说话',system)
+        self.assertLess(system.index('【通用要求】'),system.index('【本轮机器人角色】'))
 
 
 class Voice(Isolated):

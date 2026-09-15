@@ -29,6 +29,15 @@ class Legacy(Isolated):
             return con
         return patch('core.db.connect', side_effect=connect)
 
+    def test_legacy_script_opens_search_hit_without_enter_in_composer(self):
+        src = Path('docker/wx_send_legacy.py').read_text(encoding='utf-8')
+        open_fn = src[src.index('def open_chat'):src.index('def focus_input')]
+        send_fn = src[src.index('def send_text'):src.index('def send_image')]
+        self.assertIn('py + 108', open_fn)
+        self.assertNotIn('key("Return")', open_fn)
+        self.assertIn('clear_input()', send_fn)
+        self.assertNotIn('key("Escape")', send_fn)
+
     def test_same_remark_contacts_use_their_distinct_wechat_ids(self):
         with self.contacts([('chat-A', 'unique_a', 'same name', 'A'),
                             ('chat-B', 'unique_b', 'same name', 'B')]):

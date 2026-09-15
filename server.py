@@ -557,15 +557,15 @@ def api_llm_status():
                     "contact_personalization": True,
                     "route_diagnostics": llm.route_diagnostics(),
                     "proxy": cfg.get("proxy", ""),
-                    "claude": one("claude"), "gpt": one("gpt")})
+                    "claude": one("claude"), "gpt": one("gpt"), "grok": one("grok")})
 
 
 @app.post("/api/llm/test")
 def api_llm_test():
-    """分别实测 Claude / GPT 两套中转 + 视觉是否可用。"""
+    """分别实测 Claude / GPT / Grok 三套中转 + 视觉是否可用。"""
     cfg = llm.load_cfg()
     out = {}
-    for p in ("claude", "gpt"):
+    for p in llm.PROVIDERS:
         base, key, model = llm.creds(cfg, p)
         if not key:
             out[p] = "未配置"
@@ -573,11 +573,16 @@ def api_llm_test():
         try:
             c = dict(cfg)
             c["provider"] = p
+            c["probe"] = True
+            c["single_attempt"] = True
+            c["max_tokens"] = 32
+            if p == "grok":
+                c["grok_reasoning_effort"] = "low"
             r = llm.chat("只回OK两个字", [{"role": "user", "content": "OK"}], c)
             out[p] = f"✅ 通 ({model})" if r else "⚠️ 空响应"
         except Exception as e:  # noqa: BLE001
             out[p] = "❌ " + str(e)[:80]
-    # 视觉(按 vision_provider 或主 provider)
+    # 视觉(按 vision_provider 或主 provider)；短超时，避免拖死整页「测试中」
     try:
         import io as _io
         vp = cfg.get("vision_provider") or cfg.get("provider", "claude")
@@ -589,8 +594,12 @@ def api_llm_test():
         except Exception:  # noqa: BLE001
             data = None
         if data:
-            d = llm.describe_image(data, media_type="image/png", prompt="一句话这是什么颜色", cfg=cfg)
-            out["vision"] = (f"✅ 通 ({vp})" if d else "❌ 无响应")
+            c = dict(cfg)
+            c["probe"] = True
+            if vp == "grok":
+                c["grok_reasoning_effort"] = "low"
+            d = llm.describe_image(data, media_type="image/png", prompt="一句话这是什么颜色", cfg=c)
+            out["vision"] = (f"✅ 通 ({vp})" if d else "❌ 无响应或超时")
         else:
             out["vision"] = "跳过(无PIL)"
     except Exception as e:  # noqa: BLE001
@@ -603,7 +612,7 @@ def api_llm_config():
     body = request.get_json(force=True, silent=True) or {}
     cfg = llm.load_cfg()
     for k in ("provider", "vision_provider", "tools_provider"):
-        choices = ("claude", "gpt") if k == "provider" else ("", "claude", "gpt")
+        choices = llm.PROVIDERS if k == "provider" else ("",) + llm.PROVIDERS
         if k in body and body[k] not in choices:
             return jsonify({"error": "不支持的 provider"}), 400
     if "tools_model" in body and not isinstance(body["tools_model"], str):
@@ -614,8 +623,8 @@ def api_llm_config():
     for k in ("provider", "vision_provider", "proxy", "max_tokens", "temperature"):
         if k in body:
             cfg[k] = body[k]
-    # 两套独立中转：claude / gpt 各存 base_url/api_key/model；key 留空则不覆盖旧值
-    for p in ("claude", "gpt"):
+    # 独立中转：claude / gpt / grok 各存 base_url/api_key/model；key 留空则不覆盖旧值
+    for p in llm.PROVIDERS:
         sub = body.get(p)
         if isinstance(sub, dict):
             cur = cfg.get(p) if isinstance(cfg.get(p), dict) else {}
@@ -661,7 +670,8 @@ def api_persona_import():
 @app.post("/api/personas/delete")
 def api_persona_delete():
     slug = (request.get_json(force=True, silent=True) or {}).get("slug", "")
-    return jsonify({"ok": distill.delete_persona(slug)})
+    result = distill.delete_persona(slug)
+    return jsonify(result if isinstance(result, dict) else {"ok": bool(result)})
 
 
 @app.post("/api/personas/<slug>/correct")

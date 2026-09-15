@@ -123,7 +123,7 @@ class Integration(Isolated):
         turns=[{'role':'user','content':'synthetic question'},
                {'role':'assistant','content':'synthetic prior answer'},
                {'role':'user','content':'synthetic new question'}]
-        for provider in ['claude','gpt']:
+        for provider in ['claude','gpt','grok']:
             cfg={'provider':provider,provider:{'api_key':'TEST_ONLY','base_url':'https://example.invalid','model':'test-model'}}
             response=({'content':[{'type':'text','text':'result'}]} if provider=='claude'
                       else {'choices':[{'message':{'content':'result'}}]})

@@ -108,7 +108,7 @@ class Analysis(DraftBase):
         self.assertEqual(p.get('friend-A')['preferences']['length']['source'],'user_explicit')
 
     def test_actual_http_cap_equals_saved_reservation_for_both_adapters(self):
-        for provider in ('gpt','claude'):
+        for provider in ('gpt','claude','grok'):
             self.cfg.update(provider=provider)
             self.cfg[provider]=dict(base_url='https://synthetic.invalid',api_key='synthetic',model='unchanged-model')
             state=self.preview();jid=state['job']['id'];requests=[]
@@ -278,7 +278,7 @@ class Analysis(DraftBase):
             calls.append((body,kwargs));return {'choices':[{'message':{'content':'{"items":[]}'}}]}
         with patch('core.llm._post',side_effect=post):
             self.assertEqual(real_chat('synthetic',[{'role':'user','content':'synthetic'}],dict(self.cfg,single_attempt=True)),'{"items":[]}')
-        self.assertEqual(len(calls),1);self.assertEqual(calls[0][1],{'retries':0})
+        self.assertEqual(len(calls),1);self.assertEqual(calls[0][1].get('retries'),0)
         self.assertEqual(calls[0][0]['model'],'configured-name')
 
     def test_model_route_change_requires_new_preview(self):

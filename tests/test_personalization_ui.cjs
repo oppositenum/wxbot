@@ -33,6 +33,10 @@ vm.createContext(context);vm.runInContext(html.match(/<script>([\s\S]*?)<\/scrip
   assert.equal(calls.length,2);assert(!calls.some(c=>c.url.includes('history')));
   ids['#contacts'].value='friend-A';await ids['#contacts'].onchange();
   assert.equal(ids['#prefs'].children.length,2);assert(ids['#effective'].textContent.includes('待显式迁移'));
+  assert.equal(ids['#personaMissing'].hidden,true);
+  settings={...settings,persona_id:'GONE'};ids['#contacts'].value='friend-A';await ids['#contacts'].onchange();
+  assert.equal(ids['#persona'].value,'');assert.equal(ids['#personaMissing'].hidden,false);
+  assert(!ids['#persona'].children.some(o=>String(o.textContent).includes('失效引用')));
   ids['#persona'].value='P';await ids['#saveSettings'].onclick();
   assert.equal(revision,1);assert.equal(settings.persona_id,'P');
   ids['#query'].value='请详细说';await ids['#preview'].onclick();assert(ids['#previewResult'].textContent.includes('redacted'));

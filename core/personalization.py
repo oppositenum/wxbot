@@ -25,10 +25,11 @@ FIELDS = {
     'address': None, 'language': None, 'dislikes': None,
 }
 LABELS = dict(zip(FIELDS, ['回复长度', '表达方式', '表情符号', '玩笑', '建议方式', '追问', '称呼', '语言', '反感表达']))
-BEHAVIOR = ('【通用要求】真实、切题，不能编造共同经历或角色经历作为现实事实。'
-            '当前明确请求决定本轮任务和长度，优先于交流偏好。角色决定机器人是谁，偏好仅辅助表达。'
+BEHAVIOR = ('【通用要求】真实、切题。不要把角色经历说成这个微信账号的现实履历，也不要编造对方的现实身份、工作、家庭或共同经历；'
+            '当前角色允许的扮演、调情、亲密称呼、主动推进和虚构场景，按角色正文执行，不要用客服腔改写成礼貌助手。'
+            '当前明确请求决定本轮任务；交流偏好只辅助表达，不能盖过角色正文。'
             '旧机器人回复只供理解对话，不是当前角色指令。事实记忆不因角色切换失效。'
-            '不主动翻旧事、不报告画像标签、不强制追问、安慰或昵称。对方结束交流时尊重其意愿。')
+            '不报告画像标签。对方明确结束或喊停时尊重其意愿。')
 DEFAULT_PERSONA = {'name': '内置助手', 'persona': '你是一个友善、诚实、尊重边界的聊天助手。', 'samples': []}
 
 
@@ -224,6 +225,8 @@ def update(contact, patch, revision):
                 v = patch[key]
                 if key == 'persona_id':
                     _slug(v)
+                    if v and not _persona_exists(v):
+                        raise ValueError('所选人设不存在')
                 elif not isinstance(v, bool):
                     raise ValueError('开关必须是布尔值')
                 data[key] = v
@@ -301,17 +304,95 @@ def resolve_persona(contact, rules=None, rule=None):
                 legacy=inv, managed=bool(global_['revision']))
 
 
+def _persona_exists(slug):
+    if not slug:
+        return False
+    try:
+        p = distill.load_persona(slug)
+        return isinstance(p, dict) and isinstance(p.get('persona'), str) and bool(p['persona'].strip())
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+@sessions.task
+def detach_persona(slug):
+    """Drop bindings to a deleted persona. Does not restore another role.
+
+    Contact/global/template records become inherit/unset; reply rules and
+    schedule tasks lose the explicit slug. Reply then uses remaining global,
+    leftover rules, or the built-in assistant — never a missing file.
+    """
+    slug = _slug(slug)
+    if not slug:
+        return dict(contacts=0, global_=False, template=False, rules=0, schedules=0)
+    released = dict(contacts=0, global_=False, template=False, rules=0, schedules=0)
+    if os.path.exists(_path()):
+        with _db(True) as con:
+            rows = con.execute('SELECT contact,revision,data FROM settings').fetchall()
+            for row in rows:
+                contact = row['contact']
+                try:
+                    stored = json.loads(row['data'])
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(stored, dict) or stored.get('persona_id') != slug:
+                    continue
+                data = _get(con, contact)
+                if data.get('config_error'):
+                    continue
+                data['persona_id'] = None
+                _put(con, contact, data, 'persona_deleted')
+                if contact == '__global__':
+                    released['global_'] = True
+                elif contact == '__default_template__':
+                    released['template'] = True
+                else:
+                    released['contacts'] += 1
+    from core import bot
+    rules_path = bot.rules_file()
+    if os.path.exists(rules_path):
+        with open(rules_path, encoding='utf-8') as fp:
+            rules = json.load(fp)
+        changed = 0
+        for rule in rules.get('rules') or []:
+            action = rule.get('action') if isinstance(rule, dict) else None
+            if isinstance(action, dict) and action.get('type') == 'reply_ai' and action.get('persona') == slug:
+                action['persona'] = ''
+                changed += 1
+        if changed:
+            with open(rules_path, 'w', encoding='utf-8') as fp:
+                json.dump(rules, fp, ensure_ascii=False, indent=2)
+            released['rules'] = changed
+    from core import schedule
+    try:
+        tasks = schedule.load_tasks()
+    except Exception:
+        tasks = []
+    sched = 0
+    for task in tasks:
+        if isinstance(task, dict) and task.get('persona') == slug:
+            task['persona'] = None
+            sched += 1
+    if sched:
+        schedule.save_tasks(tasks)
+        released['schedules'] = sched
+    return released
+
+
 @sessions.task
 def set_global(slug, revision, rules):
     """Explicit, auditable migration. Conflicts require manual rule reconciliation."""
     _slug(slug)
+    if slug and not _persona_exists(slug):
+        raise ValueError('所选人设不存在')
     inv = legacy_inventory(rules)
     current = get('__global__')
     if current.get('config_error'):
         raise Conflict('全局存储损坏，需要恢复备份，不能自动迁移')
     if not current['revision'] and inv['conflict']:
         raise Conflict('旧规则人设冲突，请先逐项核对；不能自动迁移')
-    if not current['revision'] and inv['unique'] and slug != inv['unique']:
+    if (not current['revision'] and inv['unique'] and slug != inv['unique']
+            and _persona_exists(inv['unique'])):
         raise Conflict('首次迁移必须保留当前唯一规则人设；完成迁移后可更改全局')
     with _db(True) as con:
         data = _get(con, '__global__')

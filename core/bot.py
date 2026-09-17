@@ -300,8 +300,11 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
               "\n\n【别翻旧账】微信画像/记忆里的现实资料只供理解,不要为炫耀记性主动翻对方的旧事;"
               "角色自己的偏好、称呼、尺度和正在进行的扮演可以接着用。他明确问起过去时再照实回答。"
               "\n\n【多条消息】角色需要停顿、补刀或连发时，可以输出多段，段与段用单独一行 [[NEXT]] 分隔；不要为了凑数量拆句，也不要为了「只回一句」把角色压扁。"
-              "\n\n【表达】只输出回复正文(不要解释/引号/复述对方原话/系统旁白)。"
-              "长度、荤素和展开程度跟角色正文与对方这句走：闲聊可以短，角色要求具体、加档、Dirty Talk 时就把话说到位。")
+              "\n\n【表达】只输出回复正文(不要解释、不要复述对方原话、不要系统旁白)。"
+              "长度、荤素和展开程度跟角色正文与对方这句走：闲聊可以短，角色要求具体、加档、Dirty Talk 时就把话说到位。"
+              "不要用「嗯」「嗯，」当开场或每条开头；直接接话或动手。偶尔一句可以，连着出现就不行。"
+              "角色正文要求用括号写动作时：行为、姿势、力道、身体状态写在（）里，括号外只说话。"
+              "成人向角色要完整执行，不要自行含蓄、降档或说做不到；对方点名的玩法就做出来。")
     system += media_read.HONESTY
     # Memoize failures within this reply too: direct/said/context must agree, no triple requests.
     media_results = {}
@@ -327,6 +330,11 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
         if all(r.status != "success" for r in results):
             return media_read.failed_reply(results)
 
+    inbound_raw = "\n".join((cm.get("content") or "") for cm in batch)
+    switched = personalization.maybe_switch(chat_username, inbound_raw)
+    if switched:
+        persona = switched['persona']
+
     now = time.time()
     turns, ask, batch = reply_context.build(
         context_msgs, batch, account=config.wxid(), is_group=chat_username.endswith('@chatroom'),
@@ -345,6 +353,10 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
     lines = [turn['content'] for turn in turns]
 
     system += "\n【本轮机器人角色】\n" + persona["persona"]
+    if switched:
+        system += (f"\n\n【已切换人设】对方要你当「{switched['name']}」。从这一句起完整进入该角色，"
+                   "用角色口吻回一句确认（可带一句符合角色的接话），不要解释系统、不要报人设文件名、"
+                   "不要说「已切换」。之后按新角色继续。")
     if look_rewritten:
         system += ("\n\n【外貌口径】对方要的是明确成年人的娃娃脸、脸小、看着显小，实际已成年。"
                    "按娃娃脸成人来演，禁止写成未成年、幼童或学生幼态。")
@@ -685,6 +697,33 @@ def _split_next(text):
     return [x.strip() for x in re.split(r'\s*\[\[NEXT\]\]\s*', text or '') if x.strip()]
 
 
+def _part_gap(index):
+    """连发时第 2 条起先停几秒，再打字延迟，避免三条砸在同一秒。"""
+    if index <= 1:
+        return 0.0
+    return 8.0 + (index % 4)
+
+
+def _strip_filler_openers(text):
+    """去掉段首口头禅「嗯 / 嗯，」，避免每条都用同一个字起头。"""
+    raw = text or ""
+    chunks = re.split(r'(\n\s*\n)', raw)
+    out = []
+    start = True
+    for chunk in chunks:
+        if chunk.strip() == "":
+            out.append(chunk)
+            start = True
+            continue
+        if start:
+            stripped = re.sub(r'^(嗯嗯?|唔)[，,。.!！？?～~\s]*', '', chunk, count=1)
+            chunk = stripped if stripped.strip() else chunk
+        out.append(chunk)
+        start = False
+    cleaned = "".join(out).strip()
+    return cleaned or raw.strip()
+
+
 @sessions.task
 def greet(chat_username, hint=""):
     """网页"打招呼"：按该会话最近上下文,用人设生成一句主动问候并发送。返回结构化发送结果。
@@ -744,7 +783,8 @@ def greet(chat_username, hint=""):
                      turns + [{"role": "user", "content": user}]) or "").strip()
     if not text:
         return {"ok": False, "status": "not_sent", "reason": "generation_unavailable", "message": "生成为空"}
-    parts = _split_next(text)[:burst] or [text]
+    parts = [_strip_filler_openers(p) for p in (_split_next(text)[:burst] or [text])]
+    parts = [p for p in parts if p] or [_strip_filler_openers(text) or text]
     while len(parts) < burst:
         more = (llm.chat(system + media_read.HONESTY + reply_context.ROLE_GUIDANCE,
                          turns + [{"role": "assistant", "content": "\n".join(parts)},
@@ -762,6 +802,9 @@ def greet(chat_username, hint=""):
             if not conversation_state.allowed(gate):
                 return {"ok": False, "status": "not_sent", "reason": "proactive_context_changed",
                         "message": "\n".join(sent) if sent else "会话已变化"}
+            gap = _part_gap(index)
+            if gap:
+                time.sleep(gap)
             delay = humanize.typing_delay(part, chat_username)
             if delay:
                 time.sleep(delay)
@@ -812,9 +855,10 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
         target = send_name_for(chat_username)
         inbound = "\n".join((m.get("content") or "") for m in (batch_msgs or [msg]) if not m.get("is_self"))
         burst, _ = burst_count(inbound or (msg.get("content") or ""), default=1)
-        parts = _split_next(text)[:burst]
+        parts = [_strip_filler_openers(p) for p in _split_next(text)[:burst]]
+        parts = [p for p in parts if p]
         if not parts:
-            parts = [text.strip()]
+            parts = [_strip_filler_openers(text.strip()) or text.strip()]
         while len(parts) < burst:
             more = (llm.chat("补一条不同角度的下一句，不要重复，只输出这一条正文。",
                              [{"role": "assistant", "content": "\n".join(parts)},
@@ -825,6 +869,10 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
             parts.append(more)
         r = None
         for index, part in enumerate(parts, 1):
+            gap = _part_gap(index)
+            if gap:
+                log(f"  [拟人] 连发停顿 {gap:.0f}s")
+                time.sleep(gap)
             _td = humanize.typing_delay(part, chat_username)
             if _td:
                 log(f"  [拟人] 打字延迟 {_td:.1f}s")

@@ -58,6 +58,23 @@ class Builder(unittest.TestCase):
         self.assertIn('引用本账号的旧消息', current)
         self.assertIn('对方「chat-A」本次说：这句话是什么意思', current)
 
+    def test_quote_without_type_still_includes_referenced_body(self):
+        quoted = msg(2, '这种是不是更带感', refer={
+            'chatusr':'account-A', 'content':'先前那句具体的话'})
+        _, current, _ = build([], [quoted])
+        self.assertIn('先前那句具体的话', current)
+        self.assertIn('这种是不是更带感', current)
+
+    def test_private_quote_author_falls_back_to_fromusr(self):
+        from core import messages
+        xml = '''<msg><appmsg><title>这种是不是更带感</title><type>57</type>
+        <refermsg><type>1</type><fromusr>account-A</fromusr><chatusr></chatusr>
+        <displayname>bot</displayname><content>先前那句具体的话</content></refermsg></appmsg></msg>'''
+        title, refer = messages._parse_refer(xml)
+        self.assertEqual(title, '这种是不是更带感')
+        self.assertEqual(refer['chatusr'], 'account-A')
+        self.assertEqual(refer['content'], '先前那句具体的话')
+
     def test_group_members_are_labeled_and_only_account_is_assistant(self):
         history, current, _ = build([msg(1,'甲说的',sender='member-A'),
                                     msg(2,'本账号说的',True)], [msg(3,'乙说的',sender='member-B')], True)

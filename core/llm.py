@@ -151,7 +151,14 @@ def _post(url, headers, body, proxy, timeout=60, retries=3):
                 # 网关抖动(502/503/504)或并发限流(429)重试；429 退避更久
                 time.sleep((3.0 if e.code == 429 else 1.5) * (attempt + 1))
                 continue
-            raise RuntimeError(f"模型接口 HTTP {e.code}；未切换 provider/model") from None
+            detail = ""
+            try:
+                detail = (e.read() or b"").decode("utf-8", "ignore")[:240]
+            except Exception:
+                detail = ""
+            raise RuntimeError(
+                f"模型接口 HTTP {e.code}；未切换 provider/model"
+                + (f"：{detail}" if detail else "")) from None
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             if attempt < retries:                         # 超时/连接抖动重试
                 time.sleep(1.5 * (attempt + 1))
@@ -411,47 +418,57 @@ def transcribe(audio_bytes, filename="voice.mp3", content_type="audio/mpeg", cfg
         return None
 
 
+IMAGE_FOLLOWS = ("", "gpt", "grok")
+IMAGE_QUALITIES = ("low", "standard", "medium", "auto")
+
+
+def image_block(cfg):
+    return cfg.get("image") if isinstance(cfg.get("image"), dict) else {}
+
+
+def image_follow(cfg):
+    follow = (image_block(cfg).get("follow") or "").strip()
+    return follow if follow in PROVIDERS else ""
+
+
+def image_quality(cfg):
+    sub = image_block(cfg)
+    quality = sub.get("quality") or cfg.get("image_quality") or "low"
+    return quality if isinstance(quality, str) and quality.strip() else "low"
+
+
 def image_creds(cfg):
     """取【画图专用】凭据 (base_url, api_key, model)。
 
-    优先用独立的画图中转 cfg['image'] = {base_url, api_key, model}(推荐：
-    画图往往要单独的能画图的 key/中转，别和聊天文本模型混)。
+    优先用独立的画图中转 cfg['image'] = {base_url, api_key, model, follow}。
+    follow=gpt/grok 时用该聊天中转的 URL/key，模型仍用 image.model。
     没配独立块时，退回 gpt 那套凭据 + cfg['image_model']（默认 gpt-image-1）。
     """
-    sub = cfg.get("image")
-    if isinstance(sub, dict) and (sub.get("api_key") or sub.get("base_url")):
+    sub = image_block(cfg)
+    follow = image_follow(cfg)
+    if follow:
+        base, key, _ = creds(cfg, follow)
+        default = "grok-imagine-image" if follow == "grok" else "gpt-image-1"
+        model = sub.get("model") or cfg.get("image_model") or default
+        return base, key, model
+    if sub.get("api_key") or sub.get("base_url"):
         base = (sub.get("base_url") or "").rstrip("/")
         key = sub.get("api_key") or ""
-        model = sub.get("model") or "gpt-image-1"
+        model = sub.get("model") or cfg.get("image_model") or "gpt-image-1"
         return base, key, model
     base, key, _ = creds(cfg, "gpt")
     model = cfg.get("image_model") or "gpt-image-1"
     return base, key, model
 
 
-def gen_image(prompt, size="1024x1024", cfg=None):
-    """文生图：调 OpenAI 兼容的 images/generations，返回图片 bytes(PNG/JPEG)。
-
-    凭据经 image_creds()：优先独立画图中转 cfg['image']，否则退回 gpt 那套 + image_model。
-    注意：中转可能【未给该 key 开通图像权限】(403 permission_error)——此时抛 RuntimeError，
-    由调用方(draw_image 工具)据此如实告诉对方"画不了/未开通"，绝不静默失败或假装画了。
-    """
-    import base64
-    cfg = cfg or load_cfg()
-    proxy = cfg.get("proxy") or None
+def image_info(cfg):
     base, key, model = image_creds(cfg)
-    if not key:
-        raise RuntimeError("未配置画图中转的 api_key（llm_config.json 的 image 块或 gpt 块）")
-    url = _endpoint(base or "https://api.openai.com/v1", "images/generations")
-    headers = {"content-type": "application/json",
-               "authorization": f"Bearer {key}", "user-agent": UA}
-    quality = "standard"
-    if isinstance(cfg.get("image"), dict):
-        quality = cfg["image"].get("quality") or quality
-    quality = cfg.get("image_quality") or quality
-    r = _post(url, headers, {"model": model, "prompt": prompt, "n": 1, "size": size,
-                             "quality": quality},
-              proxy, timeout=120)
+    return {"follow": image_follow(cfg), "base_url": base, "model": model,
+            "quality": image_quality(cfg), "has_key": bool(key)}
+
+
+def _image_bytes_from_response(r, proxy):
+    import base64
     d = (r.get("data") or [{}])[0]
     if d.get("b64_json"):
         return base64.b64decode(d["b64_json"])
@@ -460,6 +477,39 @@ def gen_image(prompt, size="1024x1024", cfg=None):
         with _opener(proxy).open(req, timeout=120) as resp:
             return resp.read()
     raise RuntimeError("图像生成返回为空")
+
+
+def gen_image(prompt, size="1024x1024", cfg=None, reference=None):
+    """文生图：调 OpenAI 兼容的 images/generations，返回图片 bytes(PNG/JPEG)。
+
+    凭据经 image_creds()：优先独立画图中转 cfg['image']，否则退回 gpt 那套 + image_model。
+    注意：中转可能【未给该 key 开通图像权限】(403 permission_error)——此时抛 RuntimeError，
+    由调用方(draw_image 工具)据此如实告诉对方"画不了/未开通"，绝不静默失败或假装画了。
+    有 reference（参考图 bytes）时先走 images/edits；中转不支持再退回文生图。
+    """
+    import base64
+    cfg = cfg or load_cfg()
+    proxy = cfg.get("proxy") or None
+    base, key, model = image_creds(cfg)
+    if not key:
+        raise RuntimeError("未配置画图中转的 api_key（llm_config.json 的 image 块或 gpt 块）")
+    headers = {"content-type": "application/json",
+               "authorization": f"Bearer {key}", "user-agent": UA}
+    quality = image_quality(cfg)
+    if reference:
+        url = _endpoint(base or "https://api.openai.com/v1", "images/edits")
+        body = {"model": model, "prompt": prompt, "n": 1, "size": size, "quality": quality,
+                "image": "data:image/jpeg;base64," + base64.b64encode(reference).decode()}
+        try:
+            r = _post(url, headers, body, proxy, timeout=120)
+            return _image_bytes_from_response(r, proxy)
+        except Exception:
+            pass
+    url = _endpoint(base or "https://api.openai.com/v1", "images/generations")
+    r = _post(url, headers, {"model": model, "prompt": prompt, "n": 1, "size": size,
+                             "quality": quality},
+              proxy, timeout=120)
+    return _image_bytes_from_response(r, proxy)
 
 
 def available():

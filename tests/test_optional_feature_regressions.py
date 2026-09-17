@@ -17,6 +17,7 @@ class Defaults(Isolated):
         data = p.get('friend-A')
         for field in ('personalization_enabled', 'auto_update', 'conversation_control_enabled'):
             self.assertIs(data[field], False)
+        self.assertIs(data['agent_enabled'], True)
         self.assertEqual(p.learn_live('friend-A', [msg()]), 0)
         self.assertFalse(cs.observe('friend-A', [msg(text='先这样，拜拜')])['paused'])
         with patch.object(cs, 'latest', side_effect=forbidden):
@@ -32,6 +33,7 @@ class Defaults(Isolated):
         self.assertFalse(p.get('friend-A')['auto_update'])
         self.assertFalse(p.get('friend-A')['personalization_enabled'])
         self.assertFalse(p.get('friend-A')['conversation_control_enabled'])
+        self.assertTrue(p.get('friend-A')['agent_enabled'])
         self.assertEqual(self.role('friend-B')['persona_id'], 'P')
 
     def test_explicit_switches_independent_and_account_scoped(self):

@@ -309,6 +309,88 @@ def resolve_persona(contact, rules=None, rule=None):
                 legacy=inv, managed=bool(global_['revision']))
 
 
+_SWITCH_INTENT = re.compile(
+    r'换|切到|切成|当成|当回|还是当|变成|改成|换成|扮演|人设|用一下|给我当|做回|变回')
+_ADULT_CUES = re.compile(
+    r'想做了|想要了|来做[啊呀吧]?|开荤|想色色|想做爱|想被操|想上床|进入状态|开车|'
+    r'黄一点|骚一点|成人模式|想浪|想被干|做爱')
+_ADULT_PREF = ('夏以昼成人', '成人3', '成人2', '成人', '成人男友', '成人女友')
+
+
+def catalog():
+    rows = []
+    try:
+        rows = distill.list_personas() or []
+    except Exception:
+        rows = []
+    out = []
+    for row in rows:
+        slug = row.get('slug') or ''
+        name = row.get('name') or slug
+        aliases = {slug, name}
+        if slug.endswith('成人') and len(slug) > 2:
+            aliases.add(slug[:-2] + '的成人')
+            aliases.add('成人' + slug[:-2])
+        out.append({'slug': slug, 'name': name, 'aliases': aliases})
+    return out
+
+
+def match_switch(text, current=None):
+    """对方点名人设则切；没点名但要开荤且当前不是成人向，切到可用的成人人设。"""
+    t = (text or '').replace(' ', '')
+    if not t:
+        return None
+    pairs = []
+    for item in catalog():
+        for alias in item['aliases']:
+            if alias and len(alias) >= 2:
+                pairs.append((alias, item['slug'], item['name']))
+    pairs.sort(key=lambda x: -len(x[0]))
+    named = None
+    if _SWITCH_INTENT.search(t):
+        for alias, slug, name in pairs:
+            if alias in t:
+                named = slug
+                break
+    if named and named != current:
+        return named
+    if named == current:
+        return None
+    if current and '成人' in (current or ''):
+        return None
+    if not _ADULT_CUES.search(t):
+        return None
+    have = {item['slug'] for item in catalog()}
+    for slug in _ADULT_PREF:
+        if slug in have and slug != current:
+            return slug
+    return None
+
+
+@sessions.task
+def maybe_switch(contact, text):
+    """按这句切换专属人设。成功返回 {slug,name,persona}，否则 None。群聊不切。"""
+    if not contact or contact.endswith('@chatroom'):
+        return None
+    data = get(contact)
+    current = data.get('persona_id')
+    slug = match_switch(text, current)
+    if not slug or slug == current or not _persona_exists(slug):
+        return None
+    try:
+        update(contact, {'persona_id': slug}, data['revision'])
+    except Conflict:
+        data = get(contact)
+        if data.get('persona_id') == slug:
+            pass
+        else:
+            update(contact, {'persona_id': slug}, data['revision'])
+    p = distill.load_persona(slug)
+    if not p:
+        return None
+    return {'slug': slug, 'name': p.get('name') or slug, 'persona': p}
+
+
 def _persona_exists(slug):
     if not slug:
         return False

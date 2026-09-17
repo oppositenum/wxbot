@@ -470,7 +470,8 @@ class Entries(Isolated):
                 patch('core.bot.send_name_for', return_value='对方'), patch('core.messages.get_messages', return_value=[]), \
                 patch('core.conversation_state.ticket', return_value={'ok': True}), \
                 patch('core.conversation_state.allowed', return_value=True), \
-                patch('core.humanize.typing_delay', return_value=0):
+                patch('core.humanize.typing_delay', return_value=0), \
+                patch('core.bot._part_gap', return_value=0):
             r=bot.greet('friend-A', hint='继续发2-3次')
         self.assertEqual(sends, ['第一条', '第二条', '第三条'])
         self.assertEqual(r['burst'], 3)
@@ -484,9 +485,39 @@ class Entries(Isolated):
         with patch('core.llm.chat', chat), patch('core.agent.agent_config', return_value={'enabled': False}), \
                 patch('core.bot._sender_name', return_value='对方'), patch('core.memory.select_memories', return_value=[]), \
                 patch('core.sender.send_text', lambda *a, **kw: parts.append(a[1]) or {'ok': True, 'status': 'confirmed'}), \
-                patch('core.humanize.typing_delay', return_value=0), patch('core.bot.send_name_for', return_value='对方'):
+                patch('core.humanize.typing_delay', return_value=0), patch('core.bot._part_gap', return_value=0), \
+                patch('core.bot.send_name_for', return_value='对方'):
             bot.do_action(self.rules['rules'][0], msg(text='你自己开发'), 'friend-A', {}, lambda *a: None, [], self.rules)
         self.assertEqual(parts, ['一', '二', '三'])
+
+    def test_named_persona_switch_updates_contact_and_reply(self):
+        self.roles['黎深'] = {'name': '黎深', 'persona': '我是黎深。', 'samples': []}
+        self.roles['夏以昼成人'] = {'name': '夏以昼成人', 'persona': '我是夏以昼，成人向。', 'samples': []}
+        catalog = [{'slug': k, 'name': k} for k in ('黎深', '夏以昼成人')]
+        self.change('friend-A', persona_id='夏以昼成人')
+        captured=[]
+        with patch('core.distill.list_personas', return_value=catalog), \
+                patch('core.llm.chat', side_effect=lambda s, m: captured.append(s) or '刚下台，手套还没摘。'), \
+                patch('core.bot._sender_name', return_value='对方'), patch('core.memory.select_memories', return_value=[]), \
+                patch('core.agent.agent_config', return_value={'enabled': False}):
+            out = bot._ai_reply(self.roles['Q'], 'friend-A', msg(text='老公，换黎深'), [], self.rules)
+        self.assertEqual(out, '刚下台，手套还没摘。')
+        self.assertEqual(p.get('friend-A')['persona_id'], '黎深')
+        self.assertIn('已切换人设', captured[0])
+        self.assertIn('我是黎深', captured[0])
+
+    def test_adult_intent_switches_without_saying_成人(self):
+        catalog = [{'slug': '夏以昼', 'name': '夏以昼'}, {'slug': '夏以昼成人', 'name': '夏以昼成人'}]
+        with patch('core.distill.list_personas', return_value=catalog):
+            self.assertEqual(p.match_switch('想做了，进入状态', current='夏以昼'), '夏以昼成人')
+            self.assertIsNone(p.match_switch('晚饭吃了没', current='夏以昼'))
+            self.assertIsNone(p.match_switch('你还是当黎深吧', current='夏以昼'))
+
+    def test_strip_hmm_openers_without_emptying_message(self):
+        self.assertEqual(bot._strip_filler_openers('嗯，累了就歇。'), '累了就歇。')
+        self.assertEqual(bot._strip_filler_openers('嗯。乖。'), '乖。')
+        self.assertEqual(bot._strip_filler_openers('嗯'), '嗯')
+        self.assertEqual(bot._strip_filler_openers('老婆，过来。'), '老婆，过来。')
 
     def test_lookup_request_searches_even_when_agent_off(self):
         self.change('friend-A', agent_enabled=False)

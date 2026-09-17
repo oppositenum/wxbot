@@ -553,6 +553,7 @@ def api_llm_status():
                     "tools_provider": cfg.get("tools_provider", ""),
                     "tools_model": cfg.get("tools_model", ""),
                     "tool_route": llm.route_info(cfg, "tools"),
+                    "image": llm.image_info(cfg),
                     "private_management_auth": True,
                     "contact_personalization": True,
                     "route_diagnostics": llm.route_diagnostics(),
@@ -617,6 +618,33 @@ def api_llm_config():
             return jsonify({"error": "不支持的 provider"}), 400
     if "tools_model" in body and not isinstance(body["tools_model"], str):
         return jsonify({"error": "工具模型必须是文本"}), 400
+    if "image" in body:
+        sub = body["image"]
+        if not isinstance(sub, dict):
+            return jsonify({"error": "生图配置必须是对象"}), 400
+        follow = (sub.get("follow") or "").strip()
+        if follow not in llm.IMAGE_FOLLOWS:
+            return jsonify({"error": "不支持的生图中转"}), 400
+        quality = (sub.get("quality") or "").strip()
+        if quality and quality not in llm.IMAGE_QUALITIES:
+            return jsonify({"error": "不支持的生图质量"}), 400
+        if sub.get("model") is not None and not isinstance(sub.get("model"), str):
+            return jsonify({"error": "生图模型必须是文本"}), 400
+        cur = cfg.get("image") if isinstance(cfg.get("image"), dict) else {}
+        if "follow" in sub:
+            cur["follow"] = follow
+        if sub.get("base_url") is not None:
+            cur["base_url"] = sub["base_url"].strip()
+        if sub.get("model") is not None:
+            cur["model"] = sub["model"].strip()
+        if quality:
+            cur["quality"] = quality
+        if sub.get("api_key"):
+            cur["api_key"] = sub["api_key"].strip()
+        cfg["image"] = cur
+        cfg["image_model"] = cur.get("model") or cfg.get("image_model", "")
+        if cur.get("quality"):
+            cfg["image_quality"] = cur["quality"]
     for k in ("tools_provider", "tools_model"):
         if k in body:
             cfg[k] = body[k].strip()
@@ -1075,8 +1103,11 @@ def api_greet():
     chat = b.get("chat")
     if not chat:
         return jsonify({"ok": False, "message": "缺 chat"}), 400
+    hint = b.get("hint") or b.get("text") or ""
+    if hint is not None and not isinstance(hint, str):
+        return jsonify({"ok": False, "message": "hint 必须是文本"}), 400
     try:
-        res = botmod.greet(chat)
+        res = botmod.greet(chat, hint=hint)
     except Exception as e:  # noqa: BLE001
         return jsonify({"ok": False, "message": str(e)})
     return jsonify(res)

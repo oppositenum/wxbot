@@ -322,9 +322,20 @@ class Callers(Isolated):
         from core import read_access
         self.adapter.delivered=False
         access=read_access.Access('account-A',os.path.realpath(config.account_dir()),'chat-A',frozenset({'chat-A'}),(('chat-A','name'),))
+        ctx={'chat':'chat-A','read_access':access}
         with send_ledger.operation('tool-round'),patch.object(llm,'gen_image',return_value=b'offline image') as generate,patch('tempfile.tempdir',self.tmp.name):
-            for _ in range(2):tools.draw_image('test prompt',{'chat':'chat-A','read_access':access})
+            tools.draw_image('test prompt',ctx)
+            tools.draw_image('test prompt',ctx)
         self.assertEqual(generate.call_count,1)
+        self.assertEqual(self.adapter.calls,1)
+
+    def test_generated_image_is_resent_without_regenerating(self):
+        from core import read_access
+        access=read_access.Access('account-A',os.path.realpath(config.account_dir()),'chat-A',frozenset({'chat-A'}),(('chat-A','name'),))
+        ctx={'chat':'chat-A','read_access':access,'generated_image':b'offline cached image'}
+        with patch.object(llm,'gen_image',side_effect=forbidden),patch('tempfile.tempdir',self.tmp.name):
+            reply=tools.draw_image('test prompt',ctx)
+        self.assertTrue(reply.startswith('[已生成并把图片发给对方成功]'))
         self.assertEqual(self.adapter.calls,1)
 
     def test_push_webhook_timeout_is_durable_and_not_reposted(self):

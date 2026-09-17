@@ -189,17 +189,24 @@ def draw_image(prompt, ctx=None):
         return "[draw_image] 无当前会话,图发不出去"
     if not prompt:
         return "[draw_image] 没给画面描述"
-    if send_ledger.blocked_by_uncertainty('image', chat):
-        return '[上一图片发送结果待核对，已阻止重复生成和发送]'
     from core import sender
     blocked = sender.preflight(chat, kind='image')
     if blocked:
         return '[draw_image] ' + blocked['message']
     from core import llm
-    try:
-        img = llm.gen_image(prompt, cfg=cfg)
-    except Exception as e:  # noqa: BLE001
-        return f"[画图失败] {e}"        # 未开通权限/报错 → 模型据此如实说画不了
+    cached = ctx.get("generated_image")
+    if cached:
+        img = cached
+    elif send_ledger.blocked_by_uncertainty('image', chat) and not ctx.get("force_send"):
+        return '[上一图片发送结果待核对，已阻止重复生成和发送]'
+    else:
+        try:
+            img = llm.gen_image(prompt, cfg=cfg, reference=ctx.get("reference"))
+        except Exception as e:  # noqa: BLE001
+            return f"[画图失败] {e}"        # 未开通权限/报错 → 模型据此如实说画不了
+        if not img:
+            return "[画图失败] 生图返回空"
+        ctx["generated_image"] = img
     sessions.check()
     import tempfile
     fd, path = tempfile.mkstemp(prefix="wxdraw-", suffix=".png")
@@ -212,6 +219,8 @@ def draw_image(prompt, ctx=None):
             return "[draw_image] 授权账号已变化，取消发送"
         disp = ctx.get("display_name") or chat
         r = sender.send_image(disp, path, chat_username=chat)
+        if not r.get("ok") and r.get("status") != "uncertain":
+            r = sender.send_image(disp, path, chat_username=chat)
     except Exception as e:  # noqa: BLE001
         return f"[图片已生成但发送出错] {e}"
     if r.get("ok"):

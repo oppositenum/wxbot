@@ -55,6 +55,9 @@
   .members.show { display:block; }
   .members h3 { margin:4px 0 10px; font-size:14px; }
   .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#333; color:#fff; padding:9px 16px; border-radius:8px; opacity:0; transition:.3s; pointer-events:none; }
+  #greetBox { position:fixed; left:50%; top:22%; transform:translateX(-50%); width:min(420px,92vw); background:#fff; border:1px solid var(--line); border-radius:10px; box-shadow:0 8px 30px rgba(0,0,0,.12); padding:14px 16px; z-index:950; display:none; }
+  #greetBox.show { display:block; }
+  #greetBox textarea { width:100%; min-height:88px; padding:8px; border:1px solid var(--line); border-radius:6px; resize:vertical; font:inherit; margin:8px 0; }
   .toast.show { opacity:.95; }
   .lightbox { position:fixed; inset:0; background:rgba(0,0,0,.85); display:none; align-items:center; justify-content:center; z-index:1000; cursor:zoom-out; }
   .lightbox.show { display:flex; }
@@ -134,6 +137,17 @@
   <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 20px;background:white;border-bottom:1px solid var(--line)"><strong>联系人画像与专属人设</strong><button id="closePersonalization">返回聊天</button></div>
   <iframe id="personalizationFrame" title="联系人画像与专属人设管理" style="width:100%;flex:1;min-height:0;border:0"></iframe>
 </div>
+<div id="greetBox">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+    <strong>打招呼</strong>
+    <button type="button" id="greetCancel">取消</button>
+  </div>
+  <div class="sub" id="greetWho" style="margin-top:4px"></div>
+  <textarea id="greetHint" placeholder="可空。不填：自动打招呼。填了：当作你自己想说的话再写丰发出。「继续/你自己开发/你来弄/多发几次」默认连发 3 条；写了次数按次数，最多 10 条。"></textarea>
+  <div style="display:flex;gap:8px;justify-content:flex-end">
+    <button type="button" class="primary" id="greetSend">生成并发送</button>
+  </div>
+</div>
 <div class="toast" id="toast"></div>
 <div class="lightbox" id="lightbox" onclick="this.classList.remove('show')"><img id="lightboxImg" src=""></div>
 
@@ -143,6 +157,34 @@ let tab = "sessions", data = {sessions:[],contacts:[],groups:[],other:[]}, curre
 document.addEventListener('DOMContentLoaded',()=>{const b=document.querySelector('#accountsBtn');if(b)b.onclick=()=>{location.href='/accounts';};});
 
 function toast(m){ const t=$("#toast"); t.textContent=m; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),2200); }
+let greetTarget=null, greetBtnEl=null;
+function closeGreet(){ $("#greetBox").classList.remove("show"); greetTarget=null; if(greetBtnEl){ greetBtnEl.disabled=false; greetBtnEl.textContent="👋"; } greetBtnEl=null; }
+function openGreet(chat, name, btn){
+  greetTarget=chat; greetBtnEl=btn;
+  $("#greetWho").textContent="发给 "+(name||chat);
+  $("#greetHint").value="";
+  $("#greetBox").classList.add("show");
+  $("#greetHint").focus();
+}
+async function submitGreet(){
+  if(!greetTarget) return;
+  const chat=greetTarget, hint=$("#greetHint").value.trim();
+  const sendBtn=$("#greetSend");
+  sendBtn.disabled=true;
+  if(greetBtnEl){ greetBtnEl.disabled=true; greetBtnEl.textContent="⏳"; }
+  toast(hint ? "按你写的内容生成打招呼…" : "AI 生成打招呼并发送中…");
+  try{
+    const r=await (await fetch("/api/greet",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat, hint})})).json();
+    toast(r.ok ? ((r.verified?"已确认发送: ":"已提交微信: ")+(r.message||"").slice(0,30)) : ((r.status==="uncertain"?"待核对: ":"未发送: ")+(r.message||r.reason||"请求未完成")));
+  }catch(err){ toast("打招呼出错: "+err); }
+  sendBtn.disabled=false;
+  closeGreet();
+}
+document.addEventListener("DOMContentLoaded",()=>{
+  const cancel=$("#greetCancel"), send=$("#greetSend");
+  if(cancel) cancel.onclick=closeGreet;
+  if(send) send.onclick=submitGreet;
+});
 function fmtTime(ts){ if(!ts) return ""; const d=new Date(ts*1000); return d.toLocaleString("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}); }
 function avatarURL(u){ return "/api/avatar?username="+encodeURIComponent(u); }
 
@@ -196,22 +238,12 @@ function render(){
     div.className="row"+(current&&current.username===u?" active":"");
     const unread = x.unread || 0;
     const badge = unread > 0 ? `<div class="badge">${unread>99?'99+':unread}</div>` : "";
-    const greetBtn = (tab==="sessions") ? `<button class="greetBtn" title="AI按上下文打个招呼" style="border:none;background:none;font-size:16px;cursor:pointer;padding:2px 6px;flex-shrink:0">👋</button>` : "";
+    const greetBtn = (tab==="sessions") ? `<button class="greetBtn" title="打招呼：可空点发送，或先填想说的内容再生成" style="border:none;background:none;font-size:16px;cursor:pointer;padding:2px 6px;flex-shrink:0">👋</button>` : "";
     div.innerHTML = `<img class="avatar" src="${src}" onerror="this.onerror=null;this.src='${avatarURL(u)}'">
       <div style="min-width:0;flex:1"><div class="name">${escape_(name)}</div><div class="sub">${escape_(sub)}</div></div>${greetBtn}${badge}`;
     div.onclick = ()=> openChat({username:u, name, is_group:u.endsWith("@chatroom")});
     const gb = div.querySelector(".greetBtn");
-    if(gb) gb.onclick = async (e)=>{
-      e.stopPropagation();
-      if(gb.disabled) return;
-      gb.disabled = true; gb.textContent = "⏳";
-      toast("AI 生成打招呼并发送中…");
-      try{
-        const r = await (await fetch("/api/greet",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat:u})})).json();
-        toast(r.ok ? ((r.verified?"已确认发送: ":"已提交微信: ")+(r.message||"").slice(0,30)) : ((r.status==="uncertain"?"待核对: ":"未发送: ")+(r.message||r.reason||"请求未完成")));
-      }catch(err){ toast("打招呼出错: "+err); }
-      gb.disabled = false; gb.textContent = "👋";
-    };
+    if(gb) gb.onclick = (e)=>{ e.stopPropagation(); openGreet(u, name, gb); };
     list.appendChild(div);
   }
   updateTabBadges();
@@ -523,6 +555,27 @@ async function renderAI(){
     <input id="llmToolsModel" placeholder="独立工具模型（留空使用该 provider 的模型）" style="width:100%;margin-bottom:6px;padding:5px" value="${escape_(llm.tools_model||'')}">
     <div class="sub">实际请求路由：${escape_(llm.tool_route?.provider||llm.provider)} / ${escape_(llm.tool_route?.model||'')}；这是请求字段，不代表中转底层模型认证。</div>
     ` : ""}
+    <div style="background:#f7f8fa;border-radius:6px;padding:8px;margin-bottom:6px">
+      <b style="font-size:13px">生图</b>
+      <div class="sub">聊天和生图分开配。可自己换模型试手感；密钥留空沿用所选中转。</div>
+      <label class="sub">生图中转</label>
+      <select id="imgFollow" style="width:100%;padding:5px;margin:2px 0 6px">
+        <option value="grok">跟随 Grok 中转</option>
+        <option value="gpt">跟随 GPT 中转</option>
+        <option value="">独立 URL / key</option>
+      </select>
+      <input id="imgModel" placeholder="模型 如 grok-imagine-image 或 grok-imagine-image-2.0" style="width:100%;margin-bottom:4px;padding:5px" value="${escape_((llm.image&&llm.image.model)||'')}">
+      <label class="sub">质量</label>
+      <select id="imgQuality" style="width:100%;padding:5px;margin:2px 0 6px">
+        <option value="low">low（更快）</option>
+        <option value="standard">standard</option>
+        <option value="medium">medium</option>
+        <option value="auto">auto</option>
+      </select>
+      <input id="imgBase" placeholder="独立 Base URL（跟随中转时可留空）" style="width:100%;margin-bottom:4px;padding:5px" value="${escape_((llm.image&&!llm.image.follow&&llm.image.base_url)||'')}">
+      <input id="imgKey" placeholder="独立 API key（留空=不改 / 跟随中转）" style="width:100%;margin-bottom:4px;padding:5px">
+      <div class="sub">当前：${escape_((llm.image&&(llm.image.follow||'独立'))||'未配')} / ${escape_((llm.image&&llm.image.model)||'?')} · ${escape_((llm.image&&llm.image.quality)||'')} · ${llm.image&&llm.image.has_key?'🔑':'无 key'}</div>
+    </div>
     <input id="llmProxy" placeholder="代理(可选,留空=不走代理)" style="width:100%;margin-bottom:6px;padding:5px" value="${llm.proxy||''}">
     <button id="llmSave" class="primary">保存 AI 配置</button>
     <button id="llmTest">测试三套</button>
@@ -611,6 +664,8 @@ async function renderAI(){
   if(llm.provider) $("#llmProv").value=llm.provider;
   if($("#llmToolsProv")) $("#llmToolsProv").value=llm.tools_provider||"";
   if(llm.vision_provider!==undefined) $("#llmVis").value=llm.vision_provider||"";
+  if($("#imgFollow")) $("#imgFollow").value=(llm.image&&llm.image.follow)||"";
+  if($("#imgQuality") && llm.image&&llm.image.quality) $("#imgQuality").value=llm.image.quality;
   document.querySelectorAll(".pView").forEach(b=>b.onclick=async()=>{
     const slug=b.dataset.s;
     const d=await(await fetch("/api/personas/"+encodeURIComponent(slug))).json();
@@ -632,7 +687,9 @@ async function renderAI(){
       ...(llm.tool_route ? {tools_provider:$("#llmToolsProv").value, tools_model:$("#llmToolsModel").value.trim()} : {}), proxy:$("#llmProxy").value.trim(),
       claude:{base_url:$("#cBase").value.trim(), model:$("#cModel").value.trim(), api_key:$("#cKey").value.trim()},
       gpt:{base_url:$("#gBase").value.trim(), model:$("#gModel").value.trim(), api_key:$("#gKey").value.trim()},
-      grok:{base_url:$("#kBase").value.trim(), model:$("#kModel").value.trim(), api_key:$("#kKey").value.trim()}};
+      grok:{base_url:$("#kBase").value.trim(), model:$("#kModel").value.trim(), api_key:$("#kKey").value.trim()},
+      image:{follow:$("#imgFollow").value, model:$("#imgModel").value.trim(), quality:$("#imgQuality").value,
+        base_url:$("#imgBase").value.trim(), api_key:$("#imgKey").value.trim()}};
     const r=await(await fetch("/api/llm/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
     toast(r.configured?"AI 已配置 ✅":"已保存"); renderAI();
   };

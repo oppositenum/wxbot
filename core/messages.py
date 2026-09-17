@@ -257,10 +257,14 @@ def _parse_refer(content):
         rc = refer.findtext("content") or ""
         _, rc = _split_group_sender(rc)            # 去掉 wxid:\n 前缀
         rc = _media_placeholder(rtype, rc)
+        chatusr = (refer.findtext("chatusr") or "").strip()
+        fromusr = (refer.findtext("fromusr") or "").strip()
         refer_d = {
             "displayname": refer.findtext("displayname"),
             "content": rc,
-            "chatusr": refer.findtext("chatusr"),   # 被引用消息的发送者 wxid
+            "type": rtype,
+            "chatusr": chatusr or fromusr,   # 私聊里 chatusr 常为空，作者在 fromusr
+            "fromusr": fromusr,
         }
     return title, refer_d
 

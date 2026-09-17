@@ -89,7 +89,7 @@ def _db(write=False):
 
 def _default():
     return dict(persona_id=None, personalization_enabled=False, auto_update=False,
-                conversation_control_enabled=False, preferences={}, revision=0)
+                conversation_control_enabled=False, agent_enabled=True, preferences={}, revision=0)
 
 
 def _get(con, contact):
@@ -106,6 +106,8 @@ def _get(con, contact):
             raise ValueError()
         if any(not isinstance(data.get(k, False), bool) for k in
                ('auto_update', 'personalization_enabled', 'conversation_control_enabled')):
+            raise ValueError()
+        if 'agent_enabled' in data and not isinstance(data.get('agent_enabled'), bool):
             raise ValueError()
         _slug(data.get('persona_id'))
         for field, pref in data.get('preferences', {}).items():
@@ -149,7 +151,8 @@ def _template_target(contact):
 
 def _template_values(template, contact):
     data = _default()
-    for key in ('persona_id', 'personalization_enabled', 'auto_update', 'conversation_control_enabled'):
+    for key in ('persona_id', 'personalization_enabled', 'auto_update',
+                'conversation_control_enabled', 'agent_enabled'):
         data[key] = template.get(key, data[key])
     data['configured_features'] = ['personalization_enabled', 'auto_update', 'conversation_control_enabled']
     data['preferences'] = {k: dict(value=v['value'], locked=v.get('locked', False),
@@ -213,14 +216,16 @@ def _slug(slug):
 @sessions.task
 def update(contact, patch, revision):
     _id(contact)
-    if set(patch) - {'persona_id', 'personalization_enabled', 'auto_update', 'conversation_control_enabled', 'preferences'}:
+    if set(patch) - {'persona_id', 'personalization_enabled', 'auto_update',
+                     'conversation_control_enabled', 'agent_enabled', 'preferences'}:
         raise ValueError('未知设置字段')
     with _db(True) as con:
         data = _get(con, contact)
         if data['revision'] != revision:
             raise Conflict('配置已被修改，请刷新后重试')
         data.pop('config_error', None)
-        for key in ('persona_id', 'personalization_enabled', 'auto_update', 'conversation_control_enabled'):
+        for key in ('persona_id', 'personalization_enabled', 'auto_update',
+                    'conversation_control_enabled', 'agent_enabled'):
             if key in patch:
                 v = patch[key]
                 if key == 'persona_id':

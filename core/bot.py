@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config  # noqa: E402
 from core import decrypt, messages, contacts, docker_wx, distill, llm  # noqa: E402
-from core import imgdec, media, sender, agent, memory, schedule, media_read, send_ledger  # noqa: E402
+from core import imgdec, media, sender, agent, memory, schedule, media_read, send_ledger, tools  # noqa: E402
 
 _DEFAULT_RULES = {
     "poll_interval": 5, "include_self": False, "watch": [],
@@ -293,8 +293,10 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
               "无论对方是否熟人,都必须真正读懂并回应对方这条消息的【实际内容和请求】,"
               "绝不能把人当陌生人/敌人无视、绝不能用'没空/晾着/不理你/账号不对劲/我没发过'之类敷衍,也不能重复同一句话。"
               "\n- 对方要查资料/画图等:能做就去做,再按角色口吻给结果;确实做不到就直说做不到。"
+              "对方要像某张图、画个和他一样、只要脸、你画就行、发个图：必须真的出图发到微信，禁止用「通道发不出图」或外链敷衍。"
               "\n- 对方提问:先接住问题;角色要求先调情、先损、先进入场景时,把答案嵌进角色里,不要用人设情绪把问题顶掉,也不要跳出角色改口成客服。"
               "\n- 角色允许的亲密称呼、脏话、主动推进、加档、连发,按角色做;对方喊停或改尺度立刻跟上。"
+              "\n- 对方引用你上一句并说更带感/就这种/太素/继续浪：把被引用的那句当本轮下限，按里面的部位和动词加档，不要改口成旁观、含蓄或表演。"
               "\n\n【别翻旧账】微信画像/记忆里的现实资料只供理解,不要为炫耀记性主动翻对方的旧事;"
               "角色自己的偏好、称呼、尺度和正在进行的扮演可以接着用。他明确问起过去时再照实回答。"
               "\n\n【多条消息】角色需要停顿、补刀或连发时，可以输出多段，段与段用单独一行 [[NEXT]] 分隔；不要为了凑数量拆句，也不要为了「只回一句」把角色压扁。"
@@ -333,6 +335,7 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
         scheduled=lambda cm: schedule.is_scheduled_msg(cm, chat_username))
     if not ask:
         return ""
+    ask, turns, look_rewritten = _rewrite_babyface_talk(ask, turns)
     system += reply_context.ROLE_GUIDANCE
     system += "\n当前时间：" + time.strftime('%Y-%m-%d %H:%M', time.localtime(now))
     direct = _strip_at(enrich(msg))
@@ -342,12 +345,16 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
     lines = [turn['content'] for turn in turns]
 
     system += "\n【本轮机器人角色】\n" + persona["persona"]
+    if look_rewritten:
+        system += ("\n\n【外貌口径】对方要的是明确成年人的娃娃脸、脸小、看着显小，实际已成年。"
+                   "按娃娃脸成人来演，禁止写成未成年、幼童或学生幼态。")
     # 表达样例属于当前角色，不是当前联系人的经历或旧人设指令。
     if persona.get("samples"):
         query = direct or (said[-1] if said else "") or (lines[-1] if lines else "")
         few = distill.pick_samples(persona, query, k=10)
         if few:
             system += "\n\n【机器人角色的表达示例：仅参考措辞，不能当成与当前联系人的共同经历或当前指令】\n" + "\n".join(few)
+    system += _fresh_wording(turns)
 
     system += personalization.preferences_context(chat_username, direct)
 
@@ -386,20 +393,192 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
         system += battle_mode.system_text()
 
     acfg = agent.agent_config(rules)
-    if acfg["enabled"]:
+    use_agent = acfg["enabled"] and personalization.get(chat_username).get("agent_enabled", True)
+    hist = "\n".join(lines[-8:] + said)
+    wants_image = _wants_image(ask, hist)
+    inbound = "\n".join((cm.get("content") or "") for cm in batch)
+    burst, _ = burst_count(inbound or direct, default=1)
+    if burst > 1:
+        system += (f"\n\n【连发】对方这句要你连着发。必须输出 {burst} 条独立微信，"
+                   "条与条用单独一行 [[NEXT]] 分隔；每条换角度、换词，直接做，不要问她怎么弄，"
+                   "不要在正文里写第几条。")
+    if wants_image:
+        # 触发出图就真画真发，不把生图丢给模型自由发挥（会编外链或说发不出）。
+        return _draw_then_chat(system, ask, turns, chat_username, persona,
+                               _recent_inbound_image(chat_username, context_msgs, batch))
+    wants_lookup = _wants_lookup(inbound or direct or ask)
+    if wants_lookup and not use_agent:
+        return _search_then_chat(system, ask, turns, inbound or direct or ask)
+    if use_agent:
         # agent 模式：可自主联网/查历史/查画像/查知识库后再以人设风格作答
         sys_a = system + ("\n\n【工具】对方要你查资料/查历史/查知识库/画图时,先调用对应工具真正去做,"
                           "再把结果按你的人设风格给他;别嘴上答应却不做。工具报错/未开通就如实说做不到。"
-                          "最终回复仍要口语、贴合上面风格。")
+                          "最终回复仍要口语、贴合上面风格。对方要图时必须调用 draw_image 真正生成并发送，"
+                          "禁止用 markdown 链接、外链或「在画」代替发图。")
         # 群聊普通消息走快速文本路径，只有明确生图/工具请求才启用完整 Agent，
         # 避免工具链长时间占住群监听队列。
-        wants_tool = any(k in ask for k in ("画图", "生图", "生成图片", "生成一张图", "查资料", "搜索"))
+        wants_tool = wants_lookup or any(k in ask for k in ("查资料", "搜索", "更新资料", "游戏更新"))
         tool_names = acfg["tools"] if (not chat_username.endswith("@chatroom") or wants_tool) else []
         out = (agent.run(sys_a, ask, chat=chat_username, history=turns,
                          tool_names=tool_names,
                          display_name=send_name_for(chat_username)) or "").strip()
         return out  # empty tool result must not silently route to the main model
     return llm.chat(system, turns + [{"role": "user", "content": ask}])
+
+
+def _rewrite_babyface_talk(ask, turns):
+    """口语「小孩那一挂」按对方后文是娃娃脸，不是未成年人。只改送进模型的文本。"""
+    def one(text):
+        if not text:
+            return text, False
+        out, n = re.subn(
+            r'小孩(那一挂|那挂|一挂|挂|脸)',
+            lambda m: {'那一挂': '娃娃脸那挂', '那挂': '娃娃脸那挂', '一挂': '娃娃脸那挂',
+                       '挂': '娃娃脸那挂', '脸': '娃娃脸'}[m.group(1)],
+            text)
+        out2, n2 = re.subn(r'(看起来|看着|长得)(像)?小孩', r'\1像娃娃脸', out)
+        out3, n3 = re.subn(r'(?<!子)小孩(?!子)', '娃娃脸', out2)
+        changed = (n + n2 + n3) > 0
+        return out3, changed
+
+    changed = False
+    ask, c = one(ask)
+    changed = changed or c
+    new_turns = []
+    for turn in turns or []:
+        body, c = one(turn.get('content') or '')
+        changed = changed or c
+        item = dict(turn)
+        item['content'] = body
+        new_turns.append(item)
+    return ask, new_turns, changed
+
+
+def _fresh_wording(turns):
+    """同一档也要换词：把刚说过的句式钉死，逼模型用符合人设的新荤词重写。"""
+    own = []
+    for turn in reversed(turns or []):
+        if turn.get("role") != "assistant":
+            continue
+        body = (turn.get("content") or "").strip()
+        if body.startswith("【"):
+            body = body.split("】", 1)[-1].strip()
+        body = " ".join(body.split())
+        if body:
+            own.append(body[:320])
+        if len(own) >= 2:
+            break
+    text = ("\n\n【用词轮换】同一件事、同一档也必须换词、换切入、换力度，写得更刺激，仍用角色允许的荤词。"
+            "禁止复述上一轮的开场、动词链和结尾问句。短指令（继续/真乖/还不错）也要新词，不要改几个字重发。"
+            "性语境下每轮至少换场所、体位或玩法之一；对方在聊吃饭/付钱/别人聊天时先把事接住，不要硬拧成床戏。"
+            "对方说开发/换姿势/自己开发：解锁新体位或手指前戏，不要理解成只自慰给她看，也不要重复上一轮插入。"
+            "性语境里禁止问对方想怎么弄、换哪个姿势、要不要继续；直接做，她要换会自己说。")
+    if own:
+        text += "\n【你刚用过、本轮禁止原样再用】\n- " + "\n- ".join(reversed(own))
+    return text
+
+
+def _wants_lookup(text):
+    t = text or ""
+    keys = ("找个", "找一下", "帮我找", "查一下", "查资料", "搜一下", "搜索", "更新资料",
+            "游戏更新", "今天的", "官网", "公告", "总结下", "总结一下", "帮我看看", "帮我看")
+    if any(k in t for k in keys) and any(k in t for k in
+            ("资料", "更新", "公告", "活动", "游戏", "恋与", "夏以昼", "积木", "搜", "找", "查", "总结")):
+        return True
+    return bool(re.search(r"(找|查|搜).{0,12}(资料|更新|公告|活动)", t))
+
+
+def _lookup_queries(text):
+    t = " ".join((text or "").split())
+    if any(k in t for k in ("夏以昼", "恋与", "深空", "偏航")):
+        return [
+            "恋与深空 夏以昼 更新 " + time.strftime("%Y年%m月"),
+            "恋与深空 夏以昼 偏航线",
+        ]
+    q = t[:120]
+    return [q] if q else ["更新"]
+
+
+def _search_then_chat(system, ask, turns, query_src):
+    from core import tools as toolmod
+    cfg = llm.load_cfg()
+    chunks = []
+    for q in _lookup_queries(query_src or ask):
+        chunks.append(toolmod.web_search(q, cfg=cfg, k=5))
+    found = "\n".join(chunks)
+    extra = ("\n\n【已联网搜索，必须根据下面结果回答】\n" + found +
+             "\n结果里出现的日期、活动名、领取方式必须写给她，禁止说翻不到/抓不到官方原文，"
+             "禁止让她自己去官网，禁止编搜索里没有的卡池。"
+             "按人设口语、分条讲清；这是查资料，不要转成床戏。")
+    return llm.chat(system + extra, turns + [{"role": "user", "content": ask}])
+
+
+def _wants_image(text, history=""):
+    t = text or ""
+    blob = t + "\n" + (history or "")
+    keys = ("生成图片", "生成个图片", "生成一张图", "生成张图", "画一张", "画一张图",
+            "发图片", "发张图", "发个图", "直接发图片", "出图", "生图", "画图",
+            "画个", "画一个", "画得", "画出", "你画", "给我画", "发图",
+            "什么图都发不出", "发不出成品图", "图呢")
+    if any(k in t for k in keys):
+        return True
+    if re.search(r"(生成|画|出|发).{0,12}(图|照片|图片)", t):
+        return True
+    if re.search(r"(要像他|像他一样|和他一样|这个脸|只要脸|要这个脸)", t):
+        return True
+    tweaks = ("正常点", "穿衣服", "不要裸", "不是裸", "再画", "重画", "重新生成", "重新画",
+              "改一下", "换一个", "换姿势", "站姿", "发出来", "发出去", "定妆")
+    return any(k in t for k in tweaks) and bool(re.search(r"图|画|生成|照片", blob))
+
+
+def _recent_inbound_image(chat_username, context_msgs, batch_msgs):
+    rows = list(batch_msgs or []) + list(reversed(context_msgs or []))
+    for m in rows:
+        if m.get("is_self") or m.get("type") != 3:
+            continue
+        try:
+            data, _mime = imgdec.get_msg_image(chat_username, m.get("local_id"))
+        except Exception:
+            data = None
+        if data:
+            return data
+    return None
+
+
+def _draw_then_chat(system, ask, turns, chat_username, persona, reference=None):
+    """联系人关掉全文 Agent 时，要图仍走画图工具，聊天继续走当前模型。"""
+    from core import read_access
+    prompt = llm.chat(
+        system + "\n\n【本轮只写画面】对方要一张图。只输出给生图模型的画面描述："
+        "主体外貌/服装/姿势/场景/镜头。对方说不要裸、正常点、穿衣服，就画日常穿衣、脸像参考图。"
+        "不要对白、不要链接、不要说通道发不出图。",
+        turns + [{"role": "user", "content": ask}]) or ""
+    prompt = " ".join(prompt.split())
+    if len(prompt) < 8:
+        prompt = ask[-400:]
+    if reference and "like the reference face" not in prompt.lower():
+        prompt = "Keep the same face as the reference photo. " + prompt
+    try:
+        display = send_name_for(chat_username)
+    except Exception:
+        display = chat_username
+    ctx = {"chat": chat_username, "cfg": llm.load_cfg(),
+           "display_name": display, "reference": reference,
+           "read_access": read_access.issue(chat_username)}
+    drawn = tools.draw_image(prompt[:800], ctx)
+    if ctx.get("generated_image") and not drawn.startswith("[已生成并把图片发给对方成功]"):
+        ctx["force_send"] = True
+        drawn = tools.draw_image(prompt[:800], ctx)
+    if drawn.startswith("[已生成并把图片发给对方成功]"):
+        follow = llm.chat(
+            system + "\n\n【图已用工具发出】不要再贴链接或说正在画。用角色口吻回一两句，让对方看刚发到微信里的图。",
+            turns + [{"role": "user", "content": ask}]) or ""
+        return follow.strip() or "图发你微信了，打开看。"
+    fail = llm.chat(
+        system + "\n\n【画图工具结果】" + drawn +
+        "\n按结果如实说画不了或还没发出，不要假装已发图，不要编外链。",
+        turns + [{"role": "user", "content": ask}])
+    return (fail or drawn).strip()
 
 
 _last_pat = {}            # chat -> ts，拍一拍回应节流(防连拍刷屏)
@@ -446,9 +625,72 @@ def _reply_pat(chat, m, rules, log):
     return True
 
 
+_CN_COUNT = {'一': 1, '二': 2, '两': 2, '俩': 2, '三': 3, '四': 4, '五': 5,
+             '六': 6, '七': 7, '八': 8, '九': 9, '十': 10}
+
+
+def _count_token(token):
+    token = (token or '').strip()
+    if token.isdigit():
+        return int(token)
+    return _CN_COUNT.get(token)
+
+
+_BURST_CUES = (
+    r'你自己玩(?:吧|啊|呀)?', r'自己玩吧', r'你自己开发', r'自己开发(?:吧|啊|呀)?',
+    r'你来弄(?:吧|啊|呀)?', r'你来玩(?:吧|啊|呀)?', r'你来开发', r'你来',
+    r'多发几次', r'连发几次', r'再发几次', r'多发几条', r'再来几次', r'多发点',
+    r'你继续(?:玩|弄|浪|干|发)?',
+    r'(?:^|[。！？\n～~])继续(?:玩|弄|浪|干|吧|啊|呀)?(?:[。！？～~\s]*)$',
+)
+_CONTINUE_ALONE = re.compile(r'^[\s，,。.!！？?～~]*(继续)[\s，,。.!！？?～~]*$')
+
+
+def burst_count(text, default=1):
+    """从自然语言里读出发几条。写了次数就按次数（范围取上限，最高 10）。
+    没写次数但出现「你自己玩/开发/你来弄/继续/多发几次」等，默认 3 条。"""
+    raw = text or ''
+    n, span, explicit = default, None, False
+    patterns = (
+        r'(?:继续|再|请|帮忙)?(?:连)?发\s*([0-9一二两三俩四五六七八九十]+)\s*[-~～到至]\s*([0-9一二两三俩四五六七八九十]+)\s*(?:次|条|句|遍|条消息|条微信)?',
+        r'(?:继续|再|请|帮忙)?(?:连)?发\s*([0-9一二两三俩四五六七八九十]+)\s*(?:次|条|句|遍|条消息|条微信)',
+        r'([0-9一二两三俩四五六七八九十]+)\s*(?:次|条|句|遍)\s*(?:消息|微信)?',
+    )
+    for pat in patterns:
+        m = re.search(pat, raw)
+        if not m:
+            continue
+        nums = [_count_token(g) for g in m.groups() if g]
+        nums = [x for x in nums if x]
+        if not nums:
+            continue
+        n, span, explicit = max(nums), m.span(), True
+        break
+    if not explicit:
+        compact = re.sub(r'\s+', '', raw)
+        if _CONTINUE_ALONE.search(re.sub(r'【[^】]*】', '', raw).strip()) or any(
+                re.search(p, raw) or re.search(p, compact) for p in _BURST_CUES):
+            n = 3
+    n = 1 if n < 1 else 10 if n > 10 else n
+    rest = (raw[:span[0]] + raw[span[1]:]).strip() if span else raw.strip()
+    rest = re.sub(r'^[，,。.\s]+|[，,。.\s]+$', '', rest)
+    return n, rest
+
+
+def greet_repeat(hint):
+    return burst_count(hint, default=1)
+
+
+def _split_next(text):
+    return [x.strip() for x in re.split(r'\s*\[\[NEXT\]\]\s*', text or '') if x.strip()]
+
+
 @sessions.task
-def greet(chat_username):
-    """网页"打招呼"：按该会话最近上下文,用人设生成一句主动问候并发送。返回结构化发送结果。"""
+def greet(chat_username, hint=""):
+    """网页"打招呼"：按该会话最近上下文,用人设生成一句主动问候并发送。返回结构化发送结果。
+
+    hint 可空：空则按上下文自动打招呼；有内容则当作本账号自己想说的要点，用人设写成自己发出去的话。
+    """
     blocked = sender.preflight(chat_username)
     if blocked:
         return blocked
@@ -463,6 +705,8 @@ def greet(chat_username):
         return {"ok": False, "status": "not_sent", "reason": "generation_unavailable", "message": "未配置 reply_ai 人设"}
     if not llm.available():
         return {"ok": False, "status": "not_sent", "reason": "generation_unavailable", "message": "未配置 LLM"}
+    hint = " ".join((hint or "").split())[:500]
+    burst, hint = greet_repeat(hint)
     try:
         msgs = messages.get_messages(chat_username, limit=10)
     except Exception:  # noqa: BLE001
@@ -471,26 +715,65 @@ def greet(chat_username):
     from core import reply_context
     turns = _passive_turns(chat_username, msgs, now)
     ctx = "当前时间：" + time.strftime('%m-%d %H:%M', time.localtime(now))
-    system = (personalization.role_context(chat_username, persona) +
-              "\n\n【任务】主动给对方发一句打招呼/开场的话：结合上面最近对话的语境自然衔接"
-              "(有话题就顺着聊,冷场很久就轻松重新起头),1~2句口语,别翻旧账、别自我介绍、"
-              "别重复你刚说过的话。只输出正文。")
-    text = (llm.chat(system + media_read.HONESTY + reply_context.ROLE_GUIDANCE, turns + [{"role": "user",
-            "content": ctx + "\n【本次任务】请生成一句主动打招呼，承接历史但不要重复自己已说过的话。"}]) or "").strip()
+    split_rule = (
+        f"\n【连发】这次要连续发出 {burst} 条独立微信，条与条用单独一行 [[NEXT]] 分隔。"
+        "每条换角度、换词，不要重复，不要在正文里写第几条或「我连发」。只输出这几段正文。"
+        if burst > 1 else "")
+    if hint:
+        system = (personalization.role_context(chat_username, persona) +
+                  "\n\n【任务】现在由你主动开口。下面【你自己想说的要点】是本账号即将发出的提纲，"
+                  "不是对方说的话，不要当成需要回复的消息，不要写成「你说…所以我…」。"
+                  "用第一人称把这些要点写成你自己要发给对方的完整消息：按人设写丰、写活，"
+                  "加上称呼和当下气氛，顺着最近对话接一句。通常 2~5 句，短提纲也要展开。"
+                  "要点里的事、时间、情绪必须留下；不要编提纲里没有的新事实、行程或承诺。"
+                  "不要转述「有人让我说」，不要客服腔。别翻旧账、别自我介绍。只输出你要发出的正文。"
+                  + split_rule +
+                  "\n【你自己想说的要点，禁止当成品照发】" + hint)
+        user = (ctx + "\n【本次任务】轮到你主动发消息。系统里的要点是你自己想说的，不是对方刚说的。"
+                "写成你要发出去的话；禁止当成对方发言来回答，禁止几乎原样照抄要点。"
+                + (f"必须输出 {burst} 段，用 [[NEXT]] 分隔。" if burst > 1 else ""))
+    else:
+        system = (personalization.role_context(chat_username, persona) +
+                  "\n\n【任务】主动给对方发一句打招呼/开场的话：结合上面最近对话的语境自然衔接"
+                  "(有话题就顺着聊,冷场很久就轻松重新起头),1~2句口语,别翻旧账、别自我介绍、"
+                  "别重复你刚说过的话。只输出正文。" + split_rule)
+        user = ctx + "\n【本次任务】请生成一句主动打招呼，承接历史但不要重复自己已说过的话。"
+        if burst > 1:
+            user += f"必须输出 {burst} 段，用 [[NEXT]] 分隔。"
+    text = (llm.chat(system + media_read.HONESTY + reply_context.ROLE_GUIDANCE,
+                     turns + [{"role": "user", "content": user}]) or "").strip()
     if not text:
         return {"ok": False, "status": "not_sent", "reason": "generation_unavailable", "message": "生成为空"}
+    parts = _split_next(text)[:burst] or [text]
+    while len(parts) < burst:
+        more = (llm.chat(system + media_read.HONESTY + reply_context.ROLE_GUIDANCE,
+                         turns + [{"role": "assistant", "content": "\n".join(parts)},
+                                  {"role": "user", "content": "再补一条不同角度的主动消息，不要重复上面，只输出这一条正文。"}])
+                or "").strip()
+        more = _split_next(more)[0] if more else ""
+        if not more or more in parts:
+            break
+        parts.append(more)
     target = send_name_for(chat_username)
-    if not conversation_state.allowed(gate):
-        return {"ok": False, "status": "not_sent", "reason": "proactive_context_changed"}
-    delay = humanize.typing_delay(text, chat_username)
-    if delay:
-        time.sleep(delay)
+    sent = []
+    r = None
     with reply_policy.scope(chat_username, [], msgs, mode='greeting'):
-        r = sender.send_text(target, text, chat_username=chat_username, proactive_ticket=gate)
-    if r.get('status') in ('confirmed', 'submitted'):
-        return dict(r, message=text)
-    message = '发送结果待核对，请勿重复发送' if r.get('status') == 'uncertain' else '本次未发送：' + r.get('reason', '')
-    return dict(r, message=message)
+        for index, part in enumerate(parts, 1):
+            if not conversation_state.allowed(gate):
+                return {"ok": False, "status": "not_sent", "reason": "proactive_context_changed",
+                        "message": "\n".join(sent) if sent else "会话已变化"}
+            delay = humanize.typing_delay(part, chat_username)
+            if delay:
+                time.sleep(delay)
+            r = sender.send_text(target, part, chat_username=chat_username, proactive_ticket=gate,
+                                 job_id=send_ledger.stable_id(sessions.capture()['account'], chat_username,
+                                                              'greet_part', [index, part[:40]]))
+            if r.get('status') not in ('confirmed', 'submitted'):
+                message = '发送结果待核对，请勿重复发送' if r.get('status') == 'uncertain' else '本次未发送：' + r.get('reason', '')
+                return dict(r, message=message, sent=sent)
+            sent.append(part)
+    preview = "\n".join(sent)
+    return dict(r or {}, message=preview, sent=sent, burst=len(sent))
 
 
 @sessions.task
@@ -527,8 +810,19 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
             log(f"  AI回复[{persona['name']}] 生成为空，跳过发送(不发空/不空转重试)")
             return {"ok": False, "status": "not_sent", "reason": "generation_failed", "retryable": False}
         target = send_name_for(chat_username)
-        parts = [x.strip() for x in re.split(r'\n\s*\[\[NEXT\]\]\s*\n', text) if x.strip()]
-        parts = parts[:2]
+        inbound = "\n".join((m.get("content") or "") for m in (batch_msgs or [msg]) if not m.get("is_self"))
+        burst, _ = burst_count(inbound or (msg.get("content") or ""), default=1)
+        parts = _split_next(text)[:burst]
+        if not parts:
+            parts = [text.strip()]
+        while len(parts) < burst:
+            more = (llm.chat("补一条不同角度的下一句，不要重复，只输出这一条正文。",
+                             [{"role": "assistant", "content": "\n".join(parts)},
+                              {"role": "user", "content": "再发一条。"}]) or "").strip()
+            more = _split_next(more)[0] if more else ""
+            if not more or more in parts:
+                break
+            parts.append(more)
         r = None
         for index, part in enumerate(parts, 1):
             _td = humanize.typing_delay(part, chat_username)

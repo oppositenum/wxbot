@@ -407,6 +407,39 @@ class Authorization(Isolated):
             self.assertEqual(client.get("/api/llm").json["tool_route"]["provider"], "grok")
             self.assertEqual(client.get("/api/llm").json["tool_route"]["model"], "configured-grok-name")
 
+    def test_image_follow_grok_uses_grok_creds_and_named_model(self):
+        cfg = copy.deepcopy(Routes.cfg)
+        cfg["image"] = {"follow": "grok", "model": "grok-imagine-image", "quality": "low"}
+        base, key, model = llm.image_creds(cfg)
+        self.assertEqual(base, "https://api.x.ai/v1")
+        self.assertEqual(key, "SECRET_K")
+        self.assertEqual(model, "grok-imagine-image")
+        info = llm.image_info(cfg)
+        self.assertEqual(info["follow"], "grok")
+        self.assertTrue(info["has_key"])
+        self.assertNotIn("SECRET", json.dumps(info))
+
+    def test_image_config_roundtrip_and_rejects_bad_follow(self):
+        import server
+        path = self.root / "llm_config.json"
+        path.write_text(json.dumps(copy.deepcopy(Routes.cfg)))
+        with patch.object(llm, "CONFIG_FILE", str(path)), \
+             patch.object(llm, "load_cfg", side_effect=lambda: json.loads(path.read_text())):
+            client = server.app.test_client()
+            r = client.post("/api/llm/config", json={"image": {
+                "follow": "grok", "model": "grok-imagine-image", "quality": "low"}})
+            self.assertEqual(r.status_code, 200)
+            saved = json.loads(path.read_text())
+            self.assertEqual(saved["image"]["follow"], "grok")
+            self.assertEqual(saved["image"]["model"], "grok-imagine-image")
+            self.assertEqual(saved["gpt"]["api_key"], "SECRET_G")
+            shown = client.get("/api/llm").json["image"]
+            self.assertEqual(shown["model"], "grok-imagine-image")
+            self.assertTrue(shown["has_key"])
+            self.assertNotIn("SECRET", client.get("/api/llm").get_data(as_text=True))
+            self.assertEqual(client.post("/api/llm/config", json={"image": {"follow": "unknown"}}).status_code, 400)
+            self.assertEqual(client.post("/api/llm/config", json={"image": "bad"}).status_code, 400)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -34,6 +34,11 @@ class UiLogin(unittest.TestCase):
         self.assertEqual(r.status_code, 401)
         self.assertEqual(self.client.get("/api/status").status_code, 401)
 
+    def test_missing_env_credentials_are_not_replaced_by_code_defaults(self):
+        with patch.dict(os.environ, {"WXBOT_UI_USER": "", "WXBOT_UI_PASSWORD": ""}, clear=False):
+            r = self.client.post("/api/auth/login", json={"username": "xinba", "password": "123"})
+        self.assertEqual(r.status_code, 503)
+
     def test_login_then_status_ok(self):
         r = self.client.post("/api/auth/login", json={"username": "xinba", "password": "123"})
         self.assertEqual(r.status_code, 200)

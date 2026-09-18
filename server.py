@@ -19,7 +19,7 @@ from core import bot as botmod
 from tools import wxbot_config
 
 app = Flask(__name__, static_folder=None)
-app.secret_key = os.environ.get("WXBOT_SECRET") or os.environ.get("WXBOT_ADMIN_READ_TOKEN") or "wxbot-ui-change-me"
+app.secret_key = os.environ.get("WXBOT_SECRET") or os.environ.get("WXBOT_ADMIN_READ_TOKEN") or os.urandom(32)
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_REFRESH_EACH_REQUEST"] = False
@@ -43,8 +43,11 @@ def _ui_auth_enabled():
 
 
 def _ui_credentials():
-    return (os.environ.get("WXBOT_UI_USER") or "xinba",
-            os.environ.get("WXBOT_UI_PASSWORD") or "123")
+    user = (os.environ.get("WXBOT_UI_USER") or "").strip()
+    password = os.environ.get("WXBOT_UI_PASSWORD") or ""
+    if not user or not password:
+        return None
+    return user, password
 
 
 def _ui_idle_seconds():
@@ -93,7 +96,10 @@ def api_auth_login():
     body = request.get_json(silent=True) or {}
     user = str(body.get("username") or "")
     password = str(body.get("password") or "")
-    expect_user, expect_pass = _ui_credentials()
+    expect = _ui_credentials()
+    if not expect:
+        return jsonify({"ok": False, "error": "未配置 WXBOT_UI_USER / WXBOT_UI_PASSWORD"}), 503
+    expect_user, expect_pass = expect
     import hmac
     user_ok = hmac.compare_digest(user.encode(), expect_user.encode())
     pass_ok = hmac.compare_digest(password.encode(), expect_pass.encode())

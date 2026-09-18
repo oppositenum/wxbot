@@ -4,7 +4,7 @@ import json
 import os
 import subprocess
 
-from flask import Blueprint, Flask, jsonify, request, send_from_directory
+from flask import Blueprint, Flask, has_request_context, jsonify, request, send_from_directory
 
 
 # Fallback used only when the multi-account registry can't be read. Points at the
@@ -51,8 +51,17 @@ def desktop_url(profile):
     public_url = os.environ.get("WXBOT_PUBLIC_NOVNC_URL", "").strip()
     if public_url:
         return public_url
+    # When the management API is reached through a reverse proxy, keep the
+    # browser on that same public origin. The proxy must route /vnc/ to 6082
+    # and pass WebSocket Upgrade/Connection headers.
+    if has_request_context():
+        host = request.host
+        host_name = host.rsplit(":", 1)[0].strip("[]")
+        if host_name not in {"localhost", "127.0.0.1", "::1"}:
+            scheme = request.headers.get("X-Forwarded-Proto", request.scheme).split(",", 1)[0].strip()
+            return f"{scheme}://{host}/vnc/vnc.html?autoconnect=true&resize=scale&view_only=false&path=vnc/websockify"
     return (f"http://localhost:{profile['port']}/vnc.html"
-            "?autoconnect=true&resize=scale&view_only=false")
+            "?autoconnect=true&resize=scale&view_only=false&path=websockify")
 
 
 def probe(profile):

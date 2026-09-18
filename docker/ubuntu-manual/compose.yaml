@@ -25,6 +25,11 @@ services:
       WXBOT_BOT_AUTOSTART: ${WXBOT_BOT_AUTOSTART:-1}
       WXBOT_MEDIA_CAPTURE: ${WXBOT_MEDIA_CAPTURE:-1}
       WXBOT_NOVNC_URL: http://localhost:6082/vnc.html?autoconnect=true&resize=scale&view_only=false
+      WXBOT_UI_AUTH: ${WXBOT_UI_AUTH:-1}
+      WXBOT_UI_USER: ${WXBOT_UI_USER:-}
+      WXBOT_UI_PASSWORD: ${WXBOT_UI_PASSWORD:-}
+      WXBOT_SECRET: ${WXBOT_SECRET:-}
+      WXBOT_UI_IDLE: ${WXBOT_UI_IDLE:-600}
     ports:
       - 127.0.0.1:5100:5100
       - 127.0.0.1:6082:6080

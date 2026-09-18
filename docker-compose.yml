@@ -27,6 +27,11 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
       WXBOT_BOT_AUTOSTART: ${WXBOT_BOT_AUTOSTART:-1}
       WXBOT_MEDIA_CAPTURE: ${WXBOT_MEDIA_CAPTURE:-1}
+      WXBOT_UI_AUTH: ${WXBOT_UI_AUTH:-1}
+      WXBOT_UI_USER: ${WXBOT_UI_USER:?WXBOT_UI_USER must be set in .env}
+      WXBOT_UI_PASSWORD: ${WXBOT_UI_PASSWORD:?WXBOT_UI_PASSWORD must be set in .env}
+      WXBOT_SECRET: ${WXBOT_SECRET:?WXBOT_SECRET must be set in .env}
+      WXBOT_UI_IDLE: ${WXBOT_UI_IDLE:-600}
       # 多账号 启动/停止/重启 通过宿主助手执行（容器内无 docker CLI）。
       WXBOT_SELF_CONTAINER: ${WXBOT_SELF_CONTAINER:-wxbot}
       WXBOT_HOST_AGENT_URL: ${WXBOT_HOST_AGENT_URL:-http://host.docker.internal:5199}

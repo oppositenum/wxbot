@@ -23,18 +23,39 @@ need curl
 docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required"
 docker info >/dev/null 2>&1 || die "Docker is not running"
 
+rand_hex() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 16
+  else
+    od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
+  fi
+}
+
+ensure_env_key() {
+  local key="$1" value="$2"
+  if grep -q "^${key}=" .env 2>/dev/null; then
+    local current
+    current="$(sed -n "s/^${key}=//p" .env | head -1)"
+    if [[ -n "$current" && "$current" != "GENERATE_ON_FIRST_DEPLOY" ]]; then
+      return
+    fi
+    sed -i.bak "s|^${key}=.*|${key}=${value}|" .env
+    rm -f .env.bak
+  else
+    printf '\n%s=%s\n' "$key" "$value" >> .env
+  fi
+}
+
 if [[ ! -f .env ]]; then
   cp .env.example .env
-  if command -v openssl >/dev/null 2>&1; then
-    password="$(openssl rand -hex 16)"
-  else
-    password="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
-  fi
-  sed -i.bak "s/^VNC_PASSWORD=.*/VNC_PASSWORD=${password}/" .env
-  rm -f .env.bak
   chmod 600 .env
-  echo "[deploy] created .env and generated a VNC password"
+  echo "[deploy] created .env from .env.example"
 fi
+ensure_env_key VNC_PASSWORD "$(rand_hex)"
+ensure_env_key WXBOT_UI_USER admin
+ensure_env_key WXBOT_UI_PASSWORD "$(rand_hex)"
+ensure_env_key WXBOT_SECRET "$(rand_hex)"
+ensure_env_key WXBOT_UI_AUTH 1
 
 if [[ -n "$IMAGE_OVERRIDE" ]]; then
   sed -i.bak "s|^WXBOT_IMAGE=.*|WXBOT_IMAGE=${IMAGE_OVERRIDE}|" .env
@@ -50,6 +71,12 @@ set +a
 : "${WXBOT_IMAGE:=wxbot-wechat:ubuntu-24.04}"
 if [[ -z "${VNC_PASSWORD:-}" || "$VNC_PASSWORD" == "GENERATE_ON_FIRST_DEPLOY" ]]; then
   die "set a non-empty VNC_PASSWORD in .env"
+fi
+if [[ -z "${WXBOT_UI_USER:-}" || -z "${WXBOT_UI_PASSWORD:-}" || "$WXBOT_UI_PASSWORD" == "GENERATE_ON_FIRST_DEPLOY" ]]; then
+  die "set WXBOT_UI_USER and WXBOT_UI_PASSWORD in .env"
+fi
+if [[ -z "${WXBOT_SECRET:-}" || "$WXBOT_SECRET" == "GENERATE_ON_FIRST_DEPLOY" ]]; then
+  die "set WXBOT_SECRET in .env"
 fi
 
 is_ubuntu_image() {
@@ -79,7 +106,7 @@ docker compose up -d --no-build --remove-orphans
 echo "[deploy] waiting for management backend"
 ready=0
 for _ in $(seq 1 60); do
-  if curl -fsS --max-time 2 http://127.0.0.1:5100/api/status >/dev/null 2>&1; then
+  if curl -fsS --max-time 2 http://127.0.0.1:5100/login >/dev/null 2>&1; then
     ready=1
     break
   fi
@@ -92,5 +119,6 @@ if [[ "$ready" != "1" ]]; then
 fi
 
 echo "[deploy] ready: http://127.0.0.1:5100"
-echo "[deploy] first login: http://127.0.0.1:6080/vnc.html"
-echo "[deploy] VNC password is stored in $ROOT_DIR/.env"
+echo "[deploy] management login is WXBOT_UI_USER / WXBOT_UI_PASSWORD in $ROOT_DIR/.env"
+echo "[deploy] first WeChat scan: http://127.0.0.1:6080/vnc.html"
+echo "[deploy] VNC password is VNC_PASSWORD in $ROOT_DIR/.env"

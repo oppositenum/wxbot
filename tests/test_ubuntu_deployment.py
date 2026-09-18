@@ -26,14 +26,29 @@ class UbuntuDeployment(unittest.TestCase):
         self.assertIn("is_ubuntu_image", deploy)
         self.assertIn("ubuntu-24.04", deploy)
         self.assertIn("IMAGE_OVERRIDE", deploy)
+        self.assertIn("WXBOT_UI_USER", deploy)
+        self.assertIn("WXBOT_UI_PASSWORD", deploy)
         self.assertTrue((ROOT / "deploy.sh").stat().st_mode & 0o111)
 
-    def test_desktop_manager_exposes_only_ubuntu(self):
-        from core.desktop_management import PROFILES
+    def test_ui_login_is_env_only_not_hardcoded(self):
+        server = (ROOT / "server.py").read_text()
+        example = (ROOT / ".env.example").read_text()
+        compose = (ROOT / "docker-compose.yml").read_text()
+        self.assertNotIn('or "xinba"', server)
+        self.assertNotIn('or "123"', server)
+        self.assertIn("WXBOT_UI_USER", example)
+        self.assertIn("WXBOT_UI_PASSWORD", example)
+        self.assertIn("WXBOT_SECRET", example)
+        self.assertIn("WXBOT_UI_USER", compose)
+        self.assertIn("WXBOT_UI_PASSWORD", compose)
 
-        self.assertEqual(list(PROFILES), ["ubuntu"])
-        self.assertEqual(PROFILES["ubuntu"]["container"], "wxbot")
-        self.assertEqual(PROFILES["ubuntu"]["home"], "/home/wechat")
+    def test_desktop_manager_exposes_only_ubuntu(self):
+        from core.desktop_management import DEFAULT_PROFILES
+
+        self.assertEqual(list(DEFAULT_PROFILES), ["primary"])
+        self.assertEqual(DEFAULT_PROFILES["primary"]["container"], "wxbot-ubuntu-manual")
+        self.assertEqual(DEFAULT_PROFILES["primary"]["home"], "/home/wechat")
+        self.assertIn("Ubuntu 24.04", DEFAULT_PROFILES["primary"]["system"])
 
 
 if __name__ == "__main__":

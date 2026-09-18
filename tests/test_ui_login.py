@@ -8,8 +8,8 @@ class UiLogin(unittest.TestCase):
     def setUp(self):
         self.env = patch.dict(os.environ, {
             "WXBOT_UI_AUTH": "1",
-            "WXBOT_UI_USER": "xinba",
-            "WXBOT_UI_PASSWORD": "123",
+            "WXBOT_UI_USER": "test-user",
+            "WXBOT_UI_PASSWORD": "test-password",
             "WXBOT_SECRET": "test-secret",
         }, clear=False)
         self.env.start()
@@ -30,30 +30,30 @@ class UiLogin(unittest.TestCase):
         self.assertEqual(r.status_code, 401)
 
     def test_wrong_password_rejected(self):
-        r = self.client.post("/api/auth/login", json={"username": "xinba", "password": "wrong"})
+        r = self.client.post("/api/auth/login", json={"username": "test-user", "password": "wrong"})
         self.assertEqual(r.status_code, 401)
         self.assertEqual(self.client.get("/api/status").status_code, 401)
 
     def test_missing_env_credentials_are_not_replaced_by_code_defaults(self):
         with patch.dict(os.environ, {"WXBOT_UI_USER": "", "WXBOT_UI_PASSWORD": ""}, clear=False):
-            r = self.client.post("/api/auth/login", json={"username": "xinba", "password": "123"})
+            r = self.client.post("/api/auth/login", json={"username": "test-user", "password": "test-password"})
         self.assertEqual(r.status_code, 503)
 
     def test_login_then_status_ok(self):
-        r = self.client.post("/api/auth/login", json={"username": "xinba", "password": "123"})
+        r = self.client.post("/api/auth/login", json={"username": "test-user", "password": "test-password"})
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.json["ok"])
         self.assertEqual(self.client.get("/api/status").status_code, 200)
 
     def test_logout_locks_again(self):
-        self.client.post("/api/auth/login", json={"username": "xinba", "password": "123"})
+        self.client.post("/api/auth/login", json={"username": "test-user", "password": "test-password"})
         self.client.post("/api/auth/logout")
         self.assertEqual(self.client.get("/api/status").status_code, 401)
 
     def test_idle_timeout_returns_to_login(self):
         import time
         with patch.dict(os.environ, {"WXBOT_UI_IDLE": "600"}, clear=False):
-            self.client.post("/api/auth/login", json={"username": "xinba", "password": "123"})
+            self.client.post("/api/auth/login", json={"username": "test-user", "password": "test-password"})
             self.assertEqual(self.client.get("/api/status").status_code, 200)
             with self.client.session_transaction() as sess:
                 sess["ui_seen"] = int(time.time()) - 601
@@ -64,7 +64,7 @@ class UiLogin(unittest.TestCase):
 
     def test_polling_does_not_extend_idle(self):
         import time
-        self.client.post("/api/auth/login", json={"username": "xinba", "password": "123"})
+        self.client.post("/api/auth/login", json={"username": "test-user", "password": "test-password"})
         with self.client.session_transaction() as sess:
             seen = int(time.time()) - 30
             sess["ui_seen"] = seen
@@ -74,6 +74,24 @@ class UiLogin(unittest.TestCase):
         self.assertEqual(self.client.post("/api/auth/touch").status_code, 200)
         with self.client.session_transaction() as sess:
             self.assertGreaterEqual(sess.get("ui_seen"), seen + 29)
+
+    def test_session_status_expires_without_user_activity(self):
+        import time
+        self.client.post('/api/auth/login', json={
+            'username': 'test-user', 'password': 'test-password'})
+        with self.client.session_transaction() as sess:
+            seen = int(time.time())
+            sess['ui_seen'] = seen
+        with patch.dict(os.environ, {'WXBOT_UI_IDLE': '30'}):
+            with patch('server.time.time', return_value=seen + 29):
+                response = self.client.get('/api/auth/status')
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers['Cache-Control'], 'no-store')
+                self.assertNotIn('Set-Cookie', response.headers)
+            with self.client.session_transaction() as sess:
+                self.assertEqual(sess['ui_seen'], seen)
+            with patch('server.time.time', return_value=seen + 31):
+                self.assertEqual(self.client.get('/api/auth/status').status_code, 401)
 
 
 if __name__ == "__main__":

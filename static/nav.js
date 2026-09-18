@@ -40,6 +40,24 @@
     html.classList.add('wxnav-on');
   }
   var lastTouch = 0;
+  var checking = false;
+  function checkSession(){
+    if (checking) return;
+    checking = true;
+    fetch('/api/auth/status', {credentials:'same-origin', cache:'no-store'})
+      .then(function(r){
+        if (r.status === 401) window.location.replace('/login');
+      }).catch(function(){
+        // A network failure is not proof that the session expired.
+      }).finally(function(){ checking = false; });
+  }
+  checkSession();
+  setInterval(checkSession, 5000);
+  window.addEventListener('focus', checkSession);
+  window.addEventListener('pageshow', checkSession);
+  document.addEventListener('visibilitychange', function(){
+    if (!document.hidden) checkSession();
+  });
   function bump(){
     var now = Date.now();
     if (now - lastTouch < 15000) return;

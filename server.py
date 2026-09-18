@@ -109,6 +109,14 @@ def api_auth_login():
     return jsonify({"ok": True})
 
 
+@app.get("/api/auth/status")
+def api_auth_status():
+    # GET checks must never refresh ui_seen: polling is not user activity.
+    response = jsonify({"ok": not _ui_auth_enabled() or _ui_logged_in()})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.post("/api/auth/touch")
 def api_auth_touch():
     if not _ui_logged_in():

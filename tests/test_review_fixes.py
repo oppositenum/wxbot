@@ -126,6 +126,25 @@ class Routes(Isolated):
         self.assertIn("configured-grok-name", diag)
         self.assertNotIn("SECRET", diag)
 
+    def test_grok_transient_failure_retries_then_falls_back_to_gpt(self):
+        calls = []
+        def post(url, headers, body, proxy, **kw):
+            calls.append((url, body.get("model"), kw.get("retries")))
+            if body.get("model") == "configured-grok-name":
+                raise RuntimeError("模型接口 HTTP 503；未切换 provider/model")
+            return {"choices": [{"message": {"content": "gpt-ok"}}]}
+        with patch.object(llm, "_post", post):
+            out = llm.chat("sys", [{"role": "user", "content": "hi"}], dict(self.cfg, provider="grok"))
+        self.assertEqual(out, "gpt-ok")
+        self.assertEqual([c[1] for c in calls], ["configured-grok-name", "configured-gpt-name"])
+
+    def test_grok_content_policy_does_not_fall_back_to_gpt(self):
+        def post(*a, **k):
+            raise RuntimeError("模型接口 HTTP 403；未切换 provider/model：content policy")
+        with patch.object(llm, "_post", post) as mocked:
+            with self.assertRaises(RuntimeError):
+                llm.chat("sys", [], dict(self.cfg, provider="grok"))
+
     def test_grok_env_key_and_default_base(self):
         cfg = {"provider": "grok"}
         with patch.dict(os.environ, {"XAI_API_KEY": "ENV_GROK_KEY"}, clear=False):

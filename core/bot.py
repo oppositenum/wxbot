@@ -1449,9 +1449,12 @@ def enqueue_pending(chat, msg, context, rule, now):
     return p
 
 
-def _single_closing_reply(p):
+def _single_closing_reply(p, chat=None):
+    msgs = p.get('msgs') or []
+    chat = chat or p.get('chat') or (msgs[-1].get('chat') if msgs else '')
     return (p.get('rule', {}).get('action', {}).get('type') in ('reply', 'reply_ai')
-            and reply_policy.closing(p.get('msgs') or []))
+            and reply_policy.closing(msgs)
+            and reply_policy.skip_closing_replies(chat))
 
 
 def process_pending(chat, p, rules, log):
@@ -1490,7 +1493,7 @@ def process_pending(chat, p, rules, log):
         'reply', [m.get('local_id') for m in p['msgs']]))
     ledger = send_ledger.Ledger()
     prior = ledger.get(jid)
-    decision = reply_policy.decide(p['msgs'], p.get('ctx') or [], token['account'])
+    decision = reply_policy.decide(p['msgs'], p.get('ctx') or [], token['account'], chat=chat)
     is_reply = p.get('rule', {}).get('action', {}).get('type') in ('reply', 'reply_ai')
     started = time.monotonic()
     if prior:
@@ -1662,7 +1665,7 @@ def run_once(rules, state, log=print):
             # 战斗模式：该会话逐条回击，不看是否 @/引用；发令的管理员自己不打。
             if text_like and battle_mode.is_on(chat) and not m["is_self"] \
                     and not admin_commands.is_admin(m.get("sender"), rules):
-                enqueue_pending(chat, m, msgs, _BATTLE_RULE, now)
+                enqueue_pending(chat, m, msgs, _BATTLE_RULE, time.time())
                 log(f"[战斗模式] {chat} +1条 → 回击队列")
                 continue
             for rule in rules.get("rules", []):
@@ -1675,10 +1678,10 @@ def run_once(rules, state, log=print):
                     continue
                 if rule.get("action", {}).get("type") == "reply_ai":
                     # 攒进待回队列，去抖后一次性回
-                    p = enqueue_pending(chat, m, msgs, rule, now)
+                    p = enqueue_pending(chat, m, msgs, rule, time.time())
                     log(f"[攒:{rule['name']}] {chat} +1条(共{len(p['msgs'])})")
                 else:
-                    enqueue_pending(chat, m, msgs, rule, now)
+                    enqueue_pending(chat, m, msgs, rule, time.time())
                 break
         # Slow proactive generation/UI never holds up polling other contacts.
         if chat in watch_set and chat not in _proactive_busy:
@@ -1694,7 +1697,7 @@ def run_once(rules, state, log=print):
         if not p.get("msgs"):
             _pending.pop(chat, None)
             continue
-        elapsed = now - p.get("first_seen", p.get("last_seen", 0))
+        elapsed = time.time() - p.get("first_seen", p.get("last_seen", 0))
         if elapsed >= _settle_for(p["msgs"], rules) * p.get("_settle_factor", 1.0):
             # 纯语音批：微信「转文字」是异步写库的，批次快照定格时可能还没有转写。
             # 触发前先按库里最新转写补进快照；仍缺且未开自带 STT，就在宽限期内继续等，

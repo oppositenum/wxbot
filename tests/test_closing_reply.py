@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from test_send_safety import Isolated, forbidden
-from core import bot, send_ledger
+from core import bot, send_ledger, reply_policy
 
 
 def pending(text, **fields):
@@ -57,6 +57,14 @@ class Integration(Isolated):
             bot.process_pending('chat-A', replay, {}, lambda *a: None)
         self.assertNotIn('chat-A', bot._pending)
         self.assertEqual(self.adapter.calls, 0)
+
+    def test_contact_can_keep_replying_to_closings(self):
+        from core import personalization as pers, account_session as sessions
+        sessions.observe()
+        pers.update('chat-A', {'skip_closing_replies': False}, pers.get('chat-A')['revision'])
+        p = pending('好的'); p['msgs'][0]['chat'] = 'chat-A'
+        self.assertFalse(bot._single_closing_reply(p, chat='chat-A'))
+        self.assertEqual(reply_policy.decide(p['msgs'], [], 'account-A', chat='chat-A').action, 'reply')
 
     def test_new_message_after_skip_is_processed_normally(self):
         p = self.batch('知道了')

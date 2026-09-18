@@ -8,7 +8,7 @@ import os
 import threading
 import time
 
-from flask import Flask, jsonify, request, send_file, send_from_directory, Response
+from flask import Flask, jsonify, request, send_file, send_from_directory, Response, session, redirect
 import io
 import zipfile
 import tempfile
@@ -19,6 +19,11 @@ from core import bot as botmod
 from tools import wxbot_config
 
 app = Flask(__name__, static_folder=None)
+app.secret_key = os.environ.get("WXBOT_SECRET") or os.environ.get("WXBOT_ADMIN_READ_TOKEN") or "wxbot-ui-change-me"
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_REFRESH_EACH_REQUEST"] = False
+app.config["PERMANENT_SESSION_LIFETIME"] = int(os.environ.get("WXBOT_UI_IDLE") or 600)
 from core.personalization_api import bp as personalization_bp
 app.register_blueprint(personalization_bp)
 
@@ -29,6 +34,103 @@ def personalization_page():
 
 
 from core import account_session as sessions
+
+_UI_PUBLIC = frozenset({"/login", "/api/auth/login", "/api/auth/logout"})
+
+
+def _ui_auth_enabled():
+    return os.environ.get("WXBOT_UI_AUTH", "1") != "0"
+
+
+def _ui_credentials():
+    return (os.environ.get("WXBOT_UI_USER") or "xinba",
+            os.environ.get("WXBOT_UI_PASSWORD") or "123")
+
+
+def _ui_idle_seconds():
+    try:
+        return max(30, int(os.environ.get("WXBOT_UI_IDLE") or 600))
+    except (TypeError, ValueError):
+        return 600
+
+
+def _touch_ui_session():
+    session["ui_auth"] = True
+    session["ui_seen"] = int(time.time())
+    session.permanent = True
+    session.modified = True
+
+
+def _ui_activity_request():
+    path = request.path or "/"
+    if path == "/api/auth/touch" or request.method not in ("GET", "HEAD", "OPTIONS"):
+        return True
+    return not path.startswith("/api/")
+
+
+def _ui_logged_in():
+    if session.get("ui_auth") is True:
+        seen = session.get("ui_seen") or 0
+        if time.time() - seen <= _ui_idle_seconds():
+            return True
+        session.clear()
+        return False
+    import hmac
+    expected = os.environ.get("WXBOT_ADMIN_READ_TOKEN", "")
+    supplied = request.headers.get("X-Wxbot-Admin-Token", "")
+    return bool(expected and supplied) and hmac.compare_digest(expected.encode(), supplied.encode())
+
+
+@app.get("/login")
+def login_page():
+    if _ui_logged_in():
+        return redirect("/")
+    return send_from_directory(os.path.join(config.PROJECT_DIR, "static"), "login.html")
+
+
+@app.post("/api/auth/login")
+def api_auth_login():
+    body = request.get_json(silent=True) or {}
+    user = str(body.get("username") or "")
+    password = str(body.get("password") or "")
+    expect_user, expect_pass = _ui_credentials()
+    import hmac
+    user_ok = hmac.compare_digest(user.encode(), expect_user.encode())
+    pass_ok = hmac.compare_digest(password.encode(), expect_pass.encode())
+    if not (user_ok and pass_ok):
+        return jsonify({"ok": False, "error": "账号或密码不对"}), 401
+    _touch_ui_session()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/auth/touch")
+def api_auth_touch():
+    if not _ui_logged_in():
+        return jsonify({"error": "需要登录"}), 401
+    _touch_ui_session()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/auth/logout")
+def api_auth_logout():
+    session.clear()
+    return jsonify({"ok": True})
+
+
+@app.before_request
+def require_ui_login():
+    if not _ui_auth_enabled():
+        return None
+    path = request.path or "/"
+    if path in _UI_PUBLIC or path.startswith("/static/"):
+        return None
+    if _ui_logged_in():
+        if _ui_activity_request():
+            _touch_ui_session()
+        return None
+    if path.startswith("/api/"):
+        return jsonify({"error": "需要登录"}), 401
+    return redirect("/login")
 
 def _config_access():
     """Allow same-origin local UI or the configured admin token (Docker bridge requests

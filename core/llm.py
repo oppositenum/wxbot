@@ -177,20 +177,23 @@ def _endpoint(base, tail):
     return base + "/v1/" + tail
 
 
-def chat(system, messages, cfg=None):
-    """messages: [{"role":"user"/"assistant","content":str}]，返回回复文本。
-    provider 决定用 claude / gpt / grok 哪套独立中转(见 creds)。"""
-    cfg = cfg or load_cfg()
-    provider = cfg.get("provider", "claude")
+def _transient_chat_error(err):
+    text = str(err)
+    if "content policy" in text.lower() or "HTTP 403" in text:
+        return False
+    return any(s in text for s in ("HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504", "HTTP 429", "连接失败"))
+
+
+def _chat_once(system, messages, cfg, provider):
+    """打一轮指定 provider，不含跨模型回退。"""
     if provider not in PROVIDERS:
         raise CapabilityError("所选 provider 没有聊天适配器")
-    proxy = cfg.get("proxy") or None          # 空=直连(不隐式走系统代理)
+    proxy = cfg.get("proxy") or None
     max_tokens = cfg.get("max_tokens") or 600
     temperature = cfg.get("temperature", 0.9)
     base, key, model = creds(cfg, provider)
     if not key:
         raise RuntimeError(f"未配置 {provider} 的 api_key（在 AI 设置里填该套中转）")
-
     _request_route(provider, model, "chat", uuid.uuid4().hex)
     timeout = 20 if cfg.get("probe") else (90 if provider == "grok" else 60)
     retries = 0 if (cfg.get("single_attempt") or cfg.get("probe")) else (1 if provider == "grok" else 3)
@@ -200,14 +203,12 @@ def chat(system, messages, cfg=None):
         if temperature is not None and cfg.get("send_temperature"):
             body["temperature"] = temperature
         headers = {"content-type": "application/json", "x-api-key": key,
-                   "authorization": f"Bearer {key}",   # 中转常用 Bearer
+                   "authorization": f"Bearer {key}",
                    "anthropic-version": "2023-06-01", "user-agent": UA}
         url = _endpoint(base or _default_base(provider), "messages")
         r = _post(url, headers, body, proxy, timeout=timeout, retries=retries)
         parts = r.get("content", [])
         return "".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
-
-    # OpenAI / GPT / Grok 兼容
     url = _endpoint(base or _default_base(provider), "chat/completions")
     msgs = ([{"role": "system", "content": system}] if system else []) + messages
     body = {"model": model, "max_tokens": max_tokens, "messages": msgs}
@@ -218,6 +219,24 @@ def chat(system, messages, cfg=None):
                "user-agent": UA}
     r = _post(url, headers, body, proxy, timeout=timeout, retries=retries)
     return _openai_text(r)
+
+
+def chat(system, messages, cfg=None):
+    """messages: [{"role":"user"/"assistant","content":str}]，返回回复文本。
+    provider 决定用 claude / gpt / grok 哪套独立中转(见 creds)。
+    主模型是 grok 时：本模型已含一次重试；仍 5xx/超时则再用 GPT 打一轮。"""
+    cfg = cfg or load_cfg()
+    provider = cfg.get("provider", "claude")
+    try:
+        return _chat_once(system, messages, cfg, provider)
+    except Exception as err:
+        if (provider != "grok" or cfg.get("probe") or cfg.get("single_attempt")
+                or cfg.get("no_gpt_fallback") or not _transient_chat_error(err)):
+            raise
+        _, gpt_key, _ = creds(cfg, "gpt")
+        if not gpt_key:
+            raise
+        return _chat_once(system, messages, cfg, "gpt")
 
 
 def chat_tools(system, messages, tools, dispatch, cfg=None, max_rounds=6):

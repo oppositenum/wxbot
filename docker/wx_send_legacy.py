@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """容器内发送器：用 xdotool 驱动 Linux 微信发文本/图片。
 
-流程：激活窗口 → 点侧栏搜索 → 粘贴目标名 → 点击首条结果打开会话
+流程：真正抢回主窗口焦点 → 关掉聊天内搜索等浮层 → 点侧栏搜索
+→ 确认搜索框吃到了目标名 → 点击首条搜索结果打开会话
 → 点输入框并清空 → 粘贴正文 → 回车/点发送。
+搜索没焦点时绝不往下发：否则字会进当前正打开的会话。
 不要在搜索后对输入框按回车：微信号会当成一条消息发出去。
 用法：
   python3 wx_send.py text  "文件传输助手" "你好"
@@ -56,9 +58,14 @@ def key(*keys):
     x("xdotool", "key", "--clearmodifiers", *keys)
 
 
+def clipget():
+    r = x("xclip", "-selection", "clipboard", "-o", "-target", "UTF8_STRING")
+    return r.stdout if r.returncode == 0 else ""
+
+
 def close_overlays():
-    """朋友圈/图片预览会盖在聊天上,人手和脚本都点不到输入框。"""
-    for title in ("^朋友圈$", "^图片$", "^视频$"):
+    """朋友圈/图片预览/聊天内搜索会盖住主窗口，按键会打到浮层或当前会话。"""
+    for title in ("^朋友圈$", "^图片$", "^视频$", "^搜索聊天记录$"):
         r = x("xdotool", "search", "--name", title)
         for oid in [l for l in r.stdout.split() if l.strip()]:
             x("xdotool", "windowactivate", "--sync", oid)
@@ -67,23 +74,70 @@ def close_overlays():
             x("xdotool", "windowclose", oid)
 
 
+def ensure_focused(wid):
+    """windowactivate 在 XFCE 里经常只点亮窗口、键盘焦点还在别处。"""
+    px, py, w, h = win_geom(wid)
+    for _ in range(3):
+        x("xdotool", "windowactivate", "--sync", wid)
+        x("xdotool", "windowraise", wid)
+        x("xdotool", "windowfocus", "--sync", wid)
+        time.sleep(0.15)
+        # 点标题栏：第一下专门用来抢焦点，避免随后点搜索被当成“激活窗口”。
+        x("xdotool", "mousemove", str(px + max(w // 2, 400)), str(py + 12), "click", "1")
+        time.sleep(0.2)
+        if x("xdotool", "getactivewindow").stdout.strip() == str(wid):
+            return win_geom(wid)
+    print("ERR:no-focus"); sys.exit(3)
+
+
+def click_search(px, py):
+    # 侧栏顶部搜索框。不要 Ctrl+F：Linux 微信那是“搜索聊天记录”。
+    x("xdotool", "mousemove", str(px + 131), str(py + 43), "click", "1")
+    time.sleep(0.25)
+
+
+def search_box_holds(name):
+    """读当前焦点框。搜索没聚焦时这里读到的是输入框，不能当已搜到人。"""
+    sentinel = "WXBOT_SEARCH_SENTINEL"
+    old = clipget()
+    try:
+        set_clip_text(sentinel)
+        key("ctrl+a")
+        time.sleep(0.08)
+        key("ctrl+c")
+        time.sleep(0.15)
+        got = clipget()
+        key("Right")
+        time.sleep(0.05)
+        return got == name
+    finally:
+        set_clip_text(old)
+
+
 def open_chat(wid, name):
     close_overlays()
-    x("xdotool", "windowactivate", "--sync", wid)
-    time.sleep(0.4)
+    px, py, w, h = ensure_focused(wid)
+    # 关掉残留搜索浮层；不要在输入框里回车。
+    key("Escape")
+    time.sleep(0.12)
+    key("Escape")
+    time.sleep(0.12)
     px, py, w, h = win_geom(wid)
-    # 点侧栏搜索框。不要 Ctrl+F: Linux 微信那是聊天内搜索。
-    # 不要在这里按回车：搜索框没焦点时，回车会把微信号从输入框发出去。
-    x("xdotool", "mousemove", str(px + 131), str(py + 43), "click", "1")
-    time.sleep(0.35)
+    # 连点两次：第一下落在未聚焦窗口上时只激活，第二次才进搜索框。
+    click_search(px, py)
+    click_search(px, py)
     key("ctrl+a")
-    time.sleep(0.1)
+    time.sleep(0.08)
     key("Delete")
-    time.sleep(0.15)
+    time.sleep(0.12)
     set_clip_text(name)
     key("ctrl+v")
-    time.sleep(1.6)          # 等搜索结果
-    # 点侧栏第一条结果打开会话（搜索框下方）。
+    time.sleep(0.35)
+    if not search_box_holds(name):
+        key("Escape")
+        print("ERR:search-unfocused"); sys.exit(3)
+    time.sleep(1.3)          # 等搜索结果
+    # 点搜索结果第一行（搜索框下方）。搜索没弹出时这里是当前会话，所以上面必须先确认。
     x("xdotool", "mousemove", str(px + 170), str(py + 108), "click", "1")
     time.sleep(1.0)
     # 点消息区，收起搜索浮层，避免后续按键还打在搜索框。

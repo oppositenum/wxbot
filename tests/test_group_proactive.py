@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -41,6 +42,12 @@ class Group(Isolated):
         bot.enqueue_pending('chat-A',{'local_id':2},[],rule,104)
         self.assertEqual(p['first_seen'],100)
         self.assertEqual(bot._settle_for([{'type':1}]),5)
+
+    def test_settle_uses_wall_clock_not_stale_cycle_start(self):
+        src = Path(__file__).resolve().parents[1].joinpath('core/bot.py').read_text()
+        settle = src[src.index('# 去抖：对方停顿够久'):src.index('process_futures.append')]
+        self.assertIn('time.time() - p.get("first_seen"', settle)
+        self.assertNotIn('now - p.get("first_seen"', settle)
 
     def test_group_auto_reply_off_by_default(self):
         from core import decrypt, messages, conversation_state, personalization

@@ -1,6 +1,7 @@
 """Manual desktop management; does not import account readers or send workers."""
 from pathlib import Path
 import json
+import os
 import subprocess
 
 from flask import Blueprint, Flask, jsonify, request, send_from_directory
@@ -47,6 +48,9 @@ def _default_instance(profiles):
 
 
 def desktop_url(profile):
+    public_url = os.environ.get("WXBOT_PUBLIC_NOVNC_URL", "").strip()
+    if public_url:
+        return public_url
     return (f"http://localhost:{profile['port']}/vnc.html"
             "?autoconnect=true&resize=scale&view_only=false")
 

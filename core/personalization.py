@@ -89,7 +89,8 @@ def _db(write=False):
 
 def _default():
     return dict(persona_id=None, personalization_enabled=False, auto_update=False,
-                conversation_control_enabled=False, agent_enabled=True, preferences={}, revision=0)
+                conversation_control_enabled=False, agent_enabled=True,
+                skip_closing_replies=True, preferences={}, revision=0)
 
 
 def _get(con, contact):
@@ -108,6 +109,8 @@ def _get(con, contact):
                ('auto_update', 'personalization_enabled', 'conversation_control_enabled')):
             raise ValueError()
         if 'agent_enabled' in data and not isinstance(data.get('agent_enabled'), bool):
+            raise ValueError()
+        if 'skip_closing_replies' in data and not isinstance(data.get('skip_closing_replies'), bool):
             raise ValueError()
         _slug(data.get('persona_id'))
         for field, pref in data.get('preferences', {}).items():
@@ -152,7 +155,7 @@ def _template_target(contact):
 def _template_values(template, contact):
     data = _default()
     for key in ('persona_id', 'personalization_enabled', 'auto_update',
-                'conversation_control_enabled', 'agent_enabled'):
+                'conversation_control_enabled', 'agent_enabled', 'skip_closing_replies'):
         data[key] = template.get(key, data[key])
     data['configured_features'] = ['personalization_enabled', 'auto_update', 'conversation_control_enabled']
     data['preferences'] = {k: dict(value=v['value'], locked=v.get('locked', False),
@@ -217,7 +220,8 @@ def _slug(slug):
 def update(contact, patch, revision):
     _id(contact)
     if set(patch) - {'persona_id', 'personalization_enabled', 'auto_update',
-                     'conversation_control_enabled', 'agent_enabled', 'preferences'}:
+                     'conversation_control_enabled', 'agent_enabled',
+                     'skip_closing_replies', 'preferences'}:
         raise ValueError('未知设置字段')
     with _db(True) as con:
         data = _get(con, contact)
@@ -225,7 +229,7 @@ def update(contact, patch, revision):
             raise Conflict('配置已被修改，请刷新后重试')
         data.pop('config_error', None)
         for key in ('persona_id', 'personalization_enabled', 'auto_update',
-                    'conversation_control_enabled', 'agent_enabled'):
+                    'conversation_control_enabled', 'agent_enabled', 'skip_closing_replies'):
             if key in patch:
                 v = patch[key]
                 if key == 'persona_id':
@@ -314,7 +318,7 @@ _SWITCH_INTENT = re.compile(
 _ADULT_CUES = re.compile(
     r'想做了|想要了|来做[啊呀吧]?|开荤|想色色|想做爱|想被操|想上床|进入状态|开车|'
     r'黄一点|骚一点|成人模式|想浪|想被干|做爱')
-_ADULT_PREF = ('夏以昼成人', '成人3', '成人2', '成人', '成人男友', '成人女友')
+_ADULT_PREF = ('成人3', '夏以昼成人', '成人2', '成人', '成人男友', '成人女友')
 
 
 def catalog():

@@ -39,6 +39,18 @@
     document.body.appendChild(toggle);
     html.classList.add('wxnav-on');
   }
+  var lastTouch = 0;
+  function bump(){
+    var now = Date.now();
+    if (now - lastTouch < 15000) return;
+    lastTouch = now;
+    fetch('/api/auth/touch', {method:'POST', credentials:'same-origin'}).then(function(r){
+      if (r.status === 401) location.href = '/login';
+    }).catch(function(){});
+  }
+  ['click','keydown','pointerdown','touchstart'].forEach(function(ev){
+    document.addEventListener(ev, bump, true);
+  });
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', build);
   else build();
 })();

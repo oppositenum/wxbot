@@ -18,6 +18,7 @@ class Defaults(Isolated):
         for field in ('personalization_enabled', 'auto_update', 'conversation_control_enabled'):
             self.assertIs(data[field], False)
         self.assertIs(data['agent_enabled'], True)
+        self.assertIs(data['skip_closing_replies'], True)
         self.assertEqual(p.learn_live('friend-A', [msg()]), 0)
         self.assertFalse(cs.observe('friend-A', [msg(text='先这样，拜拜')])['paused'])
         with patch.object(cs, 'latest', side_effect=forbidden):

@@ -34,9 +34,25 @@ class Legacy(Isolated):
         open_fn = src[src.index('def open_chat'):src.index('def focus_input')]
         send_fn = src[src.index('def send_text'):src.index('def send_image')]
         self.assertIn('py + 108', open_fn)
+        self.assertIn('ERR:search-unfocused', src)
+        self.assertIn('windowfocus', src)
+        self.assertIn('搜索聊天记录', src)
         self.assertNotIn('key("Return")', open_fn)
         self.assertIn('clear_input()', send_fn)
         self.assertNotIn('key("Escape")', send_fn)
+
+    def test_unfocused_search_is_not_sent_to_the_visible_chat(self):
+        self.execute.return_value = SimpleNamespace(returncode=3, stdout='ERR:search-unfocused\n')
+        r = self.send()
+        self.assertEqual(r['status'], 'not_sent')
+        self.assertEqual(r['reason'], 'legacy_search_unfocused')
+        self.send(); self.assertEqual(self.execute.call_count, 1)
+
+    def test_unfocused_window_is_not_sent(self):
+        self.execute.return_value = SimpleNamespace(returncode=3, stdout='ERR:no-focus\n')
+        r = self.send()
+        self.assertEqual(r['status'], 'not_sent')
+        self.assertEqual(r['reason'], 'legacy_no_focus')
 
     def test_same_remark_contacts_use_their_distinct_wechat_ids(self):
         with self.contacts([('chat-A', 'unique_a', 'same name', 'A'),

@@ -44,14 +44,19 @@ class UbuntuDeployment(unittest.TestCase):
 
     def test_legacy_compose_reuses_root_env_without_overrides(self):
         compose = (ROOT / "docker" / "ubuntu-manual" / "compose.yaml").read_text()
+        dockerfile = (ROOT / "docker" / "ubuntu-manual" / "Dockerfile").read_text()
         self.assertIn("env_file:\n      - ../../.env", compose)
         self.assertIn("${WXBOT_IMAGE:-wxbot-ubuntu-manual:24.04}", compose)
+        self.assertIn("dockerfile: docker/ubuntu-manual/Dockerfile", compose)
+        self.assertIn("FROM ${WXBOT_BASE_IMAGE}", dockerfile)
+        self.assertIn("COPY --chown=wechat:wechat core/ /app/core/", dockerfile)
+        self.assertIn("COPY --chown=wechat:wechat static/ /app/static/", dockerfile)
         self.assertNotIn("WXBOT_UI_PASSWORD:", compose)
         self.assertNotIn("WXBOT_SECRET:", compose)
         self.assertNotIn("VNC_PASSWORD:", compose)
-        self.assertIn("../../server.py:/app/server.py:ro", compose)
-        self.assertIn("../../core:/app/core:ro", compose)
-        self.assertIn("../../static:/app/static:ro", compose)
+        self.assertNotIn("../../server.py:/app/server.py", compose)
+        self.assertNotIn("../../core:/app/core", compose)
+        self.assertNotIn("../../static:/app/static", compose)
 
     def test_desktop_manager_exposes_only_ubuntu(self):
         from core.desktop_management import DEFAULT_PROFILES

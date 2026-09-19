@@ -2,7 +2,7 @@
 # New installations use ../../deploy.sh and ../../docker-compose.yml.
 services:
   ubuntu-wechat:
-    image: ${WXBOT_IMAGE:-wxbot-wechat:ubuntu-24.04}
+    image: ${WXBOT_IMAGE:-wxbot-ubuntu-manual:24.04}
     build:
       context: ../..
       dockerfile: docker/Dockerfile
@@ -18,18 +18,11 @@ services:
       - seccomp=unconfined
     cap_add:
       - SYS_PTRACE
-    environment:
-      VNC_PASSWORD: ${VNC_PASSWORD:-}
-      SCREEN: ${SCREEN:-1920x1080x24}
-      TZ: ${TZ:-Asia/Shanghai}
-      WXBOT_BOT_AUTOSTART: ${WXBOT_BOT_AUTOSTART:-1}
-      WXBOT_MEDIA_CAPTURE: ${WXBOT_MEDIA_CAPTURE:-1}
-      WXBOT_NOVNC_URL: http://localhost:6082/vnc.html?autoconnect=true&resize=scale&view_only=false
-      WXBOT_UI_AUTH: ${WXBOT_UI_AUTH:-1}
-      WXBOT_UI_USER: ${WXBOT_UI_USER:-}
-      WXBOT_UI_PASSWORD: ${WXBOT_UI_PASSWORD:-}
-      WXBOT_SECRET: ${WXBOT_SECRET:-}
-      WXBOT_UI_IDLE: ${WXBOT_UI_IDLE:-600}
+    # This compatibility entrypoint is invoked from this subdirectory, so
+    # Compose would otherwise ignore the repository-root .env on recreation.
+    # Keep credentials and runtime settings in that one ignored file.
+    env_file:
+      - ../../.env
     ports:
       - 127.0.0.1:5100:5100
       - 127.0.0.1:6082:6080
@@ -37,6 +30,7 @@ services:
     volumes:
       - ubuntu-wechat-home:/home/wechat
       - ../../accounts:/app/accounts
+      - ../../output/ubuntu-manual-images:/home/wechat/Pictures
 
 volumes:
   ubuntu-wechat-home:

@@ -151,6 +151,10 @@ class Integration(Isolated):
                     body=post.call_args.args[2]
                     actual=[m for m in body['messages'] if m['role']!='system']
                     self.assertEqual(actual,turns)
+                    if provider in ('gpt', 'grok'):
+                        self.assertEqual(body.get('reasoning_effort'), 'low')
+                    else:
+                        self.assertNotIn('reasoning_effort', body)
 
 
 if __name__=='__main__':unittest.main()

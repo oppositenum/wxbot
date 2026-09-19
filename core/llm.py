@@ -125,11 +125,12 @@ def _opener(proxy):
 
 
 def _compat_extras(provider, cfg):
-    """Grok 4.x 默认高推理，不压低会把 token/时间吃完，看起来像没回复。"""
-    if provider != "grok":
-        return {}
-    effort = cfg.get("grok_reasoning_effort") or "low"
-    return {"reasoning_effort": effort}
+    """Keep reasoning models on the configured low-latency effort by default."""
+    if provider == "grok":
+        return {"reasoning_effort": cfg.get("grok_reasoning_effort") or "low"}
+    if provider == "gpt":
+        return {"reasoning_effort": cfg.get("gpt_reasoning_effort") or "low"}
+    return {}
 
 
 def _openai_text(r):

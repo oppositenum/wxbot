@@ -140,8 +140,9 @@ def open_chat(wid, name):
     # 点搜索结果第一行（搜索框下方）。搜索没弹出时这里是当前会话，所以上面必须先确认。
     x("xdotool", "mousemove", str(px + 170), str(py + 108), "click", "1")
     time.sleep(1.0)
-    # 点消息区，收起搜索浮层，避免后续按键还打在搜索框。
-    x("xdotool", "mousemove", str(px + w // 2), str(py + h // 2), "click", "1")
+    # Esc closes the search state without clicking a message. A centre click can
+    # open a large image, video, or card and leave the sender behind its preview.
+    key("Escape")
     time.sleep(0.25)
     return px, py, w, h
 

@@ -29,7 +29,7 @@ class Legacy(Isolated):
             return con
         return patch('core.db.connect', side_effect=connect)
 
-    def test_legacy_script_opens_search_hit_without_enter_in_composer(self):
+    def test_legacy_script_opens_search_hit_without_clicking_media_area(self):
         src = Path('docker/wx_send_legacy.py').read_text(encoding='utf-8')
         open_fn = src[src.index('def open_chat'):src.index('def focus_input')]
         send_fn = src[src.index('def send_text'):src.index('def send_image')]
@@ -38,6 +38,9 @@ class Legacy(Isolated):
         self.assertIn('windowfocus', src)
         self.assertIn('搜索聊天记录', src)
         self.assertNotIn('key("Return")', open_fn)
+        self.assertIn('key("Escape")', open_fn)
+        self.assertNotIn('px + w // 2', open_fn)
+        self.assertNotIn('py + h // 2', open_fn)
         self.assertIn('clear_input()', send_fn)
         self.assertNotIn('key("Escape")', send_fn)
 

@@ -85,7 +85,7 @@ class LegacySearchAdapter:
                     ledger.update(jid, 'initiated', 'legacy_ui_may_execute')
                     initiated = True
                     ui_started = time.monotonic()
-                    result = docker_wx._exec('python3', self.script, kind, query, arg,
+                    result = docker_wx._exec('python3', self.script, kind, query, arg, display,
                                              timeout=40 if kind == 'text' else 60)
                     reply_policy.timing('微信界面提交', ui_started)
                 if not sessions.valid(token):
@@ -99,6 +99,10 @@ class LegacySearchAdapter:
                     return ledger.view(ledger.update(jid, 'not_sent', 'legacy_no_focus'))
                 if err == 'ERR:search-unfocused':
                     return ledger.view(ledger.update(jid, 'not_sent', 'legacy_search_unfocused'))
+                if err == 'ERR:chat-not-opened':
+                    return ledger.view(ledger.update(jid, 'not_sent', 'legacy_chat_not_opened'))
+                if err == 'ERR:wrong-chat':
+                    return ledger.view(ledger.update(jid, 'not_sent', 'legacy_wrong_chat'))
                 return ledger.view(ledger.update(jid, 'uncertain', 'legacy_ui_result_unknown'))
         except Exception as exc:
             status = 'uncertain' if initiated else 'not_sent'

@@ -2,10 +2,10 @@
 """容器内发送器：用 xdotool 驱动 Linux 微信发文本/图片。
 
 流程：真正抢回主窗口焦点 → 关掉聊天内搜索等浮层 → 点侧栏搜索
-→ 确认搜索框吃到了目标名 → 点击首条搜索结果打开会话
-→ 点输入框并清空 → 粘贴正文 → 回车/点发送。
-搜索没焦点时绝不往下发：否则字会进当前正打开的会话。
-不要在搜索后对输入框按回车：微信号会当成一条消息发出去。
+→ 确认搜索框吃到了目标名 → 点击「联系人」第一条（不要 Down，会落到同微信号的群）
+→ 用标题核对会话名 → 点输入框并清空 → 粘贴正文 → 回车/点发送。
+搜索没焦点、或标题对不上时绝不往下发。
+不要在搜索框没焦点时回车：微信号会当成一条消息发出去。
 用法：
   python3 wx_send.py text  "文件传输助手" "你好"
   python3 wx_send.py image "文件传输助手" /path/in/container.png
@@ -114,7 +114,41 @@ def search_box_holds(name):
         set_clip_text(old)
 
 
-def open_chat(wid, name):
+def click_search_hit(px, py, dy):
+    # 侧栏搜索「联系人」第一条。108 是分组标题；再往下是「群聊」（同微信号的群）。
+    x("xdotool", "mousemove", str(px + 170), str(py + dy), "click", "1")
+    time.sleep(0.35)
+
+
+def header_text(px, py, w, h):
+    """读会话顶栏标题。OCR 只做核对，不拿来选人。"""
+    full = "/tmp/wx_header_full.png"
+    crop = "/tmp/wx_header_crop.png"
+    x("scrot", "-o", full)
+    try:
+        from PIL import Image
+        im = Image.open(full)
+        im.crop((px + 286, py + 6, px + min(w - 80, 700), py + 52)).save(crop)
+    except Exception:
+        return ""
+    r = x("tesseract", crop, "stdout", "-l", "chi_sim+eng", "--psm", "7")
+    return "".join((r.stdout or "").split())
+
+
+def header_matches(got, expect):
+    if not expect:
+        return True
+    a = "".join((got or "").split())
+    b = "".join((expect or "").split())
+    if not a or not b:
+        return False
+    if b in a or a in b:
+        return True
+    import difflib
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.7
+
+
+def open_chat(wid, name, expect=""):
     close_overlays()
     px, py, w, h = ensure_focused(wid)
     # 关掉残留搜索浮层；不要在输入框里回车。
@@ -137,13 +171,26 @@ def open_chat(wid, name):
         key("Escape")
         print("ERR:search-unfocused"); sys.exit(3)
     time.sleep(1.3)          # 等搜索结果
-    # 点搜索结果第一行（搜索框下方）。搜索没弹出时这里是当前会话，所以上面必须先确认。
-    x("xdotool", "mousemove", str(px + 170), str(py + 108), "click", "1")
+    # 联系人第一条已经高亮。不要 Down：会落到下面「群聊」里同微信号的群。
+    # 搜索框已确认有焦点，这时回车打开的是高亮那一行。
+    key("Return")
     time.sleep(1.0)
-    # Esc closes the search state without clicking a message. A centre click can
-    # open a large image, video, or card and leave the sender behind its preview.
+    # Do not click the search box again to test whether navigation succeeded:
+    # that click steals focus and can reopen a search/preview layer. Escape is
+    # keyboard-only cleanup; the title check below is the send safety gate.
     key("Escape")
-    time.sleep(0.25)
+    time.sleep(0.15)
+    px, py, w, h = win_geom(wid)
+    if expect and not header_matches(header_text(px, py, w, h), expect):
+        # One bounded fallback selects the visible contact row without ever
+        # clicking the message area or the search input again.
+        click_search_hit(px, py, 128)
+        time.sleep(0.8)
+        key("Escape")
+        time.sleep(0.15)
+        px, py, w, h = win_geom(wid)
+        if not header_matches(header_text(px, py, w, h), expect):
+            print("ERR:wrong-chat"); sys.exit(3)
     return px, py, w, h
 
 
@@ -166,11 +213,11 @@ def click_send(px, py, w, h):
     time.sleep(0.3)
 
 
-def send_text(name, text):
+def send_text(name, text, expect=""):
     wid = win_id()
     if not wid:
         print("ERR:no-window"); sys.exit(2)
-    px, py, w, h = open_chat(wid, name)
+    px, py, w, h = open_chat(wid, name, expect)
     focus_input(px, py, w, h)
     clear_input()            # 搜人用的微信号若漏进输入框，先清掉再贴正文
     set_clip_text(text)
@@ -183,11 +230,11 @@ def send_text(name, text):
     print("OK")
 
 
-def send_image(name, path):
+def send_image(name, path, expect=""):
     wid = win_id()
     if not wid:
         print("ERR:no-window"); sys.exit(2)
-    px, py, w, h = open_chat(wid, name)
+    px, py, w, h = open_chat(wid, name, expect)
     # 点输入区「发送文件」文件夹图标 → GTK 文件选择器 → 输入路径 → 打开 → 回车发送
     x("xdotool", "mousemove", str(px + 397), str(py + h - 131), "click", "1")
     time.sleep(1.5)          # 等文件选择器
@@ -204,12 +251,20 @@ def send_image(name, path):
     print("OK")
 
 
-def open_and_scroll(name, rounds=6):
+def just_open(name, expect=""):
+    wid = win_id()
+    if not wid:
+        print("ERR:no-window"); sys.exit(2)
+    open_chat(wid, name, expect)
+    print("OK")
+
+
+def open_and_scroll(name, rounds=6, expect=""):
     """打开会话并向上滚动，促使微信渲染(解密)历史图片到 temp/ImageUtils。"""
     wid = win_id()
     if not wid:
         print("ERR:no-window"); sys.exit(2)
-    px, py, w, h = open_chat(wid, name)
+    px, py, w, h = open_chat(wid, name, expect)
     # 鼠标移到消息区中间，滚轮上滚(button 4)，逐步加载并渲染历史图片
     x("xdotool", "mousemove", str(px + w // 2), str(py + h // 2))
     time.sleep(0.3)
@@ -223,13 +278,16 @@ def open_and_scroll(name, rounds=6):
 
 if __name__ == "__main__":
     kind = sys.argv[1] if len(sys.argv) > 1 else ""
-    if kind == "open":
-        open_and_scroll(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 6)
+    expect = sys.argv[4] if len(sys.argv) > 4 else ""
+    if kind == "justopen":
+        just_open(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "")
+    elif kind == "open":
+        open_and_scroll(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 6, expect)
     elif len(sys.argv) < 4:
         print(__doc__); sys.exit(1)
     elif kind == "text":
-        send_text(sys.argv[2], sys.argv[3])
+        send_text(sys.argv[2], sys.argv[3], expect)
     elif kind == "image":
-        send_image(sys.argv[2], sys.argv[3])
+        send_image(sys.argv[2], sys.argv[3], expect)
     else:
-        print("kind must be text|image|open"); sys.exit(1)
+        print("kind must be text|image|open|justopen"); sys.exit(1)

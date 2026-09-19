@@ -33,11 +33,16 @@ class Legacy(Isolated):
         src = Path('docker/wx_send_legacy.py').read_text(encoding='utf-8')
         open_fn = src[src.index('def open_chat'):src.index('def focus_input')]
         send_fn = src[src.index('def send_text'):src.index('def send_image')]
-        self.assertIn('py + 108', open_fn)
+        self.assertIn('click_search_hit', open_fn)
+        self.assertIn('header_matches', src)
         self.assertIn('ERR:search-unfocused', src)
+        self.assertIn('ERR:wrong-chat', src)
         self.assertIn('windowfocus', src)
         self.assertIn('搜索聊天记录', src)
-        self.assertNotIn('key("Return")', open_fn)
+        self.assertNotIn('search_still_open', src)
+        self.assertNotIn('click_search(px, py)\n    return search_box_holds', src)
+        self.assertNotIn('key("Down")', open_fn)
+        self.assertIn('key("Return")', open_fn)
         self.assertIn('key("Escape")', open_fn)
         self.assertNotIn('px + w // 2', open_fn)
         self.assertNotIn('py + h // 2', open_fn)
@@ -56,6 +61,30 @@ class Legacy(Isolated):
         r = self.send()
         self.assertEqual(r['status'], 'not_sent')
         self.assertEqual(r['reason'], 'legacy_no_focus')
+
+    def test_search_hit_without_opening_chat_is_not_sent_to_the_visible_chat(self):
+        self.execute.return_value = SimpleNamespace(returncode=3, stdout='ERR:chat-not-opened\n')
+        r = self.send()
+        self.assertEqual(r['status'], 'not_sent')
+        self.assertEqual(r['reason'], 'legacy_chat_not_opened')
+        self.send(); self.assertEqual(self.execute.call_count, 1)
+
+    def test_header_ocr_typo_still_matches_expected_chat(self):
+        src = Path('docker/wx_send_legacy.py').read_text(encoding='utf-8')
+        start = src.index('def header_matches')
+        end = src.index('\ndef open_chat')
+        ns = {'__name__': 'header'}
+        exec(compile(src[start:end], 'header.py', 'exec'), ns)
+        self.assertTrue(ns['header_matches']('老浪one', '老婆one'))
+        self.assertTrue(ns['header_matches']('老婆two', '老婆two'))
+        self.assertFalse(ns['header_matches']('猫来了小队', '老婆two'))
+
+    def test_wrong_header_is_not_sent(self):
+        self.execute.return_value = SimpleNamespace(returncode=3, stdout='ERR:wrong-chat\n')
+        r = self.send()
+        self.assertEqual(r['status'], 'not_sent')
+        self.assertEqual(r['reason'], 'legacy_wrong_chat')
+        self.send(); self.assertEqual(self.execute.call_count, 1)
 
     def test_same_remark_contacts_use_their_distinct_wechat_ids(self):
         with self.contacts([('chat-A', 'unique_a', 'same name', 'A'),
@@ -88,7 +117,7 @@ class Legacy(Isolated):
         self.assertTrue(r['ok']); self.assertFalse(r['verified'])
         self.assertFalse(r['retryable']); self.assertEqual(again, r)
         self.execute.assert_called_once_with('python3', '/usr/local/bin/wx_send_legacy.py',
-                                            'text', 'same name', 'test-body', timeout=40)
+                                            'text', 'same name', 'test-body', 'same name', timeout=40)
 
     def test_timeout_is_never_retried(self):
         self.execute.side_effect = TimeoutError()

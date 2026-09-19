@@ -694,7 +694,52 @@ def greet_repeat(hint):
 
 
 def _split_next(text):
-    return [x.strip() for x in re.split(r'\s*\[\[NEXT\]\]\s*', text or '') if x.strip()]
+    return [x.strip() for x in re.split(r'\s*(?:\[\[NEXT\]\]|【NEXT】)\s*', text or '') if x.strip()]
+
+
+# Linux 微信输入框大约 700 字会被掐掉后半句。按句切开，分几条发完。
+WX_BUBBLE = 480
+
+
+def _wx_chunks(text, limit=WX_BUBBLE):
+    text = (text or "").strip()
+    if not text:
+        return []
+    if len(text) <= limit:
+        return [text]
+    chunks = []
+    rest = text
+    while rest:
+        if len(rest) <= limit:
+            chunks.append(rest)
+            break
+        window = rest[:limit]
+        cut = -1
+        for sep in ("\n\n", "\n", "。", "！", "？", "；", "，", " "):
+            pos = window.rfind(sep)
+            if pos >= limit // 3:
+                cut = pos + len(sep)
+                break
+        if cut < 0:
+            cut = limit
+        piece = rest[:cut].strip()
+        if piece:
+            chunks.append(piece)
+        rest = rest[cut:].strip()
+    return chunks or [text]
+
+
+def _reply_parts(text, burst=1):
+    """模型分段 + 微信气泡上限。burst 是最少条数，多出来的 [[NEXT]] 也要发完。"""
+    parts = [_strip_filler_openers(p) for p in _split_next(text)]
+    parts = [p for p in parts if p]
+    if not parts:
+        parts = [_strip_filler_openers((text or "").strip())]
+        parts = [p for p in parts if p]
+    out = []
+    for part in parts:
+        out.extend(_wx_chunks(part))
+    return out
 
 
 def _part_gap(index):
@@ -783,8 +828,7 @@ def greet(chat_username, hint=""):
                      turns + [{"role": "user", "content": user}]) or "").strip()
     if not text:
         return {"ok": False, "status": "not_sent", "reason": "generation_unavailable", "message": "生成为空"}
-    parts = [_strip_filler_openers(p) for p in (_split_next(text)[:burst] or [text])]
-    parts = [p for p in parts if p] or [_strip_filler_openers(text) or text]
+    parts = _reply_parts(text, burst)
     while len(parts) < burst:
         more = (llm.chat(system + media_read.HONESTY + reply_context.ROLE_GUIDANCE,
                          turns + [{"role": "assistant", "content": "\n".join(parts)},
@@ -793,7 +837,7 @@ def greet(chat_username, hint=""):
         more = _split_next(more)[0] if more else ""
         if not more or more in parts:
             break
-        parts.append(more)
+        parts.extend(_wx_chunks(_strip_filler_openers(more)))
     target = send_name_for(chat_username)
     sent = []
     r = None
@@ -855,10 +899,7 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
         target = send_name_for(chat_username)
         inbound = "\n".join((m.get("content") or "") for m in (batch_msgs or [msg]) if not m.get("is_self"))
         burst, _ = burst_count(inbound or (msg.get("content") or ""), default=1)
-        parts = [_strip_filler_openers(p) for p in _split_next(text)[:burst]]
-        parts = [p for p in parts if p]
-        if not parts:
-            parts = [_strip_filler_openers(text.strip()) or text.strip()]
+        parts = _reply_parts(text, burst)
         while len(parts) < burst:
             more = (llm.chat("补一条不同角度的下一句，不要重复，只输出这一条正文。",
                              [{"role": "assistant", "content": "\n".join(parts)},
@@ -866,7 +907,7 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
             more = _split_next(more)[0] if more else ""
             if not more or more in parts:
                 break
-            parts.append(more)
+            parts.extend(_wx_chunks(_strip_filler_openers(more)))
         r = None
         for index, part in enumerate(parts, 1):
             gap = _part_gap(index)

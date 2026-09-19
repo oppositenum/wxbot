@@ -137,6 +137,13 @@ def _openai_text(r):
     return (msg.get("content") or "").strip()
 
 
+def _chat_truncated(provider, response):
+    if provider == "claude":
+        return response.get("stop_reason") == "max_tokens"
+    choice = (response.get("choices") or [{}])[0]
+    return choice.get("finish_reason") in ("length", "max_tokens")
+
+
 def _post(url, headers, body, proxy, timeout=60, retries=3):
     import time
     import urllib.error
@@ -208,7 +215,8 @@ def _chat_once(system, messages, cfg, provider):
         url = _endpoint(base or _default_base(provider), "messages")
         r = _post(url, headers, body, proxy, timeout=timeout, retries=retries)
         parts = r.get("content", [])
-        return "".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
+        text = "".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
+        return text, _chat_truncated(provider, r)
     url = _endpoint(base or _default_base(provider), "chat/completions")
     msgs = ([{"role": "system", "content": system}] if system else []) + messages
     body = {"model": model, "max_tokens": max_tokens, "messages": msgs}
@@ -218,7 +226,7 @@ def _chat_once(system, messages, cfg, provider):
     headers = {"content-type": "application/json", "authorization": f"Bearer {key}",
                "user-agent": UA}
     r = _post(url, headers, body, proxy, timeout=timeout, retries=retries)
-    return _openai_text(r)
+    return _openai_text(r), _chat_truncated(provider, r)
 
 
 def chat(system, messages, cfg=None):
@@ -228,7 +236,7 @@ def chat(system, messages, cfg=None):
     cfg = cfg or load_cfg()
     provider = cfg.get("provider", "claude")
     try:
-        return _chat_once(system, messages, cfg, provider)
+        text, truncated = _chat_once(system, messages, cfg, provider)
     except Exception as err:
         if (provider != "grok" or cfg.get("probe") or cfg.get("single_attempt")
                 or cfg.get("no_gpt_fallback") or not _transient_chat_error(err)):
@@ -236,7 +244,24 @@ def chat(system, messages, cfg=None):
         _, gpt_key, _ = creds(cfg, "gpt")
         if not gpt_key:
             raise
-        return _chat_once(system, messages, cfg, "gpt")
+        text, truncated = _chat_once(system, messages, cfg, "gpt")
+        provider = "gpt"
+    if cfg.get("probe") or (cfg.get("max_tokens") or 600) <= 64:
+        return text
+    rounds = 0
+    while truncated and text and rounds < 2:
+        rounds += 1
+        more, truncated = _chat_once(
+            system,
+            list(messages) + [
+                {"role": "assistant", "content": text},
+                {"role": "user", "content": "从被截断处接着写完，不要重复已写内容，只输出续写。"},
+            ],
+            cfg, provider)
+        if not more:
+            break
+        text = (text.rstrip() + more).strip()
+    return text
 
 
 def chat_tools(system, messages, tools, dispatch, cfg=None, max_rounds=6):

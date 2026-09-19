@@ -126,6 +126,18 @@ class Routes(Isolated):
         self.assertIn("configured-grok-name", diag)
         self.assertNotIn("SECRET", diag)
 
+    def test_truncated_chat_is_continued_until_complete(self):
+        calls = []
+        def post(url, headers, body, proxy, **kw):
+            calls.append(body["messages"][-1]["content"] if body.get("messages") else "")
+            if len(calls) == 1:
+                return {"choices": [{"finish_reason": "length", "message": {"content": "前半句，"}}]}
+            return {"choices": [{"finish_reason": "stop", "message": {"content": "后半句。"}}]}
+        with patch.object(llm, "_post", post):
+            out = llm.chat("sys", [{"role": "user", "content": "hi"}], dict(self.cfg, max_tokens=200))
+        self.assertEqual(out, "前半句，后半句。")
+        self.assertEqual(len(calls), 2)
+
     def test_grok_transient_failure_retries_then_falls_back_to_gpt(self):
         calls = []
         def post(url, headers, body, proxy, **kw):

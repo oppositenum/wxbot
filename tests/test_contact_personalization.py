@@ -476,6 +476,32 @@ class Entries(Isolated):
         self.assertEqual(sends, ['第一条', '第二条', '第三条'])
         self.assertEqual(r['burst'], 3)
 
+    def test_long_reply_is_split_across_wechat_bubbles(self):
+        long = "第一段完整。" + ("后面还有很长的描写，" * 80) + "最后一句要发完。"
+        parts = []
+        with patch('core.llm.chat', return_value=long), patch('core.agent.agent_config', return_value={'enabled': False}), \
+                patch('core.bot._sender_name', return_value='对方'), patch('core.memory.select_memories', return_value=[]), \
+                patch('core.sender.send_text', lambda *a, **kw: parts.append(a[1]) or {'ok': True, 'status': 'confirmed'}), \
+                patch('core.humanize.typing_delay', return_value=0), patch('core.bot._part_gap', return_value=0), \
+                patch('core.bot.send_name_for', return_value='对方'):
+            bot.do_action(self.rules['rules'][0], msg(text='你说'), 'friend-A', {}, lambda *a: None, [], self.rules)
+        self.assertGreater(len(parts), 1)
+        self.assertEqual(''.join(p.replace('\n', '') for p in parts).replace(' ', ''),
+                         long.replace('\n', '').replace(' ', ''))
+        self.assertTrue(all(len(p) <= bot.WX_BUBBLE for p in parts))
+        self.assertTrue(parts[-1].endswith('最后一句要发完。'))
+
+    def test_model_next_marker_is_sent_as_separate_bubbles(self):
+        parts = []
+        with patch('core.llm.chat', return_value='前半段\n【NEXT】\n后半段也要发出去。'), \
+                patch('core.agent.agent_config', return_value={'enabled': False}), \
+                patch('core.bot._sender_name', return_value='对方'), patch('core.memory.select_memories', return_value=[]), \
+                patch('core.sender.send_text', lambda *a, **kw: parts.append(a[1]) or {'ok': True, 'status': 'confirmed'}), \
+                patch('core.humanize.typing_delay', return_value=0), patch('core.bot._part_gap', return_value=0), \
+                patch('core.bot.send_name_for', return_value='对方'):
+            bot.do_action(self.rules['rules'][0], msg(text='你好'), 'friend-A', {}, lambda *a: None, [], self.rules)
+        self.assertEqual(parts, ['前半段', '后半段也要发出去。'])
+
     def test_reply_continue_cue_sends_three_parts(self):
         parts=[]
         def chat(system, history=None, *a, **k):

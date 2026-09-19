@@ -49,6 +49,9 @@ class UbuntuDeployment(unittest.TestCase):
         self.assertNotIn("WXBOT_UI_PASSWORD:", compose)
         self.assertNotIn("WXBOT_SECRET:", compose)
         self.assertNotIn("VNC_PASSWORD:", compose)
+        self.assertIn("../../server.py:/app/server.py:ro", compose)
+        self.assertIn("../../core:/app/core:ro", compose)
+        self.assertIn("../../static:/app/static:ro", compose)
 
     def test_desktop_manager_exposes_only_ubuntu(self):
         from core.desktop_management import DEFAULT_PROFILES

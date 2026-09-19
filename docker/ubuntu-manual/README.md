@@ -9,7 +9,9 @@ uses the same root Ubuntu image and no longer has a separate Dockerfile or
 startup implementation.
 
 It reads `../../.env` itself, including the management login, VNC password, and
-runtime settings. Recreate this compatibility container with:
+runtime settings. It also mounts the checked-out backend and web files, so a
+restart uses the committed application version even when the legacy image is
+older. Recreate this compatibility container with:
 
 ```bash
 docker compose -f docker/ubuntu-manual/compose.yaml up -d --force-recreate

@@ -29,6 +29,11 @@ services:
       - 127.0.0.1:5902:5900
     volumes:
       - ubuntu-wechat-home:/home/wechat
+      # The compatibility image can predate this checkout. Mount the committed
+      # application files so restart/recreate cannot revive an older API.
+      - ../../server.py:/app/server.py:ro
+      - ../../core:/app/core:ro
+      - ../../static:/app/static:ro
       - ../../accounts:/app/accounts
       - ../../output/ubuntu-manual-images:/home/wechat/Pictures
 

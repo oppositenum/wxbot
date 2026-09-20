@@ -371,9 +371,9 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
     lines = [turn['content'] for turn in turns]
 
     system += "\n【本轮机器人角色】\n" + persona["persona"]
-    if chat_username.endswith("@chatroom") and _is_priority_sender(msg, rules, chat_username):
+    if chat_username.endswith("@chatroom") and _priority_senders(rules, chat_username):
         system += (
-            "\n【群聊优先成员】本轮消息来自已配置的优先成员。回复时以她的实际要求为主，"
+            "\n【群聊优先成员】本群有一名已配置的优先成员。涉及她的消息时，以她的实际要求和立场为主，"
             "先接住她的话；如果群里有人针对、质疑或让她难堪，优先替她澄清、维护她的立场，"
             "不要把她晾在一边，也不要擅自替她编造事实或承诺。"
         )

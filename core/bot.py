@@ -177,7 +177,23 @@ def send_name_for(username):
     return username
 
 
-def match_rule(rule, msg, is_group=True):
+def _priority_senders(rules, chat):
+    """Return the configured high-priority members for one group."""
+    if not chat or not isinstance(rules, dict):
+        return set()
+    configured = rules.get("group_priority_senders") or {}
+    if isinstance(configured, dict):
+        values = configured.get(chat, [])
+    else:
+        values = configured if isinstance(configured, list) else []
+    return {str(value).strip() for value in values if str(value).strip()}
+
+
+def _is_priority_sender(msg, rules=None, chat=None):
+    return bool(msg.get("sender")) and msg.get("sender") in _priority_senders(rules, chat)
+
+
+def match_rule(rule, msg, is_group=True, chat=None, rules=None):
     m = rule.get("match", {})
     t = m.get("type")
     v = m.get("value", "")
@@ -205,9 +221,11 @@ def match_rule(rule, msg, is_group=True):
     if t == "auto":             # 群里=@我/引用我；私聊=任意消息
         if not is_group:
             return {}
-        return {} if (msg.get("at_me") or msg.get("quote_me")) else None
+        return {} if (msg.get("at_me") or msg.get("quote_me") or
+                       _is_priority_sender(msg, rules, chat)) else None
     if t == "mention":          # @我 或 引用我
-        return {} if (msg.get("at_me") or msg.get("quote_me")) else None
+        return {} if (msg.get("at_me") or msg.get("quote_me") or
+                       _is_priority_sender(msg, rules, chat)) else None
     if t == "at_me":
         return {} if msg.get("at_me") else None
     if t == "quote_me":
@@ -353,6 +371,12 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
     lines = [turn['content'] for turn in turns]
 
     system += "\n【本轮机器人角色】\n" + persona["persona"]
+    if chat_username.endswith("@chatroom") and _is_priority_sender(msg, rules, chat_username):
+        system += (
+            "\n【群聊优先成员】本轮消息来自已配置的优先成员。回复时以她的实际要求为主，"
+            "先接住她的话；如果群里有人针对、质疑或让她难堪，优先替她澄清、维护她的立场，"
+            "不要把她晾在一边，也不要擅自替她编造事实或承诺。"
+        )
     if switched:
         system += (f"\n\n【已切换人设】对方要你当「{switched['name']}」。从这一句起完整进入该角色，"
                    "用角色口吻回一句确认（可带一句符合角色的接话），不要解释系统、不要报人设文件名、"
@@ -1736,7 +1760,7 @@ def run_once(rules, state, log=print):
                 is_cat_rule = mt in ("category", "types")
                 if not is_cat_rule and not (text_like or media_like):
                     continue           # 传统文字规则不作用于其余非文字消息(系统类等)
-                g = match_rule(rule, m, is_group)
+                g = match_rule(rule, m, is_group, chat=chat, rules=rules)
                 if g is None:
                     continue
                 if rule.get("action", {}).get("type") == "reply_ai":

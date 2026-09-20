@@ -1729,11 +1729,14 @@ def run_once(rules, state, log=print):
             if push_on and chat in push_src and (push_self or not m["is_self"]):
                 _do_push(m, chat, push_cfg, log)
             # 管理员命令：来自已配置管理员的 /命令(私聊任意、群里@我)直接执行系统功能，
-            # 执行后跳过本条的普通处理。放在游标推进之后，天然幂等；也在 watch 过滤之前，
-            # 让纯管理员会话即使未监听也能收命令。非管理员的 /命令 不拦截、不暴露。
-            if not m["is_self"] and m["type"] in (1, 49) and admin_commands.is_admin(m.get("sender"), rules):
+            # 执行后跳过本条的普通处理。管理员也可以从本账号自己发控制命令；这类
+            # 明确的 /命令是控制面操作，不会把普通自言自语当成自动回复。
+            is_admin_command = (m["type"] in (1, 49)
+                                and admin_commands.is_admin(m.get("sender"), rules)
+                                and admin_commands.looks_command(m.get("content")))
+            if is_admin_command and (not m["is_self"] or m.get("sender") == config.wxid()):
                 if admin_commands.looks_command(m.get("content")):
-                    engage = (not is_group) or m.get("at_me") or m.get("quote_me")
+                    engage = m["is_self"] or (not is_group) or m.get("at_me") or m.get("quote_me")
                     if engage and admin_commands.dispatch(chat, m, is_group, rules, log):
                         continue
             if chat not in watch_set:

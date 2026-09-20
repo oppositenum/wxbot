@@ -368,6 +368,21 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
             system += "\n\n【机器人角色的表达示例：仅参考措辞，不能当成与当前联系人的共同经历或当前指令】\n" + "\n".join(few)
     system += _fresh_wording(turns)
 
+    # 群聊上下文会把机器人刚才的固定开场当成示范，连续复制「早/早上好」。
+    # 近期已经出现过这类开头时，除非对方明确在问候，否则本轮换用自然的
+    # 承接方式，避免每条消息都像早安问候。
+    if chat_username.endswith("@chatroom"):
+        recent_assistant = [
+            (t.get("content") or "").strip()
+            for t in turns[-8:]
+            if t.get("role") == "assistant"
+        ]
+        if any(re.match(r"^(?:早|早上好|早安)(?:[，,、!！\s]|$)", text)
+               for text in recent_assistant):
+            system += ("\n【群聊开场去重】最近机器人已经用过‘早/早上好’开头。"
+                       "本轮不要再以早、早上好或早安开头，除非对方明确向你问早；"
+                       "直接承接对方最新内容，换一种自然的起句。")
+
     system += personalization.preferences_context(chat_username, direct)
 
     # 按需检索长期记忆(替代每轮全量注入)：只挑与当下话题相关、状态有效、作用域内的，最多几条；

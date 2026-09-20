@@ -178,15 +178,37 @@ def send_name_for(username):
 
 
 def _priority_senders(rules, chat):
-    """Return the configured high-priority members for one group."""
+    """Return configured high-priority members, resolving aliases at runtime."""
     if not chat or not isinstance(rules, dict):
         return set()
     configured = rules.get("group_priority_senders") or {}
     if isinstance(configured, dict):
-        values = configured.get(chat, [])
+        values = configured.get(chat)
+        if values is None:
+            try:
+                group = next((g for g in contacts.list_groups()
+                              if g.get("name") == chat), None)
+                values = configured.get(group.get("username"), []) if group else []
+            except Exception:
+                values = []
     else:
         values = configured if isinstance(configured, list) else []
-    return {str(value).strip() for value in values if str(value).strip()}
+    wanted = {str(value).strip().casefold() for value in values if str(value).strip()}
+    if not wanted:
+        return set()
+    resolved = set()
+    try:
+        candidates = contacts.list_contacts()
+        for candidate in candidates:
+            fields = {
+                str(candidate.get(key) or "").strip().casefold()
+                for key in ("username", "name", "nick_name", "remark", "alias")
+            }
+            if wanted & fields:
+                resolved.add(candidate.get("username"))
+    except Exception:
+        pass
+    return resolved or {value for value in values if str(value).strip().startswith("wxid_")}
 
 
 def _is_priority_sender(msg, rules=None, chat=None):

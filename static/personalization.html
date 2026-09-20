@@ -54,7 +54,7 @@ function renderTemplate(){
   const t=catalog.default_template;$('#templateSection').hidden=!t;if(!t)return;
   $('#templateSource').replaceChildren();
   for(const c of catalog.contacts){if(c.username.endsWith('@chatroom')||c.username.startsWith('gh_')||['filehelper','newsapp','notifymessage','weixin',catalog.session.account].includes(c.username))continue;$('#templateSource').add(new Option(c.name+' · '+c.username,c.username));}
-  $('#templateSource').value=t.template_source||'CONFIGURED_ACCOUNT';$('#templateEnabled').checked=t.template_enabled===true;
+  $('#templateSource').value=t.template_source||'';$('#templateEnabled').checked=t.template_enabled===true;
   $('#templateSummary').textContent=t.revision?JSON.stringify({人设:t.persona_id,自动继承:t.template_enabled,偏好:Object.fromEntries(Object.entries(t.preferences||{}).map(([k,v])=>[catalog.labels[k]||k,v.value]))},null,2):'尚未保存模板';
 }
 $('#saveTemplate').onclick=run(async()=>{if(!confirm('将所选好友的人设、偏好和画像开关保存为默认模板？未配置好友将按自动继承开关使用它。'))return;await api('/template',{contact:$('#templateSource').value,revision:catalog.default_template.revision,enabled:$('#templateEnabled').checked});await load();});

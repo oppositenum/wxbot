@@ -431,9 +431,14 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
         # 避免工具链长时间占住群监听队列。
         wants_tool = wants_lookup or any(k in ask for k in ("查资料", "搜索", "更新资料", "游戏更新"))
         tool_names = acfg["tools"] if (not chat_username.endswith("@chatroom") or wants_tool) else []
-        out = (agent.run(sys_a, ask, chat=chat_username, history=turns,
-                         tool_names=tool_names,
-                         display_name=send_name_for(chat_username)) or "").strip()
+        if chat_username.endswith("@chatroom") and not tool_names:
+            # 没有授权工具时直接走单次对话；chat_tools 即使工具为空也会
+            # 发带 function-call schema 的请求，增加网关和模型耗时。
+            out = (llm.chat(system, turns + [{"role": "user", "content": ask}]) or "").strip()
+        else:
+            out = (agent.run(sys_a, ask, chat=chat_username, history=turns,
+                             tool_names=tool_names,
+                             display_name=send_name_for(chat_username)) or "").strip()
         return out  # empty tool result must not silently route to the main model
     return llm.chat(system, turns + [{"role": "user", "content": ask}])
 
@@ -1678,8 +1683,10 @@ def run_once(rules, state, log=print):
                     continue
                 if not include_self:
                     continue
-            # 默认不在群里自动回(含拍一拍);要群内@回复时在 rules 里开 group_auto_reply。
-            if is_group and rules.get("group_auto_reply") is not True:
+            # 普通群回复受 group_auto_reply 控制；战斗模式是显式会话开关，
+            # 即使普通群回复关闭也必须逐条接管该会话。
+            if is_group and rules.get("group_auto_reply") is not True \
+                    and not battle_mode.is_on(chat):
                 continue
             # 拍一拍(拍了拍【我】才应,拍别人不掺和)：简短招呼一句,不走整段AI长回复
             # 实测拍一拍以 type49 appmsg 出现(也兼容 10000 系统消息形态)

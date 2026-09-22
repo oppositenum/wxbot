@@ -830,6 +830,16 @@ def api_persona_correct(slug):
     return jsonify({"ok": True, "persona": p.get("persona")})
 
 
+@app.post("/api/bot/learn_profiles")
+def api_learn_profiles_set():
+    body = request.get_json(force=True, silent=True) or {}
+    rules = botmod.load_rules()
+    rules["learn_profiles"] = bool(body.get("enabled"))
+    with open(botmod.rules_file(), "w", encoding="utf-8") as f:
+        json.dump(rules, f, ensure_ascii=False, indent=2)
+    return jsonify({"ok": True, "enabled": rules["learn_profiles"]})
+
+
 @app.post("/api/bot/watch")
 def api_bot_watch():
     """设置机器人监听的会话列表(群+私聊)。"""
@@ -1060,6 +1070,17 @@ def api_profile_delete(wxid):
     except OSError:
         pass
     return jsonify({"ok": True})
+
+
+@app.post("/api/profiles/extract")
+def api_profiles_extract():
+    """立刻抽当前会话画像（不依赖自动开关）。"""
+    body = request.get_json(force=True, silent=True) or {}
+    chat = (body.get("chat") or "").strip()
+    if not chat:
+        return jsonify({"ok": False, "error": "缺少 chat"}), 400
+    result = botmod.extract_now(chat)
+    return jsonify(result)
 
 
 # ---------------- Agent 开关/工具白名单 ----------------

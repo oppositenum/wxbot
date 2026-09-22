@@ -471,6 +471,56 @@ class Authorization(Isolated):
             self.assertEqual(client.post("/api/llm/config", json={"image": {"follow": "unknown"}}).status_code, 400)
             self.assertEqual(client.post("/api/llm/config", json={"image": "bad"}).status_code, 400)
 
+    def test_auto_profile_extract_off_by_default(self):
+        bot._last_learn.clear()
+        called = []
+        with patch.object(bot, "load_rules", return_value={}), \
+             patch.object(bot.agent, "agent_config", return_value={"enabled": True}), \
+             patch.object(bot.llm, "available", return_value=True), \
+             patch.object(bot.memory, "update_style_from_messages"), \
+             patch.object(bot.memory, "extract_from_messages", side_effect=lambda *a, **k: called.append(1) or 1):
+            bot._maybe_learn("wxid_friend", [{"sender": "wxid_friend", "content": "x"}], print)
+        self.assertEqual(called, [])
+
+    def test_auto_profile_extract_runs_when_enabled(self):
+        bot._last_learn.clear()
+        called = []
+        with patch.object(bot, "load_rules", return_value={"learn_profiles": True}), \
+             patch.object(bot.agent, "agent_config", return_value={"enabled": True}), \
+             patch.object(bot.llm, "available", return_value=True), \
+             patch.object(bot.memory, "update_style_from_messages"), \
+             patch.object(bot.memory, "extract_from_messages", side_effect=lambda *a, **k: called.append(1) or 1), \
+             patch.object(bot.memory, "load_profile", return_value={"facts": []}):
+            bot._maybe_learn("wxid_friend", [{"sender": "wxid_friend", "content": "x"}], print)
+        self.assertEqual(called, [1])
+
+    def test_extract_now_ignores_auto_switch(self):
+        bot._last_learn.clear()
+        called = []
+        msgs = [{"sender": "wxid_friend", "content": "hello", "is_self": False}]
+        with patch.object(bot, "load_rules", return_value={"learn_profiles": False}), \
+             patch.object(bot.agent, "agent_config", return_value={"enabled": True}), \
+             patch.object(bot.llm, "available", return_value=True), \
+             patch.object(bot.messages, "get_messages", return_value=msgs), \
+             patch.object(bot.memory, "update_style_from_messages"), \
+             patch.object(bot.memory, "extract_from_messages", side_effect=lambda *a, **k: called.append(1) or 1), \
+             patch.object(bot.memory, "load_profile", return_value={"facts": []}):
+            out = bot.extract_now("wxid_friend")
+        self.assertEqual(called, [1])
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["updated"], 1)
+
+    def test_learn_profiles_flag_persists_in_rules(self):
+        rules_path = self.root / "bot_rules.json"
+        rules_path.write_text(json.dumps({"watch": []}))
+        with patch.object(bot, "rules_file", return_value=str(rules_path)), \
+             patch.object(bot, "load_rules", side_effect=lambda: json.loads(rules_path.read_text())):
+            self.assertFalse(bot.learn_profiles_enabled())
+            rules = bot.load_rules()
+            rules["learn_profiles"] = True
+            rules_path.write_text(json.dumps(rules))
+            self.assertTrue(bot.learn_profiles_enabled())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -24,6 +24,7 @@ from core import imgdec, media, sender, agent, memory, schedule, media_read, sen
 _DEFAULT_RULES = {
     "poll_interval": 5, "include_self": False, "watch": [],
     "group_auto_reply": False,
+    "learn_profiles": False,
     "proactive": {"enabled": False, "private_share_enabled": False, "group_enabled": False},
     "rules": [{"name": "style-reply", "match": {"type": "auto"},
                "action": {"type": "reply_ai", "persona": ""}}],
@@ -1470,25 +1471,30 @@ _last_learn = {}          # chat -> ts，画像抽取节流(避免每轮都调 L
 LEARN_INTERVAL = 600      # 每会话最多 10 分钟学一次
 
 
-@sessions.task
-def _maybe_learn(chat, ctx_msgs, log):
-    """节流地从最近对话抽取人物画像(长期记忆)。开关：bot_rules/llm_config 的 learn_profiles。"""
+def learn_profiles_enabled(rules=None):
+    """自动抽画像：默认关，避免后台轮询消耗 token。立刻抽走 extract_now。"""
+    r = rules if rules is not None else load_rules()
+    return bool(r.get("learn_profiles"))
+
+
+def _learn_from_messages(chat, ctx_msgs, log, force=False):
+    """从一批消息抽取画像。force=True 跳过自动开关与节流（立刻抽）。"""
     import time as _t
     try:
+        if not force and not learn_profiles_enabled():
+            return 0
         if not agent.agent_config().get("enabled") and not llm.available():
-            return
+            return 0
         now = _t.time()
-        if now - _last_learn.get(chat, 0) < LEARN_INTERVAL:
-            return
+        if not force and now - _last_learn.get(chat, 0) < LEARN_INTERVAL:
+            return 0
         _last_learn[chat] = now
-        # 先做本地、无模型的风格/近期情绪增量统计；即使 LLM 不可用也不丢失习惯信息。
+        # 本地风格统计不打模型。
         memory.update_style_from_messages(ctx_msgs, scope=_scope_of(chat))
         n = memory.extract_from_messages(ctx_msgs, me=config.wxid(),
                                          chat_scope=_scope_of(chat))
         if n:
             log(f"[记忆] {chat} 更新 {n} 人画像")
-        # Periodically condense large profiles while retaining source facts outside
-        # the active summary. This keeps replies fast without forgetting history.
         for wid in {m.get('sender') for m in ctx_msgs if m.get('sender') and not m.get('is_self')}:
             try:
                 prof = memory.load_profile(wid)
@@ -1496,8 +1502,24 @@ def _maybe_learn(chat, ctx_msgs, log):
                     memory.compress(wid)
             except Exception:
                 continue
+        return n or 0
     except Exception as e:  # noqa: BLE001
         log(f"[记忆] error: {e}")
+        return 0
+
+
+@sessions.task
+def _maybe_learn(chat, ctx_msgs, log):
+    """节流地从最近对话抽取人物画像。受 bot_rules.learn_profiles 控制，默认关闭。"""
+    _learn_from_messages(chat, ctx_msgs, log, force=False)
+
+
+@sessions.task
+def extract_now(chat, log=print, limit=80):
+    """立刻从该会话最近消息抽画像，不依赖自动开关。"""
+    msgs = messages.get_messages(chat, limit=limit) or []
+    n = _learn_from_messages(chat, msgs, log, force=True)
+    return {"ok": True, "chat": chat, "updated": n, "scanned": len(msgs)}
 
 
 @sessions.task

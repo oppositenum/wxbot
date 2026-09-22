@@ -50,6 +50,9 @@ fi
 # 3. service
 case "$(uname -s)" in
   Darwin)
+    # Copy onto the boot disk. A LaunchAgent that points at /Volumes/xinba
+    # crash-loops at login until the external disk mounts.
+    install -m 644 "$ROOT_DIR/tools/host_docker_agent.py" "$TOKEN_DIR/host_docker_agent.py"
     PLIST="$HOME/Library/LaunchAgents/com.wxbot.host-docker-agent.plist"
     cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -58,7 +61,7 @@ case "$(uname -s)" in
 <dict>
   <key>Label</key><string>com.wxbot.host-docker-agent</string>
   <key>ProgramArguments</key>
-  <array><string>$PY</string><string>$ROOT_DIR/tools/host_docker_agent.py</string></array>
+  <array><string>$PY</string><string>$TOKEN_DIR/host_docker_agent.py</string></array>
   <key>EnvironmentVariables</key>
   <dict><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
   <key>RunAtLoad</key><true/>

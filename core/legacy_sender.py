@@ -61,7 +61,7 @@ class LegacySearchAdapter:
                 # Resolve the selected contact's searchable WeChat ID locally.
                 # Groups and contacts without an alias retain the original name.
                 from core.sender import search_key
-                query, _ = search_key(chat, display)
+                query, locate = search_key(chat, display)
                 arg = payload
                 if kind == 'image':
                     if not os.path.isfile(payload):
@@ -85,7 +85,7 @@ class LegacySearchAdapter:
                     ledger.update(jid, 'initiated', 'legacy_ui_may_execute')
                     initiated = True
                     ui_started = time.monotonic()
-                    result = docker_wx._exec('python3', self.script, kind, query, arg, display,
+                    result = docker_wx._exec('python3', self.script, kind, query, arg, locate,
                                              timeout=40 if kind == 'text' else 60)
                     reply_policy.timing('微信界面提交', ui_started)
                 if not sessions.valid(token):

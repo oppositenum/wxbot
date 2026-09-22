@@ -57,6 +57,17 @@ class UbuntuDeployment(unittest.TestCase):
         self.assertNotIn("../../server.py:/app/server.py", compose)
         self.assertNotIn("../../core:/app/core", compose)
         self.assertNotIn("../../static:/app/static", compose)
+        start = (ROOT / "docker" / "ubuntu-manual" / "start-ubuntu-wechat").read_text()
+        self.assertIn('rm -f "/tmp/.X${disp}-lock"', start)
+        self.assertIn("COPY docker/ubuntu-manual/start-ubuntu-wechat /usr/local/bin/start-ubuntu-wechat", dockerfile)
+        ensure = (ROOT / "tools" / "ensure_wxbot_running.sh").read_text()
+        installer = (ROOT / "tools" / "install_macos_autostart.sh").read_text()
+        self.assertIn("wxbot-ubuntu-manual", ensure)
+        self.assertIn("docker start", ensure)
+        self.assertIn("skip-autostart", ensure)
+        self.assertIn("com.wxbot.ensure-running", installer)
+        self.assertTrue((ROOT / "tools" / "ensure_wxbot_running.sh").stat().st_mode & 0o111)
+        self.assertTrue((ROOT / "tools" / "install_macos_autostart.sh").stat().st_mode & 0o111)
 
     def test_desktop_manager_exposes_only_ubuntu(self):
         from core.desktop_management import DEFAULT_PROFILES

@@ -2,9 +2,10 @@
 """容器内发送器：用 xdotool 驱动 Linux 微信发文本/图片。
 
 流程：真正抢回主窗口焦点 → 关掉聊天内搜索等浮层 → 点侧栏搜索
-→ 确认搜索框吃到了目标名 → 点击「联系人」第一条（不要 Down，会落到同微信号的群）
-→ 用标题核对会话名 → 点输入框并清空 → 粘贴正文 → 回车/点发送。
-搜索没焦点、或标题对不上时绝不往下发。
+→ 确认搜索框吃到了查询词。
+私聊优先搜唯一微信号：结果里「联系人」第一条就是这个人，点开即可发，
+不再用备注/昵称做标题 OCR。群名或没有微信号时，仍用回车 + 标题核对。
+搜索没焦点、或会话没打开时绝不往下发。
 不要在搜索框没焦点时回车：微信号会当成一条消息发出去。
 用法：
   python3 wx_send.py text  "文件传输助手" "你好"
@@ -114,9 +115,11 @@ def search_box_holds(name):
         set_clip_text(old)
 
 
-def click_search_hit(px, py, dy):
+def click_search_hit(px, py, dy, clicks=1):
     # 侧栏搜索「联系人」第一条。108 是分组标题；再往下是「群聊」（同微信号的群）。
-    x("xdotool", "mousemove", str(px + 170), str(py + dy), "click", "1")
+    # 单击只出资料预览，双击才打开会话。
+    cmd = ["xdotool", "mousemove", str(px + 170), str(py + dy), "click", "--repeat", str(clicks), "--delay", "80", "1"]
+    x(*cmd)
     time.sleep(0.35)
 
 
@@ -148,6 +151,36 @@ def header_matches(got, expect):
     return difflib.SequenceMatcher(None, a, b).ratio() >= 0.7
 
 
+def searched_by_wechat_id(name):
+    """可搜索的微信号是全局唯一的 ASCII；中文备注/带空格的显示名走标题核对。"""
+    s = (name or "").strip()
+    return bool(s) and " " not in s and "@" not in s and all(ord(c) < 128 for c in s)
+
+
+def header_crop_path(px, py, w, h):
+    full = "/tmp/wx_header_full.png"
+    crop = "/tmp/wx_header_crop.png"
+    x("scrot", "-o", full)
+    try:
+        from PIL import Image
+        im = Image.open(full)
+        im.crop((px + 286, py + 6, px + min(w - 80, 700), py + 52)).save(crop)
+        return crop
+    except Exception:
+        return ""
+
+
+def pane_has_header(path):
+    """空会话占位是一片浅色；真正打开后顶栏有字或头像。"""
+    if not path:
+        return False
+    try:
+        from PIL import Image, ImageStat
+        return ImageStat.Stat(Image.open(path).convert("L")).stddev[0] >= 8
+    except Exception:
+        return False
+
+
 def open_chat(wid, name, expect=""):
     close_overlays()
     px, py, w, h = ensure_focused(wid)
@@ -171,8 +204,17 @@ def open_chat(wid, name, expect=""):
         key("Escape")
         print("ERR:search-unfocused"); sys.exit(3)
     time.sleep(1.3)          # 等搜索结果
-    # 联系人第一条已经高亮。不要 Down：会落到下面「群聊」里同微信号的群。
-    # 搜索框已确认有焦点，这时回车打开的是高亮那一行。
+    if searched_by_wechat_id(name):
+        # 下拉还在时双击「联系人」第一条。单击只出资料卡；不要 Down，会落到同微信号的群。
+        click_search_hit(px, py, 128, clicks=2)
+        time.sleep(0.8)
+        key("Escape")
+        time.sleep(0.15)
+        px, py, w, h = win_geom(wid)
+        if not pane_has_header(header_crop_path(px, py, w, h)):
+            print("ERR:chat-not-opened"); sys.exit(3)
+        return px, py, w, h
+    # 群名/备注：联系人第一条已经高亮时回车打开的是这一行。
     key("Return")
     time.sleep(1.0)
     # Do not click the search box again to test whether navigation succeeded:

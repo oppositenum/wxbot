@@ -11,5 +11,6 @@ COPY docker/linux_keys.py docker/wx_send.py docker/wx_send_legacy.py \
      docker/capture_imgkey.py /usr/local/bin/
 COPY --chown=wechat:wechat docker/frida_capture.js docker/frida_capture_supervisor.py /app/docker/
 COPY docker/start.sh /usr/local/bin/start-wxbot
+COPY docker/ubuntu-manual/start-ubuntu-wechat /usr/local/bin/start-ubuntu-wechat
 
 USER wechat

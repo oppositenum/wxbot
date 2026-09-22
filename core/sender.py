@@ -81,7 +81,7 @@ def _vision_open(display_name, chat_username=None):
     """Navigation only. Its return value is NEVER recipient proof."""
     with SEND_LOCK:
         docker_wx.clear_open()
-        query, _ = search_key(chat_username, display_name)
+        query, _locate = search_key(chat_username, display_name)
         ok = docker_wx.open_chat(query)
         if ok and chat_username:
             docker_wx.note_open(chat_username)  # navigation hint only; _send never reads it

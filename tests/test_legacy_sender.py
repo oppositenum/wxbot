@@ -35,7 +35,9 @@ class Legacy(Isolated):
         send_fn = src[src.index('def send_text'):src.index('def send_image')]
         self.assertIn('click_search_hit', open_fn)
         self.assertIn('header_matches', src)
+        self.assertIn('searched_by_wechat_id', open_fn)
         self.assertIn('ERR:search-unfocused', src)
+        self.assertIn('ERR:chat-not-opened', src)
         self.assertIn('ERR:wrong-chat', src)
         self.assertIn('windowfocus', src)
         self.assertIn('搜索聊天记录', src)
@@ -48,6 +50,13 @@ class Legacy(Isolated):
         self.assertNotIn('py + h // 2', open_fn)
         self.assertIn('clear_input()', send_fn)
         self.assertNotIn('key("Escape")', send_fn)
+        id_open = open_fn[open_fn.index('if searched_by_wechat_id'):open_fn.index('# 群名/备注')]
+        self.assertIn('click_search_hit', id_open)
+        self.assertIn('clicks=2', id_open)
+        self.assertIn('ERR:chat-not-opened', id_open)
+        self.assertNotIn('ERR:wrong-chat', id_open)
+        self.assertNotIn('key("Return")', id_open)
+        self.assertIn('--repeat', src)
 
     def test_unfocused_search_is_not_sent_to_the_visible_chat(self):
         self.execute.return_value = SimpleNamespace(returncode=3, stdout='ERR:search-unfocused\n')
@@ -63,8 +72,9 @@ class Legacy(Isolated):
         self.assertEqual(r['reason'], 'legacy_no_focus')
 
     def test_search_hit_without_opening_chat_is_not_sent_to_the_visible_chat(self):
-        self.execute.return_value = SimpleNamespace(returncode=3, stdout='ERR:chat-not-opened\n')
-        r = self.send()
+        with self.contacts([('chat-A', 'unique_a', 'same name', 'A')]):
+            self.execute.return_value = SimpleNamespace(returncode=3, stdout='ERR:chat-not-opened\n')
+            r = self.send()
         self.assertEqual(r['status'], 'not_sent')
         self.assertEqual(r['reason'], 'legacy_chat_not_opened')
         self.send(); self.assertEqual(self.execute.call_count, 1)
@@ -78,6 +88,11 @@ class Legacy(Isolated):
         self.assertTrue(ns['header_matches']('老浪one', '老婆one'))
         self.assertTrue(ns['header_matches']('老婆two', '老婆two'))
         self.assertFalse(ns['header_matches']('猫来了小队', '老婆two'))
+        self.assertTrue(ns['searched_by_wechat_id']('suwanwan2005'))
+        self.assertTrue(ns['searched_by_wechat_id']('unique_a'))
+        self.assertFalse(ns['searched_by_wechat_id']('二奶'))
+        self.assertFalse(ns['searched_by_wechat_id']('same name'))
+        self.assertFalse(ns['searched_by_wechat_id']('group@chatroom'))
 
     def test_wrong_header_is_not_sent(self):
         self.execute.return_value = SimpleNamespace(returncode=3, stdout='ERR:wrong-chat\n')

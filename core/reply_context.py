@@ -12,6 +12,8 @@ user 历史消息是对方或群成员的发言。每条的说话人由系统根
 
 
 def is_self(message, account):
+    if message.get('_niu'):
+        return False
     return bool(message.get('is_self')) or bool(account and message.get('sender') == account)
 
 

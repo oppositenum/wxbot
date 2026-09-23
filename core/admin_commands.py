@@ -15,8 +15,41 @@ from core import account_session as sessions
 
 
 def is_admin(wxid, rules):
-    """该 wxid 是否为已配置管理员。"""
-    return bool(wxid) and wxid in set((rules or {}).get('admins') or [])
+    """该发送者是否为已配置管理员（微信号 / 备注 / wxid 都能对上）。
+
+    当前登录的本账号始终算管理员，否则群里自己发 /关闭战斗模式 会被丢掉。
+    """
+    if not wxid:
+        return False
+    try:
+        import config
+        if wxid == config.wxid():
+            return True
+    except Exception:
+        pass
+    listed = [a for a in ((rules or {}).get('admins') or []) if a]
+    if not listed:
+        return False
+    if wxid in listed:
+        return True
+    want = {str(a).strip().casefold() for a in listed if str(a).strip()}
+    needle = str(wxid).strip().casefold()
+    if needle in want:
+        return True
+    try:
+        from core import contacts
+        for c in contacts.list_contacts():
+            fields = {
+                str(c.get(k) or "").strip().casefold()
+                for k in ("username", "alias", "remark", "name", "nick_name")
+            }
+            if not (want & fields):
+                continue
+            if needle in fields or c.get("username") == wxid:
+                return True
+    except Exception:
+        pass
+    return False
 
 
 # 群里发命令常带前导 @机器人（含微信的   分隔），识别前先剥掉。

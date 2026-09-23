@@ -32,11 +32,21 @@ class Base(unittest.TestCase):
 
 class IsAdmin(unittest.TestCase):
     def test_membership(self):
-        self.assertTrue(ac.is_admin('a', {'admins': ['a', 'b']}))
-        self.assertFalse(ac.is_admin('c', {'admins': ['a', 'b']}))
-        self.assertFalse(ac.is_admin('a', {}))
-        self.assertFalse(ac.is_admin('', {'admins': ['']}))
-        self.assertFalse(ac.is_admin(None, {'admins': ['a']}))
+        with patch('config.wxid', return_value='wxid_owner'):
+            self.assertTrue(ac.is_admin('a', {'admins': ['a', 'b']}))
+            self.assertFalse(ac.is_admin('c', {'admins': ['a', 'b']}))
+            self.assertFalse(ac.is_admin('a', {}))
+            self.assertFalse(ac.is_admin('', {'admins': ['']}))
+            self.assertFalse(ac.is_admin(None, {'admins': ['a']}))
+            self.assertTrue(ac.is_admin('wxid_owner', {}))
+
+    def test_alias_matches_wxid(self):
+        contacts = [{'username': 'wxid_wife', 'alias': 'pian1225', 'remark': '老婆',
+                     'name': '老婆', 'nick_name': '蜜蜜'}]
+        with patch('core.contacts.list_contacts', return_value=contacts):
+            self.assertTrue(ac.is_admin('wxid_wife', {'admins': ['pian1225']}))
+            self.assertTrue(ac.is_admin('wxid_wife', {'admins': ['wxid_wife']}))
+            self.assertFalse(ac.is_admin('wxid_other', {'admins': ['pian1225']}))
 
 
 class Handlers(Base):
@@ -263,6 +273,67 @@ class RunOnceIntegration(Base):
         calls = self._drive(rules, 'wxid_admin', '历史', '/朋友圈 测试')
         self.assertEqual(calls['dispatch'], ['/朋友圈 测试'])
         self.assertEqual(calls['enqueue'], [])
+
+    def test_self_slash_in_group_without_at_still_dispatches(self):
+        from core import bot, decrypt, messages, conversation_state, personalization, battle_mode
+        ROOM = 'room@chatroom'
+        me = self.account
+        store = {'msgs': [dict(local_id=1, type=1, is_self=True, sender=me,
+                               content='历史', create_time=0, at_me=False)]}
+        patches = [
+            patch.object(decrypt, 'run', lambda force=False: None),
+            patch.object(messages, 'get_messages', lambda chat, limit=40: list(store['msgs']) if chat == ROOM else []),
+            patch.object(conversation_state, 'observe', lambda *a, **k: None),
+            patch.object(personalization, 'learn_live', lambda *a, **k: None),
+            patch.object(bot, '_maybe_learn', lambda *a, **k: None),
+            patch.object(bot, '_proactive_worker', lambda *a, **k: None),
+            patch.object(bot, 'send_name_for', lambda u: 'Limit'),
+            patch('core.sender.send_text', lambda *a, **k: {'status': 'confirmed'}),
+        ]
+        for p in patches:
+            p.start(); self.addCleanup(p.stop)
+        battle_mode.enable(ROOM)
+        self.assertTrue(battle_mode.is_on(ROOM))
+        rules = {'include_self': True, 'watch': [ROOM], 'admins': [], 'poll_interval': 5,
+                 'group_auto_reply': True,
+                 'rules': [{'name': 'r', 'match': {'type': 'auto'}, 'action': {'type': 'reply_ai'}}]}
+        state = bot.load_state()
+        bot.load_pending(); bot._pending.clear()
+        bot.run_once(rules, state, log=lambda *_: None)
+        store['msgs'].append(dict(local_id=2, type=1, is_self=True, sender=me, at_me=False,
+                                  content='/关闭战斗模式', create_time=1))
+        bot.run_once(rules, state, log=lambda *_: None)
+        self.assertFalse(battle_mode.is_on(ROOM))
+
+    def test_self_slash_in_unwatched_chat_still_dispatches(self):
+        from core import bot, decrypt, messages, conversation_state, personalization, battle_mode
+        ROOM = 'other@chatroom'
+        me = self.account
+        store = {'msgs': [dict(local_id=1, type=1, is_self=True, sender=me,
+                               content='历史', create_time=0, at_me=False)]}
+        patches = [
+            patch.object(decrypt, 'run', lambda force=False: None),
+            patch.object(messages, 'get_messages', lambda chat, limit=40: list(store['msgs']) if chat == ROOM else []),
+            patch.object(messages, 'list_sessions', lambda limit=200: [{'username': ROOM}]),
+            patch.object(conversation_state, 'observe', lambda *a, **k: None),
+            patch.object(personalization, 'learn_live', lambda *a, **k: None),
+            patch.object(bot, '_maybe_learn', lambda *a, **k: None),
+            patch.object(bot, '_proactive_worker', lambda *a, **k: None),
+            patch.object(bot, 'send_name_for', lambda u: 'Other'),
+            patch('core.sender.send_text', lambda *a, **k: {'status': 'confirmed'}),
+        ]
+        for p in patches:
+            p.start(); self.addCleanup(p.stop)
+        battle_mode.enable(ROOM)
+        rules = {'include_self': False, 'watch': [], 'admins': [], 'poll_interval': 5,
+                 'rules': []}
+        state = bot.load_state()
+        bot.load_pending(); bot._pending.clear()
+        bot.run_once(rules, state, log=lambda *_: None)
+        store['msgs'].append(dict(local_id=2, type=1, is_self=True, sender=me, at_me=False,
+                                  content='/关闭战斗模式', create_time=1))
+        bot.run_once(rules, state, log=lambda *_: None)
+        self.assertFalse(battle_mode.is_on(ROOM))
 
     def test_non_admin_slash_falls_through_to_reply(self):
         rules = {'include_self': False, 'watch': ['wxid_friend'], 'admins': ['wxid_admin'], 'poll_interval': 5,

@@ -33,6 +33,7 @@ _GLOBAL_RULES = os.path.join(config.PROJECT_DIR, "bot_rules.json")
 
 
 from core import account_session as sessions, send_ledger, personalization, conversation_state, reply_policy
+from core import niu_mode
 from core import admin_commands, battle_mode, humanize
 
 def rules_file():
@@ -187,9 +188,20 @@ def _priority_senders(rules, chat):
         values = configured.get(chat)
         if values is None:
             try:
-                group = next((g for g in contacts.list_groups()
-                              if g.get("name") == chat), None)
-                values = configured.get(group.get("username"), []) if group else []
+                groups = contacts.list_groups()
+                group = next((g for g in groups if g.get("username") == chat), None)
+                if group is None:
+                    group = next((g for g in groups if g.get("name") == chat), None)
+                names = []
+                if group:
+                    names.extend([group.get("username"), group.get("name")])
+                names.append(chat)
+                for name in names:
+                    if name in configured:
+                        values = configured.get(name)
+                        break
+                else:
+                    values = []
             except Exception:
                 values = []
     else:
@@ -241,8 +253,10 @@ def match_rule(rule, msg, is_group=True, chat=None, rules=None):
         mo = re.search(v, text)
         if mo:
             return {"group%d" % (i + 1): g for i, g in enumerate(mo.groups())}
-    if t == "auto":             # 群里=@我/引用我；私聊=任意消息
+    if t == "auto":             # 群里=@我/引用我；私聊=任意消息；开了回复自己则群里自己说话也回
         if not is_group:
+            return {}
+        if (rules or {}).get("include_self") and msg.get("is_self"):
             return {}
         return {} if (msg.get("at_me") or msg.get("quote_me") or
                        _is_priority_sender(msg, rules, chat)) else None
@@ -359,8 +373,13 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
         return media_results[key].context()
 
     from core import reply_context
-    batch = reply_context.unique([cm for cm in (batch_msgs if batch_msgs is not None else [msg])
-                                  if not reply_context.is_self(cm, config.wxid())])
+    raw_batch = list(batch_msgs if batch_msgs is not None else [msg])
+    niu_msgs = [niu_mode.inbound(cm) for cm in raw_batch if niu_mode.is_trigger(cm)]
+    if niu_msgs:
+        batch = reply_context.unique(niu_msgs)
+    else:
+        batch = reply_context.unique([cm for cm in raw_batch
+                                      if not reply_context.is_self(cm, config.wxid())])
     if not batch:
         return ""
     msg = batch[-1]
@@ -372,6 +391,17 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
             return media_read.failed_reply(results)
 
     inbound_raw = "\n".join((cm.get("content") or "") for cm in batch)
+    if niu_msgs:
+        q = (batch[-1].get("content") or "").strip()
+        role = (persona.get("persona") or "")[:400]
+        sys_n = (
+            "你在微信里被「牛来」点名。只根据当前角色用一两句口语回答问题。\n"
+            "禁止长篇、禁止分点、禁止连发、禁止 [[NEXT]]、禁止旁白。\n"
+            "【角色】\n" + role
+        )
+        return (llm.chat(sys_n, [{"role": "user", "content": q}],
+                         cfg={**llm.load_cfg(), "max_tokens": 80, "no_gpt_fallback": True,
+                              "single_attempt": True}) or "").strip()
     switched = personalization.maybe_switch(chat_username, inbound_raw)
     if switched:
         persona = switched['persona']
@@ -496,13 +526,15 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
         if chat_username.endswith("@chatroom") and not tool_names:
             # 没有授权工具时直接走单次对话；chat_tools 即使工具为空也会
             # 发带 function-call schema 的请求，增加网关和模型耗时。
-            out = (llm.chat(system, turns + [{"role": "user", "content": ask}]) or "").strip()
+            out = (llm.chat(system, turns + [{"role": "user", "content": ask}],
+                            cfg=battle_mode.chat_cfg() if battle_mode.is_on(chat_username) else None) or "").strip()
         else:
             out = (agent.run(sys_a, ask, chat=chat_username, history=turns,
                              tool_names=tool_names,
                              display_name=send_name_for(chat_username)) or "").strip()
         return out  # empty tool result must not silently route to the main model
-    return llm.chat(system, turns + [{"role": "user", "content": ask}])
+    return llm.chat(system, turns + [{"role": "user", "content": ask}],
+                    cfg=battle_mode.chat_cfg() if battle_mode.is_on(chat_username) else None)
 
 
 def _rewrite_babyface_talk(ask, turns):
@@ -809,10 +841,12 @@ def _reply_parts(text, burst=1):
     return out
 
 
-def _part_gap(index):
-    """连发时第 2 条起先停几秒，再打字延迟，避免三条砸在同一秒。"""
+def _part_gap(index, rapid=False):
+    """连发时第 2 条起先停几秒，再打字延迟。战斗模式用更短间隔，连戳更狠。"""
     if index <= 1:
         return 0.0
+    if rapid:
+        return 1.2 + (index % 3) * 0.5
     return 8.0 + (index % 4)
 
 
@@ -966,18 +1000,25 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
         target = send_name_for(chat_username)
         inbound = "\n".join((m.get("content") or "") for m in (batch_msgs or [msg]) if not m.get("is_self"))
         burst, _ = burst_count(inbound or (msg.get("content") or ""), default=1)
-        parts = _reply_parts(text, burst)
-        while len(parts) < burst:
-            more = (llm.chat("补一条不同角度的下一句，不要重复，只输出这一条正文。",
-                             [{"role": "assistant", "content": "\n".join(parts)},
-                              {"role": "user", "content": "再发一条。"}]) or "").strip()
-            more = _split_next(more)[0] if more else ""
-            if not more or more in parts:
-                break
-            parts.extend(_wx_chunks(_strip_filler_openers(more)))
+        niu = (rule.get("name") == "niu") or any(niu_mode.is_trigger(m) for m in (batch_msgs or [msg]))
+        if niu:
+            burst = 1
+            parts = _reply_parts(text, 1)[:1]
+            parts = [niu_mode.stamp(p) for p in parts]
+        else:
+            parts = _reply_parts(text, burst)
+            while len(parts) < burst:
+                more = (llm.chat("补一条不同角度的下一句，不要重复，只输出这一条正文。",
+                                 [{"role": "assistant", "content": "\n".join(parts)},
+                                  {"role": "user", "content": "再发一条。"}]) or "").strip()
+                more = _split_next(more)[0] if more else ""
+                if not more or more in parts:
+                    break
+                parts.extend(_wx_chunks(_strip_filler_openers(more)))
         r = None
+        rapid = battle_mode.is_on(chat_username) and not niu
         for index, part in enumerate(parts, 1):
-            gap = _part_gap(index)
+            gap = _part_gap(index, rapid=rapid)
             if gap:
                 log(f"  [拟人] 连发停顿 {gap:.0f}s")
                 time.sleep(gap)
@@ -1206,7 +1247,9 @@ VOICE_GRACE = 90       # 纯语音批最多再等微信「转文字」落库的�
 
 
 def _settle_for(batch, rules=None):
-    """批内有文字→普通去抖;纯媒体→等更久(超时没等到文字就带着图意回)。"""
+    """批内有文字→普通去抖;纯媒体→等更久(超时没等到文字就带着图意回)。牛来立刻回。"""
+    if any(niu_mode.is_trigger(pm) for pm in (batch or [])):
+        return 0.0
     if any((pm.get("type") in (1, 49)) for pm in (batch or [])):
         return SETTLE
     return (rules or {}).get("media_settle", MEDIA_SETTLE)
@@ -1699,6 +1742,17 @@ def run_once(rules, state, log=print):
     watch_set |= set(battle_mode.active_chats())
     # 管理员私聊即使未加入监听也要能收命令（且不因此触发普通自动回复）。
     admin_set = {a for a in (rules.get("admins") or []) if not a.endswith("@chatroom")}
+    try:
+        me = config.wxid()
+        if me:
+            admin_set.add(me)
+    except Exception:
+        me = None
+    # 本账号的 /命令 要在任意会话生效：顺带扫最近会话，未监听的群也能收到关闭战斗模式。
+    try:
+        recent_chats = {s.get("username") for s in messages.list_sessions(limit=200) if s.get("username")}
+    except Exception:
+        recent_chats = set()
     process_futures = []
     # push.sources 缺省=监听列表本身;含 '*' 展开为所有群
     push_src = set(_expand_watch(push_cfg.get("sources") or list(watch_set))) if push_on else set()
@@ -1706,7 +1760,7 @@ def run_once(rules, state, log=print):
     if push_src:
         tgt_names = {t["to"] for t in _push_targets(push_cfg) if t["type"] == "wechat"}
         push_src = {c for c in push_src if send_name_for(c) not in tgt_names}
-    for chat in (watch_set | push_src | admin_set):
+    for chat in (watch_set | push_src | admin_set | recent_chats):
         msgs = messages.get_messages(chat, limit=40)
         if not msgs:
             continue
@@ -1716,6 +1770,15 @@ def run_once(rules, state, log=print):
             if chat in watch_set and not chat.endswith('@chatroom'):
                 conversation_state.observe(chat, msgs)
             state[chat] = maxid
+            # 刚打开、从未轮询过的会话：本账号两分钟内发的 /命令 仍要执行。
+            fresh_cmds = [m for m in msgs
+                          if m.get("is_self") and m.get("type") in (1, 49)
+                          and admin_commands.looks_command(m.get("content"))
+                          and (now - (m.get("create_time") or 0)) < 120]
+            if not fresh_cmds:
+                continue
+            for m in sorted(fresh_cmds, key=lambda x: x["local_id"]):
+                admin_commands.dispatch(chat, m, chat.endswith("@chatroom"), rules, log)
             continue
         # 重建解密库或切换账号后，旧游标可能高于当前库的最大 local_id。
         # 直接校正到当前末尾，避免把之后的新消息全部误判为已处理。
@@ -1750,17 +1813,20 @@ def run_once(rules, state, log=print):
             # 监听推送：来自监听会话的任何消息(不管类型)推给微信好友/webhook
             if push_on and chat in push_src and (push_self or not m["is_self"]):
                 _do_push(m, chat, push_cfg, log)
-            # 管理员命令：来自已配置管理员的 /命令(私聊任意、群里@我)直接执行系统功能，
-            # 执行后跳过本条的普通处理。管理员也可以从本账号自己发控制命令；这类
-            # 明确的 /命令是控制面操作，不会把普通自言自语当成自动回复。
+            # 管理员命令：本账号自己发的 /命令，任意会话、不必 @，一律执行。
+            # 其他人必须在管理员名单里；群里还要 @我。执行后跳过普通回复。
             is_admin_command = (m["type"] in (1, 49)
                                 and admin_commands.is_admin(m.get("sender"), rules)
                                 and admin_commands.looks_command(m.get("content")))
-            if is_admin_command and (not m["is_self"] or m.get("sender") == config.wxid()):
-                if admin_commands.looks_command(m.get("content")):
-                    engage = m["is_self"] or (not is_group) or m.get("at_me") or m.get("quote_me")
-                    if engage and admin_commands.dispatch(chat, m, is_group, rules, log):
-                        continue
+            if is_admin_command:
+                mine = bool(m.get("is_self") or (me and m.get("sender") == me))
+                engage = mine or (not is_group) or m.get("at_me") or m.get("quote_me")
+                if engage and admin_commands.dispatch(chat, m, is_group, rules, log):
+                    continue
+            if m["type"] in (1, 49) and niu_mode.allowed(m, chat, watch_set):
+                enqueue_pending(chat, m, msgs, niu_mode.RULE, time.time())
+                log(f"[牛牛模式] {chat} +1条 → {niu_mode.payload(m.get('content') or '')[:40]!r}")
+                continue
             if chat not in watch_set:
                 continue                      # 仅推送、不参与自动回复的会话
             if m["is_self"]:
@@ -1796,9 +1862,11 @@ def run_once(rules, state, log=print):
             # 私聊里图片/语音/视频也可触发AI回复(进去抖队列;纯媒体批用更长等待窗,
             # 见 _settle_for——先等对方补文字,等不到就带着识别出的图意回)。群聊媒体不触发(没法@)。
             media_like = (not is_group) and m["type"] in (3, 34, 43)
-            # 战斗模式：该会话逐条回击，不看是否 @/引用；发令的管理员自己不打。
+            # 战斗模式：该会话逐条回击，不看是否 @/引用。
+            # 管理员、以及本群优先成员（如老婆）的消息不打。
             if text_like and battle_mode.is_on(chat) and not m["is_self"] \
-                    and not admin_commands.is_admin(m.get("sender"), rules):
+                    and not admin_commands.is_admin(m.get("sender"), rules) \
+                    and not _is_priority_sender(m, rules, chat):
                 enqueue_pending(chat, m, msgs, _BATTLE_RULE, time.time())
                 log(f"[战斗模式] {chat} +1条 → 回击队列")
                 continue

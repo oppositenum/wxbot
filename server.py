@@ -233,10 +233,16 @@ def api_battle_get():
         return jsonify(error="仅本机后台可访问"), 403
     from core import battle_mode, bot
     chats = [{"username": c, "name": bot.send_name_for(c)} for c in battle_mode.active_chats()]
+    from core import llm
+    grok_main = (llm.load_cfg().get("grok") or {}).get("model") or ""
     return jsonify(persona=battle_mode.get_persona(),
                    default_persona=battle_mode.DEFAULT_PERSONA,
                    is_custom=battle_mode.is_custom_persona(),
-                   red_line=battle_mode.RED_LINE.strip(), chats=chats)
+                   red_line=battle_mode.RED_LINE.strip(), chats=chats,
+                   grok_model=battle_mode.get_grok_model(),
+                   grok_reasoning_effort=battle_mode.get_grok_reasoning(),
+                   grok_main_model=grok_main,
+                   reasoning_efforts=list(llm.REASONING_EFFORTS))
 
 
 @app.post("/api/battle/persona")
@@ -247,6 +253,20 @@ def api_battle_persona():
     data = request.get_json(silent=True) or {}
     saved = battle_mode.set_persona(data.get("persona", ""))
     return jsonify(ok=True, persona=saved or battle_mode.DEFAULT_PERSONA, is_custom=bool(saved))
+
+
+@app.post("/api/battle/model")
+def api_battle_model():
+    if not local_management_access():
+        return jsonify(error="仅本机后台可访问"), 403
+    from core import battle_mode
+    data = request.get_json(silent=True) or {}
+    try:
+        saved = battle_mode.set_grok_route(data.get("grok_model", ""),
+                                           data.get("grok_reasoning_effort", ""))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    return jsonify(ok=True, **saved)
 
 
 @app.post("/api/battle/off")
@@ -674,6 +694,9 @@ def api_llm_status():
                     "contact_personalization": True,
                     "route_diagnostics": llm.route_diagnostics(),
                     "proxy": cfg.get("proxy", ""),
+                    "grok_reasoning_effort": llm.reasoning_effort("grok", cfg) or "low",
+                    "gpt_reasoning_effort": llm.reasoning_effort("gpt", cfg) or "low",
+                    "reasoning_efforts": list(llm.REASONING_EFFORTS),
                     "claude": one("claude"), "gpt": one("gpt"), "grok": one("grok")})
 
 
@@ -764,6 +787,12 @@ def api_llm_config():
     for k in ("tools_provider", "tools_model"):
         if k in body:
             cfg[k] = body[k].strip()
+    for k in ("grok_reasoning_effort", "gpt_reasoning_effort"):
+        if k in body:
+            v = (body[k] or "").strip().lower()
+            if v not in llm.REASONING_EFFORTS:
+                return jsonify({"error": "不支持的 reasoning：" + v}), 400
+            cfg[k] = v
     for k in ("provider", "vision_provider", "proxy", "max_tokens", "temperature"):
         if k in body:
             cfg[k] = body[k]
@@ -842,13 +871,17 @@ def api_learn_profiles_set():
 
 @app.post("/api/bot/watch")
 def api_bot_watch():
-    """设置机器人监听的会话列表(群+私聊)。"""
-    watch = (request.get_json(force=True, silent=True) or {}).get("watch", [])
+    """设置机器人监听的会话列表(群+私聊)，以及是否回复自己发的消息。"""
+    body = request.get_json(force=True, silent=True) or {}
+    watch = body.get("watch", [])
     rules = botmod.load_rules()
     rules["watch"] = list(dict.fromkeys(watch))
+    if "include_self" in body:
+        rules["include_self"] = bool(body["include_self"])
     with open(botmod.rules_file(), "w", encoding="utf-8") as f:
         json.dump(rules, f, ensure_ascii=False, indent=2)
-    return jsonify({"ok": True, "watch": rules["watch"]})
+    return jsonify({"ok": True, "watch": rules["watch"],
+                    "include_self": bool(rules.get("include_self"))})
 
 @app.post("/api/bot/admins")
 def api_bot_admins():

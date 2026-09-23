@@ -124,13 +124,26 @@ def _opener(proxy):
     return urllib.request.build_opener()
 
 
-def _compat_extras(provider, cfg):
-    """Keep reasoning models on the configured low-latency effort by default."""
+REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh")
+
+
+def reasoning_effort(provider, cfg=None):
+    """Grok/GPT 的 reasoning_effort。none=不发送该字段（适合非推理模型）。"""
+    cfg = cfg or {}
     if provider == "grok":
-        return {"reasoning_effort": cfg.get("grok_reasoning_effort") or "low"}
-    if provider == "gpt":
-        return {"reasoning_effort": cfg.get("gpt_reasoning_effort") or "low"}
-    return {}
+        v = (cfg.get("grok_reasoning_effort") or "low").strip().lower()
+    elif provider == "gpt":
+        v = (cfg.get("gpt_reasoning_effort") or "low").strip().lower()
+    else:
+        return ""
+    return v if v in REASONING_EFFORTS else "low"
+
+
+def _compat_extras(provider, cfg):
+    effort = reasoning_effort(provider, cfg)
+    if not effort or effort == "none":
+        return {}
+    return {"reasoning_effort": effort}
 
 
 def _openai_text(r):

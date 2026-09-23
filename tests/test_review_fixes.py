@@ -438,6 +438,24 @@ class Authorization(Isolated):
             self.assertEqual(client.get("/api/llm").json["tool_route"]["provider"], "grok")
             self.assertEqual(client.get("/api/llm").json["tool_route"]["model"], "configured-grok-name")
 
+    def test_reasoning_effort_roundtrip(self):
+        import server
+        path = self.root / "llm_config.json"
+        path.write_text(json.dumps(copy.deepcopy(Routes.cfg)))
+        with patch.object(llm, "CONFIG_FILE", str(path)), \
+             patch.object(llm, "load_cfg", side_effect=lambda: json.loads(path.read_text())):
+            client = server.app.test_client()
+            self.assertEqual(client.get("/api/llm").json["grok_reasoning_effort"], "low")
+            r = client.post("/api/llm/config", json={"grok_reasoning_effort": "high", "gpt_reasoning_effort": "none"})
+            self.assertEqual(r.status_code, 200)
+            saved = json.loads(path.read_text())
+            self.assertEqual(saved["grok_reasoning_effort"], "high")
+            self.assertEqual(saved["gpt_reasoning_effort"], "none")
+            self.assertEqual(client.post("/api/llm/config", json={"grok_reasoning_effort": "bogus"}).status_code, 400)
+            extras = llm._compat_extras("grok", saved)
+            self.assertEqual(extras.get("reasoning_effort"), "high")
+            self.assertEqual(llm._compat_extras("gpt", saved), {})
+
     def test_image_follow_grok_uses_grok_creds_and_named_model(self):
         cfg = copy.deepcopy(Routes.cfg)
         cfg["image"] = {"follow": "grok", "model": "grok-imagine-image", "quality": "low"}
@@ -509,6 +527,16 @@ class Authorization(Isolated):
         self.assertEqual(called, [1])
         self.assertTrue(out["ok"])
         self.assertEqual(out["updated"], 1)
+
+    def test_watch_api_can_set_include_self(self):
+        rules_path = self.root / "bot_rules.json"
+        rules_path.write_text(json.dumps({"watch": ["g@chatroom"], "include_self": False}))
+        with patch.object(bot, "rules_file", return_value=str(rules_path)), \
+             patch.object(bot, "load_rules", side_effect=lambda: json.loads(rules_path.read_text())):
+            rules = bot.load_rules()
+            rules["include_self"] = True
+            rules_path.write_text(json.dumps(rules))
+            self.assertTrue(bot.load_rules()["include_self"])
 
     def test_learn_profiles_flag_persists_in_rules(self):
         rules_path = self.root / "bot_rules.json"

@@ -90,7 +90,9 @@ def closing(batch):
 
 
 def decide(batch, context, account, chat=None):
-    incoming = [m for m in batch if not reply_context.is_self(m, account)]
+    from core import niu_mode
+    niu = [niu_mode.inbound(m) for m in batch if niu_mode.is_trigger(m)]
+    incoming = niu or [m for m in batch if not reply_context.is_self(m, account)]
     if not incoming:
         return Decision('observe', 'self_message')
     last = incoming[-1]
@@ -138,8 +140,10 @@ def _manual_own_after(context, account, source_id, chat):
     newer inbound that arrived during send. That automated row must not skip
     the new batch.
     """
+    from core import niu_mode
     later = [m for m in context if reply_context.is_self(m, account)
-             and (m.get('local_id') or 0) > source_id and meaningful(m)]
+             and (m.get('local_id') or 0) > source_id and meaningful(m)
+             and not niu_mode.is_trigger(m)]
     if not later:
         return False
     automated = _automated_texts(account, chat)
@@ -232,7 +236,9 @@ def before_dispatch(chat, kind, payload, ledger, jid):
     if incoming and (ticket['mode'] != 'reply' or chat != ticket['chat']):
         return Decision('defer', 'newer_inbound_before_send')
     prior = _recent(ledger, ticket['session'], ticket['chat'], jid)
-    own = [m for m in relevant if reply_context.is_self(m, account)]
+    from core import niu_mode
+    own = [m for m in relevant if reply_context.is_self(m, account)
+           and not niu_mode.is_trigger(m)]
     if any(m.get('type') != 1 or not any(normalized(m.get('content')) == normalized(t) for t in prior)
            for m in own):
         return Decision('observe', 'own_reply_before_send')

@@ -570,12 +570,20 @@ async function renderAI(){
       <input id="gBase" placeholder="Base URL" style="width:100%;margin:4px 0;padding:5px" value="${(llm.gpt&&llm.gpt.base_url)||''}">
       <input id="gKey" placeholder="GPT API key(留空=不改)" style="width:100%;margin-bottom:4px;padding:5px">
       <input id="gModel" placeholder="模型 如 gpt-6-astra" style="width:100%;padding:5px" value="${(llm.gpt&&llm.gpt.model)||''}">
+      <label class="sub">GPT reasoning（越低越快；none=不发送该参数）</label>
+      <select id="gReason" style="width:100%;padding:5px;margin:2px 0 0">
+        ${(llm.reasoning_efforts||['none','low','medium','high','xhigh']).map(v=>`<option value="${v}">${v}</option>`).join('')}
+      </select>
     </div>
     <div style="background:#f7f8fa;border-radius:6px;padding:8px;margin-bottom:6px">
       <b style="font-size:13px">Grok 中转</b>
       <input id="kBase" placeholder="Base URL 如 https://api.x.ai/v1" style="width:100%;margin:4px 0;padding:5px" value="${(llm.grok&&llm.grok.base_url)||''}">
       <input id="kKey" placeholder="Grok API key(留空=不改，也可用 XAI_API_KEY)" style="width:100%;margin-bottom:4px;padding:5px">
       <input id="kModel" placeholder="模型 如 grok-4.5" style="width:100%;padding:5px" value="${(llm.grok&&llm.grok.model)||''}">
+      <label class="sub">Grok reasoning（当前主用 grok-4.5 时，low 比 high 快）</label>
+      <select id="kReason" style="width:100%;padding:5px;margin:2px 0 0">
+        ${(llm.reasoning_efforts||['none','low','medium','high','xhigh']).map(v=>`<option value="${v}">${v}</option>`).join('')}
+      </select>
     </div>
     ${llm.tool_route ? `
     <div class="sub">工具调用：未独立指定时跟随主用，整轮及最终回复使用同一路由。</div>
@@ -709,6 +717,8 @@ async function renderAI(){
     toast(r.ok?"人设已删除，画像中的失效绑定已清除":(r.error||"删除失败")); renderAI();
   });
   if(llm.provider) $("#llmProv").value=llm.provider;
+  if($("#gReason")) $("#gReason").value=llm.gpt_reasoning_effort||"low";
+  if($("#kReason")) $("#kReason").value=llm.grok_reasoning_effort||"low";
   if($("#llmToolsProv")) $("#llmToolsProv").value=llm.tools_provider||"";
   if(llm.vision_provider!==undefined) $("#llmVis").value=llm.vision_provider||"";
   if($("#imgFollow")) $("#imgFollow").value=(llm.image&&llm.image.follow)||"";
@@ -731,6 +741,8 @@ async function renderAI(){
   });
   $("#llmSave").onclick=async()=>{
     const body={provider:$("#llmProv").value, vision_provider:$("#llmVis").value,
+      grok_reasoning_effort:$("#kReason")?$("#kReason").value:"low",
+      gpt_reasoning_effort:$("#gReason")?$("#gReason").value:"low",
       ...(llm.tool_route ? {tools_provider:$("#llmToolsProv").value, tools_model:$("#llmToolsModel").value.trim()} : {}), proxy:$("#llmProxy").value.trim(),
       claude:{base_url:$("#cBase").value.trim(), model:$("#cModel").value.trim(), api_key:$("#cKey").value.trim()},
       gpt:{base_url:$("#gBase").value.trim(), model:$("#gModel").value.trim(), api_key:$("#gKey").value.trim()},
@@ -795,6 +807,7 @@ async function renderWatch(){
     (await fetch("/api/bot")).json()
   ]);
   const watch=new Set((botr.rules&&botr.rules.watch)||[]);
+  const includeSelf=!!(botr.rules&&botr.rules.include_self);
   const pc=botr.rules&&botr.rules.proactive||{};
   // 群：全部群(名字准)。私聊：最近会话里的真人私聊
   const groups=gs.map(g=>({username:g.username,name:g.name,is_group:true}));
@@ -803,6 +816,7 @@ async function renderWatch(){
   const rowHtml=s=>`<label class="row" style="cursor:pointer"><input type="checkbox" class="wchk" value="${s.username}" ${watch.has(s.username)?"checked":""} style="margin-right:8px"><div style="min-width:0"><div class="name">${escape_(s.name||s.username)}</div><div class="sub">${s.is_group?'群·@我/引用我触发':'私聊·任意消息自动回复'}</div></div></label>`;
   p.innerHTML=`<h3>监听设置 <span style="float:right;cursor:pointer;color:#999" onclick="closePanel('#watchPanel')">✕</span></h3>
     <div class="sub" style="margin-bottom:6px">勾选的才会自动回复。<b>群</b>=被@或引用时回复，开启主动模式后也可在安静时接话；<b>私聊</b>=对方一发消息就回。没勾的不动。</div>
+    <label style="display:block;margin-bottom:8px;cursor:pointer"><input type="checkbox" id="wself" ${includeSelf?'checked':''}> 回复我自己发的消息（默认关；战斗模式开着时等于自己怼自己）</label>
     <input id="wfilter" placeholder="过滤…" style="width:100%;padding:5px;margin-bottom:6px">
     <button id="wsave" class="primary">保存监听</button>
     <div style="margin-top:10px;padding:8px;border:1px solid #ddd"><b>主动回复</b><br>
@@ -820,8 +834,8 @@ async function renderWatch(){
     document.querySelectorAll("#watchPanel label.row").forEach(l=>{ l.style.display=(!f||l.textContent.includes(f))?"":"none"; }); };
   $("#wsave").onclick=async()=>{
     const w=[...document.querySelectorAll(".wchk:checked")].map(c=>c.value);
-    const r=await(await fetch("/api/bot/watch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({watch:w})})).json();
-    toast("已保存监听 "+r.watch.length+" 个会话");
+    const r=await(await fetch("/api/bot/watch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({watch:w,include_self:$("#wself").checked})})).json();
+    toast("已保存监听 "+r.watch.length+" 个会话"+(r.include_self?"（含自己）":""));
   };
   $("#proSave").onclick=async()=>{const b={enabled:$("#proOn").checked,private_share_enabled:$("#proPrivate").checked,group_enabled:$("#proGroup").checked,group_after:Math.max(1,+$("#groupAfter").value)*60,quiet_start:+$("#qStart").value,quiet_end:+$("#qEnd").value};const r=await(await fetch('/api/bot/proactive',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json();toast(r.ok?'已保存主动回复设置':'保存失败');};
   p.classList.add("show");

@@ -695,6 +695,10 @@ def _niu_draw(ask, chat_username, reference=None):
     """牛来要图：先回一句在画，再生图发到本会话。"""
     from core import read_access
     prompt = " ".join((ask or "").split())[:800] or "simple illustration"
+    from core import love_and_deepspace as lnds
+    prompt = lnds.decorate_prompt(prompt)
+    if reference is None:
+        reference = lnds.reference_bytes(ask or prompt)
     try:
         display = send_name_for(chat_username)
     except Exception:

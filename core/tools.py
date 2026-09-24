@@ -189,6 +189,12 @@ def draw_image(prompt, ctx=None):
         return "[draw_image] 无当前会话,图发不出去"
     if not prompt:
         return "[draw_image] 没给画面描述"
+    from core import love_and_deepspace as lnds
+    prompt = lnds.decorate_prompt(prompt)
+    if not ctx.get("reference"):
+        ref = lnds.reference_bytes(prompt)
+        if ref:
+            ctx["reference"] = ref
     from core import sender
     blocked = sender.preflight(chat, kind='image')
     if blocked:

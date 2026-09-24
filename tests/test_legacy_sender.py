@@ -32,15 +32,21 @@ class Legacy(Isolated):
     def test_legacy_script_opens_search_hit_without_clicking_media_area(self):
         src = Path('docker/wx_send_legacy.py').read_text(encoding='utf-8')
         open_fn = src[src.index('def open_chat'):src.index('def focus_input')]
-        send_fn = src[src.index('def send_text'):src.index('def send_image')]
+        send_fn = src[src.index('def send_text'):src.index('def just_open')]
+        self.assertIn('activate_chat_window', send_fn)
+        img_fn = src[src.index('def send_image'):src.index('def just_open')]
+        self.assertIn('activate_chat_window', img_fn)
         self.assertIn('click_search_hit', open_fn)
         self.assertIn('header_matches', src)
         self.assertIn('searched_by_wechat_id', open_fn)
-        self.assertIn('ERR:search-unfocused', src)
+        self.assertIn('focus_search_box', src)
         self.assertIn('ERR:chat-not-opened', src)
         self.assertIn('ERR:wrong-chat', src)
         self.assertIn('windowfocus', src)
         self.assertIn('搜索聊天记录', src)
+        self.assertIn('focus_search_box', open_fn)
+        self.assertNotIn('SEARCH_SENTINEL', src)
+        self.assertIn('ctrl+v', open_fn)
         self.assertNotIn('search_still_open', src)
         self.assertNotIn('click_search(px, py)\n    return search_box_holds', src)
         self.assertNotIn('key("Down")', open_fn)
@@ -57,6 +63,9 @@ class Legacy(Isolated):
         self.assertNotIn('ERR:wrong-chat', id_open)
         self.assertNotIn('key("Return")', id_open)
         self.assertIn('--repeat', src)
+        self.assertIn('before = header_text', open_fn)
+        self.assertIn('already_on_chat', open_fn)
+        self.assertIn('detached_chat_id', src)
 
     def test_unfocused_search_is_not_sent_to_the_visible_chat(self):
         self.execute.return_value = SimpleNamespace(returncode=3, stdout='ERR:search-unfocused\n')
@@ -79,6 +88,17 @@ class Legacy(Isolated):
         self.assertEqual(r['reason'], 'legacy_chat_not_opened')
         self.send(); self.assertEqual(self.execute.call_count, 1)
 
+    def test_self_chat_searches_display_name_and_checks_header(self):
+        with patch('config.wxid', return_value='wxid_me'):
+            self.assertTrue(sender.is_self_chat('wxid_me'))
+            self.assertFalse(sender.is_self_chat('wxid_wife'))
+            self.assertEqual(sender.search_key('wxid_me', '🐮🐮🌱besos'),
+                             ('🐮🐮🌱besos', '🐮🐮🌱besos'))
+            r = sender.send_text('🐮🐮🌱besos', 'body', chat_username='wxid_me')
+        self.assertEqual(r['status'], 'submitted')
+        self.assertEqual(self.execute.call_args.args[3], '🐮🐮🌱besos')
+        self.assertEqual(self.execute.call_args.args[5], '🐮🐮🌱besos')
+
     def test_header_ocr_typo_still_matches_expected_chat(self):
         src = Path('docker/wx_send_legacy.py').read_text(encoding='utf-8')
         start = src.index('def header_matches')
@@ -87,12 +107,16 @@ class Legacy(Isolated):
         exec(compile(src[start:end], 'header.py', 'exec'), ns)
         self.assertTrue(ns['header_matches']('老浪one', '老婆one'))
         self.assertTrue(ns['header_matches']('老婆two', '老婆two'))
+        self.assertTrue(ns['header_matches']('漂云', '漂云'))
+        self.assertFalse(ns['header_matches']('老婆', '漂云'))
         self.assertFalse(ns['header_matches']('猫来了小队', '老婆two'))
         self.assertTrue(ns['searched_by_wechat_id']('suwanwan2005'))
         self.assertTrue(ns['searched_by_wechat_id']('unique_a'))
         self.assertFalse(ns['searched_by_wechat_id']('二奶'))
         self.assertFalse(ns['searched_by_wechat_id']('same name'))
         self.assertFalse(ns['searched_by_wechat_id']('group@chatroom'))
+        self.assertFalse(ns['searched_by_wechat_id']('Limit'))
+        self.assertFalse(ns['searched_by_wechat_id']('ABC'))
 
     def test_wrong_header_is_not_sent(self):
         self.execute.return_value = SimpleNamespace(returncode=3, stdout='ERR:wrong-chat\n')

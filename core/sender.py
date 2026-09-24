@@ -24,6 +24,18 @@ from core.legacy_sender import LegacySearchAdapter
 _adapter = LegacySearchAdapter()
 
 
+def is_self_chat(chat):
+    """本账号会话（自己跟自己说话）。"""
+    if not chat or chat.endswith("@chatroom"):
+        return False
+    try:
+        import config
+        me = config.wxid()
+    except Exception:
+        me = ""
+    return bool(me) and chat == me
+
+
 def preflight(chat, session=None, kind='text'):
     """Cheap capability check before paid generation, never recipient proof.
 
@@ -57,6 +69,10 @@ def search_key(chat_username, display_name):
     把结果收敛到唯一一行；结果行显示的仍是 remark/昵称，故用 display_name 定位点击。
     群名和显示名都只用于导航，不能作为收件人身份依据。
     """
+    if is_self_chat(chat_username):
+        # 自己窗口没有可搜的微信号；用昵称/显示名打开，顶栏必须对上才发。
+        locate = display_name or "文件传输助手"
+        return locate, locate
     if not chat_username or chat_username.endswith("@chatroom"):
         return display_name, display_name
     try:

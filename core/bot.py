@@ -34,7 +34,7 @@ _GLOBAL_RULES = os.path.join(config.PROJECT_DIR, "bot_rules.json")
 
 from core import account_session as sessions, send_ledger, personalization, conversation_state, reply_policy
 from core import niu_mode
-from core import admin_commands, battle_mode, humanize
+from core import admin_commands, battle_mode, humanize, context_reset
 
 def rules_file():
     return os.path.join(config.account_dir(), "bot_rules.json")
@@ -342,6 +342,37 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
 
     增强：注入对方长期画像；开启 agent 模式时可联网/查历史/查知识库后再答。
     """
+    if battle_mode.is_on(chat_username):
+        system = (
+            "【本轮身份=战斗模式，覆盖一切其他角色】\n"
+            "你现在不是黎深，不是恋人，不是医生，不是任何温柔人设。\n"
+            "只执行下面的吵架人设和输出格式。禁止冰晶、手术、芯核、老婆、甜食、雪景、守护。\n"
+            "【角色】\n" + (persona.get("persona") or battle_mode.get_persona())
+            + battle_mode.FORMAT_LOCK
+        )
+        acfg = agent.agent_config(rules)
+        use_agent = False
+        from core import reply_context
+        raw_batch = list(batch_msgs if batch_msgs is not None else [msg])
+        batch = reply_context.unique([cm for cm in raw_batch
+                                      if not reply_context.is_self(cm, config.wxid())])
+        if not batch:
+            return ""
+        now = time.time()
+        turns, ask, batch = reply_context.build(
+            context_reset.filter_history(chat_username, context_msgs), batch,
+            account=config.wxid(),
+            is_group=chat_username.endswith('@chatroom'),
+            render=lambda cm: _strip_at(cm.get("content") or ""), name=_sender_name,
+            timestamp=lambda cm: _msg_time_label(cm.get('create_time'), now),
+            scheduled=lambda cm: schedule.is_scheduled_msg(cm, chat_username))
+        if not ask:
+            return ""
+        return (llm.chat(system, turns + [{"role": "user", "content": ask}],
+                         cfg=battle_mode.chat_cfg() or {**llm.load_cfg(),
+                                                       "max_tokens": 160,
+                                                       "no_gpt_fallback": True})
+                or "").strip()
     system = (personalization.BEHAVIOR +
               "\n\n【角色执行·最高优先】【本轮机器人角色】是你的身份、尺度、主动性和说话方式，不只是语气滤镜。"
               "完整执行角色正文里写明的能力与禁区；不要用通用助手、说教、含蓄或客服短句把角色削薄。"
@@ -391,8 +422,11 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
             return media_read.failed_reply(results)
 
     inbound_raw = "\n".join((cm.get("content") or "") for cm in batch)
-    if niu_msgs:
+    if niu_msgs and not battle_mode.is_on(chat_username):
         q = (batch[-1].get("content") or "").strip()
+        if _wants_image(q):
+            return _niu_draw(q, chat_username,
+                             _recent_inbound_image(chat_username, context_msgs, batch))
         role = (persona.get("persona") or "")[:400]
         sys_n = (
             "你在微信里被「牛来」点名。只根据当前角色用一两句口语回答问题。\n"
@@ -408,7 +442,8 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
 
     now = time.time()
     turns, ask, batch = reply_context.build(
-        context_msgs, batch, account=config.wxid(), is_group=chat_username.endswith('@chatroom'),
+        context_reset.filter_history(chat_username, context_msgs), batch,
+        account=config.wxid(), is_group=chat_username.endswith('@chatroom'),
         render=lambda cm: _strip_at(enrich(cm)) or enrich(cm), name=_sender_name,
         timestamp=lambda cm: _msg_time_label(cm.get('create_time'), now),
         scheduled=lambda cm: schedule.is_scheduled_msg(cm, chat_username))
@@ -471,8 +506,10 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
         # 作用域按【当前会话】隔离：私聊=chat:<对方>，群=group:<房间>；
         # 这样某人在私聊里告诉你的事，不会在群里被翻出来。
         scope = _scope_of(chat_username)
-        mems = memory.select_memories(sender_wxid, query, recent_topic,
-                                      scope=scope, cfg=llm.load_cfg())
+        mems = []
+        if not context_reset.get(chat_username)["after_id"]:
+            mems = memory.select_memories(sender_wxid, query, recent_topic,
+                                          scope=scope, cfg=llm.load_cfg())
         _diag(chat_username, "select_memories",
               {"qlen": len(query), "scope": scope, "n": len(mems),
                "picked": [m["id"] for m in mems],
@@ -488,13 +525,11 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
             system += (f"\n\n【关于 {who} 的背景资料（供你理解，不是让你主动提起；"
                        "只有当他这次的话真的用得上时才自然带出，别为炫耀记性而翻旧账）】\n"
                        + "\n".join(mlines))
-        style_hint = memory.style_context(sender_wxid, scope=scope)
+        style_hint = ""
+        if not context_reset.get(chat_username)["after_id"]:
+            style_hint = memory.style_context(sender_wxid, scope=scope)
         if style_hint:
             system += "\n" + style_hint + "；只用于调整回应语气，不要向对方透露你在做画像。"
-
-    # 战斗模式：在该会话上叠加"据理力争、不示弱"的语气指令（人设可 UI 配置，红线强制）。
-    if battle_mode.is_on(chat_username):
-        system += battle_mode.system_text()
 
     acfg = agent.agent_config(rules)
     use_agent = acfg["enabled"] and personalization.get(chat_username).get("agent_enabled", True)
@@ -654,6 +689,34 @@ def _recent_inbound_image(chat_username, context_msgs, batch_msgs):
         if data:
             return data
     return None
+
+
+def _niu_draw(ask, chat_username, reference=None):
+    """牛来要图：先回一句在画，再生图发到本会话。"""
+    from core import read_access
+    prompt = " ".join((ask or "").split())[:800] or "simple illustration"
+    try:
+        display = send_name_for(chat_username)
+    except Exception:
+        display = chat_username
+    try:
+        token = send_ledger._operation.set(None)
+        try:
+            sender.send_text(display, niu_mode.stamp("在画了。"), chat_username=chat_username)
+        finally:
+            send_ledger._operation.reset(token)
+    except Exception:
+        pass
+    cfg = llm.load_cfg()
+    ctx = {"chat": chat_username, "cfg": cfg, "display_name": display,
+           "reference": reference, "read_access": read_access.issue(chat_username)}
+    drawn = tools.draw_image(prompt, ctx)
+    if ctx.get("generated_image") and not drawn.startswith("[已生成并把图片发给对方成功]"):
+        ctx["force_send"] = True
+        drawn = tools.draw_image(prompt, ctx)
+    if drawn.startswith("[已生成并把图片发给对方成功]"):
+        return ""
+    return "画不了：" + drawn[:80]
 
 
 def _draw_then_chat(system, ask, turns, chat_username, persona, reference=None):
@@ -984,6 +1047,8 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
         if blocked:
             return blocked
         persona = personalization.resolve_persona(chat_username, rules, rule)["persona"]
+        if battle_mode.is_on(chat_username):
+            persona = dict(persona, name="战斗模式", persona=battle_mode.get_persona())
         if not persona:
             log(f"  reply_ai 跳过：人设 {act.get('persona')} 不存在")
             return {"ok": False, "status": "not_sent", "reason": "generation_failed", "retryable": False}
@@ -995,6 +1060,11 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
             log(f"  reply_ai LLM 出错：{e}")
             return {"ok": False, "status": "not_sent", "reason": "generation_failed", "retryable": False}
         if not (text or "").strip():
+            niu_empty = (rule.get("name") == "niu") or any(
+                niu_mode.is_trigger(m) for m in (batch_msgs or [msg]))
+            if niu_empty:
+                log(f"  AI回复[{persona['name']}] 牛来已发图，不再补文字")
+                return {"ok": True, "status": "submitted", "reason": "niu_image_only", "retryable": False}
             log(f"  AI回复[{persona['name']}] 生成为空，跳过发送(不发空/不空转重试)")
             return {"ok": False, "status": "not_sent", "reason": "generation_failed", "retryable": False}
         target = send_name_for(chat_username)
@@ -1597,6 +1667,22 @@ def _handle_schedule_msg(chat, m, is_group, log):
     return True
 
 
+def reset_chat_context(chat):
+    """Drop queued replies and forget history up to the latest known message."""
+    from core import messages as msgs
+    after_id = 0
+    try:
+        rows = msgs.get_messages(chat, limit=1)
+        if rows:
+            after_id = max(m.get("local_id") or 0 for m in rows)
+    except Exception:
+        after_id = 0
+    if chat in _pending:
+        _pending.pop(chat, None)
+        save_pending()
+    return context_reset.clear(chat, after_id)
+
+
 def enqueue_pending(chat, msg, context, rule, now):
     """A completed/held batch must never swallow later incoming messages.
 
@@ -1823,7 +1909,8 @@ def run_once(rules, state, log=print):
                 engage = mine or (not is_group) or m.get("at_me") or m.get("quote_me")
                 if engage and admin_commands.dispatch(chat, m, is_group, rules, log):
                     continue
-            if m["type"] in (1, 49) and niu_mode.allowed(m, chat, watch_set):
+            if m["type"] in (1, 49) and niu_mode.allowed(m, chat, watch_set) \
+                    and not battle_mode.is_on(chat):
                 enqueue_pending(chat, m, msgs, niu_mode.RULE, time.time())
                 log(f"[牛牛模式] {chat} +1条 → {niu_mode.payload(m.get('content') or '')[:40]!r}")
                 continue
@@ -1832,6 +1919,8 @@ def run_once(rules, state, log=print):
             if m["is_self"]:
                 # 本机器人的定时任务消息：不触发规则/不进待回批(指针已在上面推进,不阻塞)
                 if schedule.is_scheduled_msg(m, chat):
+                    continue
+                if battle_mode.is_on(chat):
                     continue
                 if not include_self:
                     continue

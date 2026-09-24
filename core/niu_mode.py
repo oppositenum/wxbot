@@ -22,11 +22,16 @@ def payload(text):
     return rest.lstrip(" \t:：,，.-")
 
 
+def is_bot_stamp(msg):
+    text = (msg or {}).get("content") or ""
+    return text.lstrip().startswith(PREFIX)
+
+
 def is_trigger(msg):
     if (msg or {}).get("type") not in (1, 49, None):
         return False
     text = msg.get("content") or ""
-    if text.lstrip().startswith(PREFIX):
+    if is_bot_stamp(msg):
         return False
     rest = payload(text)
     return rest is not None and bool(rest.strip())

@@ -138,6 +138,7 @@
     <div class="chat-head">
       <span id="chatTitle">未选择会话</span>
       <span style="display:flex;gap:8px">
+        <button id="resetCtxBtn" style="display:none" title="丢掉本会话旧上下文，之后只用人设和这之后的新消息回复">清理上下文</button>
         <button id="harvestBtn" style="display:none" title="重新检查已经接收到本地的媒体文件">更新媒体</button>
         <button id="membersBtn" style="display:none">群成员</button>
       </span>
@@ -300,9 +301,24 @@ async function openChat(chat){
   $("#msgInput").disabled=false; $("#sendBtn").disabled=false; $("#imgBtn").disabled=false;
   $("#membersBtn").style.display = chat.is_group ? "" : "none";
   $("#harvestBtn").style.display = "";
+  $("#resetCtxBtn").style.display = "";
   render();
   await loadMessages(true);   // 打开会话：强制滚到最新(底部)
 }
+
+$("#resetCtxBtn").onclick=async()=>{
+  if(!current) return;
+  if(!confirm("清理「"+(current.name||current.username)+"」的上下文？之后只按当前人设和这之后的新消息回复，旧对话不再当记忆。")) return;
+  const button=$("#resetCtxBtn"); button.disabled=true;
+  try{
+    const r=await fetch("/api/bot/reset_context",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({chat:current.username})});
+    const j=await r.json();
+    if(!r.ok || !j.ok) throw new Error(j.error||"清理失败");
+    toast("已清理上下文，下一句起重新开始");
+  }catch(e){toast(e.message||"清理失败");}
+  finally{button.disabled=false;}
+};
 
 $("#harvestBtn").onclick=async()=>{
   if(!current) return;

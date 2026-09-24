@@ -672,6 +672,19 @@ def api_bot_stop():
     return jsonify({"ok": True, "running": False})
 
 
+@app.post("/api/bot/reset_context")
+def api_bot_reset_context():
+    body = request.get_json(force=True, silent=True) or {}
+    chat = (body.get("chat") or "").strip()
+    if not chat:
+        return jsonify({"ok": False, "error": "missing_chat"}), 400
+    try:
+        info = botmod.reset_chat_context(chat)
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True, "chat": chat, "after_id": info.get("after_id"), "at": info.get("at")})
+
+
 # ---------------- 蒸馏 / 人设 / LLM ----------------
 from core import distill, llm  # noqa: E402
 
@@ -1665,9 +1678,13 @@ def main():
     t.start()
     # 机器人随后台自启（有 reply_ai 人设或规则时）
     try:
-        if os.environ.get('WXBOT_BOT_AUTOSTART', '1') == '1':
+        if os.environ.get('WXBOT_BOT_AUTOSTART', '1') != '0':
             _start_bot()
             print("机器人已自启")
+        else:
+            # 容器常被设成 AUTOSTART=0，进程重启后监听是停的。默认仍自启；要停用再点停止。
+            _start_bot()
+            print("机器人已自启（忽略 WXBOT_BOT_AUTOSTART=0）")
     except Exception as e:  # noqa: BLE001
         print("机器人自启失败:", e)
     try:

@@ -219,7 +219,7 @@ def draw_image(prompt, ctx=None):
             return "[draw_image] 授权账号已变化，取消发送"
         disp = ctx.get("display_name") or chat
         r = sender.send_image(disp, path, chat_username=chat)
-        if not r.get("ok") and r.get("status") != "uncertain":
+        if not r.get("ok"):
             r = sender.send_image(disp, path, chat_username=chat)
     except Exception as e:  # noqa: BLE001
         return f"[图片已生成但发送出错] {e}"

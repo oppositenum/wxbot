@@ -559,15 +559,34 @@ def gen_image(prompt, size="1024x1024", cfg=None, reference=None):
         body = {"model": model, "prompt": prompt, "n": 1, "size": size, "quality": quality,
                 "image": "data:image/jpeg;base64," + base64.b64encode(reference).decode()}
         try:
-            r = _post(url, headers, body, proxy, timeout=120)
+            r = _post(url, headers, body, proxy, timeout=90, retries=1)
             return _image_bytes_from_response(r, proxy)
         except Exception:
             pass
     url = _endpoint(base or "https://api.openai.com/v1", "images/generations")
-    r = _post(url, headers, {"model": model, "prompt": prompt, "n": 1, "size": size,
-                             "quality": quality},
-              proxy, timeout=120)
-    return _image_bytes_from_response(r, proxy)
+    grok_image = "imagine" in (model or "") or image_follow(cfg) == "grok"
+    if grok_image:
+        body = {"model": model, "prompt": prompt, "n": 1,
+                "aspect_ratio": "1:1", "response_format": "b64_json"}
+        if quality and quality != "standard":
+            body["quality"] = quality
+    else:
+        body = {"model": model, "prompt": prompt, "n": 1, "size": size,
+                "quality": quality}
+    try:
+        r = _post(url, headers, body, proxy, timeout=90, retries=1)
+        return _image_bytes_from_response(r, proxy)
+    except Exception as e:
+        if grok_image:
+            body.pop("response_format", None)
+            body.pop("aspect_ratio", None)
+            body["size"] = size
+            try:
+                r = _post(url, headers, body, proxy, timeout=90, retries=0)
+                return _image_bytes_from_response(r, proxy)
+            except Exception:
+                pass
+        raise e
 
 
 def available():

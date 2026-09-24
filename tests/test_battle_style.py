@@ -5,6 +5,12 @@ from pathlib import Path
 from core import battle_mode, bot
 
 
+def test_battle_reply_uses_battle_persona_not_lishen():
+    src = open("core/bot.py", encoding="utf-8").read()
+    assert "本轮身份=战斗模式" in src
+    assert 'name="战斗模式"' in src
+
+
 def test_system_text_forces_short_bursts():
     text = battle_mode.system_text()
     assert "[[NEXT]]" in text

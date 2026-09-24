@@ -90,8 +90,11 @@ def closing(batch):
 
 
 def decide(batch, context, account, chat=None):
-    from core import niu_mode
-    niu = [niu_mode.inbound(m) for m in batch if niu_mode.is_trigger(m)]
+    from core import niu_mode, battle_mode
+    chat = chat or ((batch[-1].get('chat') if batch else '') or '')
+    niu = []
+    if not battle_mode.is_on(chat):
+        niu = [niu_mode.inbound(m) for m in batch if niu_mode.is_trigger(m)]
     incoming = niu or [m for m in batch if not reply_context.is_self(m, account)]
     if not incoming:
         return Decision('observe', 'self_message')
@@ -143,7 +146,8 @@ def _manual_own_after(context, account, source_id, chat):
     from core import niu_mode
     later = [m for m in context if reply_context.is_self(m, account)
              and (m.get('local_id') or 0) > source_id and meaningful(m)
-             and not niu_mode.is_trigger(m)]
+             and not niu_mode.is_trigger(m) and not niu_mode.is_bot_stamp(m)
+             and m.get('type') != 3]
     if not later:
         return False
     automated = _automated_texts(account, chat)
@@ -238,7 +242,8 @@ def before_dispatch(chat, kind, payload, ledger, jid):
     prior = _recent(ledger, ticket['session'], ticket['chat'], jid)
     from core import niu_mode
     own = [m for m in relevant if reply_context.is_self(m, account)
-           and not niu_mode.is_trigger(m)]
+           and not niu_mode.is_trigger(m) and not niu_mode.is_bot_stamp(m)
+           and m.get('type') != 3]
     if any(m.get('type') != 1 or not any(normalized(m.get('content')) == normalized(t) for t in prior)
            for m in own):
         return Decision('observe', 'own_reply_before_send')

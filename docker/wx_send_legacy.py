@@ -29,6 +29,22 @@ def win_id():
     return ids[-1] if ids else None
 
 
+def detached_chat_id(expect):
+    """独立聊天窗标题等于会话名（自己跟自己）。子串匹配会误伤别的窗口，必须整标题相等。"""
+    if not expect:
+        return None
+    r = x("xdotool", "search", "--name", "^" + expect + "$")
+    ids = [l for l in r.stdout.split() if l.strip()]
+    main = set()
+    wr = x("xdotool", "search", "--name", "^微信$")
+    main.update(l for l in wr.stdout.split() if l.strip())
+    for i in reversed(ids):
+        name = x("xdotool", "getwindowname", i).stdout.strip()
+        if i not in main and name == expect:
+            return i
+    return None
+
+
 def win_geom(wid):
     r = x("xdotool", "getwindowgeometry", wid)
     px = py = w = h = 0
@@ -97,22 +113,42 @@ def click_search(px, py):
     time.sleep(0.25)
 
 
-def search_box_holds(name):
-    """读当前焦点框。搜索没聚焦时这里读到的是输入框，不能当已搜到人。"""
-    sentinel = "WXBOT_SEARCH_SENTINEL"
+def focused_text():
+    """当前焦点框全文。搜索没聚焦时读到的是对话框，不能当已搜到人。"""
     old = clipget()
     try:
-        set_clip_text(sentinel)
         key("ctrl+a")
         time.sleep(0.08)
         key("ctrl+c")
         time.sleep(0.15)
-        got = clipget()
-        key("Right")
-        time.sleep(0.05)
-        return got == name
+        return clipget()
     finally:
         set_clip_text(old)
+
+
+def abort_if_composer_polluted():
+    """焦点若在对话框：清掉刚贴进去的搜索词，绝不回车发送。"""
+    key("ctrl+a")
+    time.sleep(0.05)
+    key("Delete")
+    time.sleep(0.08)
+    key("Escape")
+
+
+def focus_search_box(px, py):
+    """点一次侧栏搜索，立刻准备贴查询词。不要再读剪贴板判断空框：浮层打开后
+    Ctrl+C 经常读到对话框旧内容，脚本会误判然后停住。"""
+    click_search(px, py)
+    time.sleep(0.25)
+    key("ctrl+a")
+    time.sleep(0.05)
+    key("Delete")
+    time.sleep(0.08)
+    return True
+
+
+def search_box_holds(name):
+    return focused_text() == name
 
 
 def click_search_hit(px, py, dy, clicks=1):
@@ -148,13 +184,18 @@ def header_matches(got, expect):
     if b in a or a in b:
         return True
     import difflib
-    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.7
+    ratio = difflib.SequenceMatcher(None, a, b).ratio()
+    return ratio >= 0.7
 
 
 def searched_by_wechat_id(name):
-    """可搜索的微信号是全局唯一的 ASCII；中文备注/带空格的显示名走标题核对。"""
+    """可搜索的微信号：ASCII、无空格。纯英文短名（Limit）是群名/备注，走标题核对。"""
     s = (name or "").strip()
-    return bool(s) and " " not in s and "@" not in s and all(ord(c) < 128 for c in s)
+    if not s or " " in s or "@" in s or any(ord(c) >= 128 for c in s):
+        return False
+    if len(s) < 6:
+        return False
+    return any(c.isdigit() for c in s) or "_" in s
 
 
 def header_crop_path(px, py, w, h):
@@ -181,6 +222,13 @@ def pane_has_header(path):
         return False
 
 
+def already_on_chat(px, py, w, h, expect):
+    """当前顶栏已经是目标会话：不再搜，避免把搜索词打进输入框。"""
+    if not expect:
+        return False
+    return header_matches(header_text(px, py, w, h), expect)
+
+
 def open_chat(wid, name, expect=""):
     close_overlays()
     px, py, w, h = ensure_focused(wid)
@@ -190,22 +238,15 @@ def open_chat(wid, name, expect=""):
     key("Escape")
     time.sleep(0.12)
     px, py, w, h = win_geom(wid)
-    # 连点两次：第一下落在未聚焦窗口上时只激活，第二次才进搜索框。
-    click_search(px, py)
-    click_search(px, py)
-    key("ctrl+a")
-    time.sleep(0.08)
-    key("Delete")
-    time.sleep(0.12)
+    if already_on_chat(px, py, w, h, expect):
+        return px, py, w, h
+    focus_search_box(px, py)
     set_clip_text(name)
+    time.sleep(0.08)
     key("ctrl+v")
-    time.sleep(0.35)
-    if not search_box_holds(name):
-        key("Escape")
-        print("ERR:search-unfocused"); sys.exit(3)
-    time.sleep(1.3)          # 等搜索结果
+    time.sleep(0.9)          # 等搜索结果
+    before = header_text(px, py, w, h)
     if searched_by_wechat_id(name):
-        # 下拉还在时双击「联系人」第一条。单击只出资料卡；不要 Down，会落到同微信号的群。
         click_search_hit(px, py, 128, clicks=2)
         time.sleep(0.8)
         key("Escape")
@@ -214,7 +255,7 @@ def open_chat(wid, name, expect=""):
         if not pane_has_header(header_crop_path(px, py, w, h)):
             print("ERR:chat-not-opened"); sys.exit(3)
         return px, py, w, h
-    # 群名/备注：联系人第一条已经高亮时回车打开的是这一行。
+    # 群名/备注/文件传输助手：联系人第一条已经高亮时回车打开的是这一行。
     key("Return")
     time.sleep(1.0)
     # Do not click the search box again to test whether navigation succeeded:
@@ -255,11 +296,24 @@ def click_send(px, py, w, h):
     time.sleep(0.3)
 
 
-def send_text(name, text, expect=""):
+def activate_chat_window(name, expect=""):
+    """独立聊天窗已打开就用它，避免主窗口（老婆）被 open_chat 搜开。"""
+    det = detached_chat_id(expect)
+    if det:
+        px, py, w, h = win_geom(det)
+        x("xdotool", "windowactivate", "--sync", det)
+        x("xdotool", "windowraise", det)
+        x("xdotool", "windowfocus", "--sync", det)
+        time.sleep(0.2)
+        return px, py, w, h
     wid = win_id()
     if not wid:
         print("ERR:no-window"); sys.exit(2)
-    px, py, w, h = open_chat(wid, name, expect)
+    return open_chat(wid, name, expect)
+
+
+def send_text(name, text, expect=""):
+    px, py, w, h = activate_chat_window(name, expect)
     focus_input(px, py, w, h)
     clear_input()            # 搜人用的微信号若漏进输入框，先清掉再贴正文
     set_clip_text(text)
@@ -273,27 +327,26 @@ def send_text(name, text, expect=""):
 
 
 def send_image(name, path, expect=""):
-    wid = win_id()
-    if not wid:
-        print("ERR:no-window"); sys.exit(2)
-    px, py, w, h = open_chat(wid, name, expect)
-    # 点输入区「发送文件」文件夹图标 → GTK 文件选择器 → 输入路径 → 打开 → 回车发送
-    x("xdotool", "mousemove", str(px + 397), str(py + h - 131), "click", "1")
-    time.sleep(1.5)          # 等文件选择器
-    key("ctrl+a")
-    time.sleep(0.2)
-    key("Delete")            # 清空文件名框
-    time.sleep(0.2)
-    # 逐字符输入路径（--delay 防 GTK 丢字符），不走剪贴板避免与会话名混淆
-    x("xdotool", "type", "--clearmodifiers", "--delay", "25", path)
-    time.sleep(0.4)
-    key("Return")            # 打开文件 → 图片进入输入框
-    time.sleep(1.5)
-    key("Return")            # 发送
+    px, py, w, h = activate_chat_window(name, expect)
+    focus_input(px, py, w, h)
+    clear_input()
+    set_clip_image(path)
+    time.sleep(0.25)
+    key("ctrl+v")
+    time.sleep(0.8)
+    key("Return")
+    time.sleep(0.25)
+    click_send(px, py, w, h)
     print("OK")
 
 
 def just_open(name, expect=""):
+    det = detached_chat_id(expect)
+    if det:
+        x("xdotool", "windowactivate", "--sync", det)
+        x("xdotool", "windowraise", det)
+        print("OK")
+        return
     wid = win_id()
     if not wid:
         print("ERR:no-window"); sys.exit(2)

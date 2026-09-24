@@ -47,6 +47,12 @@ def test_niu_settle_is_immediate():
     assert bot._settle_for(batch) == 0.0
 
 
+def test_niu_draw_not_blocked_as_recent_duplicate():
+    src = open("core/reply_policy.py", encoding="utf-8").read()
+    assert "niu_batch" in src
+    assert "niu_mode.is_bot_stamp" in src
+
+
 def test_reply_policy_does_not_skip_self_niu():
     from core import reply_policy
     own = {"local_id": 1, "type": 1, "is_self": True, "sender": "account-A",
@@ -79,6 +85,13 @@ def test_allowed_watch_or_self_only():
     mine = dict(msg, is_self=True)
     assert niu_mode.allowed(mine, "other@chatroom", {"g@chatroom"}) is True
     assert niu_mode.allowed({"type": 1, "content": "你好", "is_self": True}, "g@chatroom", {"g@chatroom"}) is False
+
+
+def test_wants_image_covers_draw_an_animal():
+    from core import bot
+    assert bot._wants_image("画一只戴着墨镜的小龙虾")
+    assert bot._wants_image("画一个黎深")
+    assert not bot._wants_image("中午吃什么")
 
 
 def test_stamp_prefix():

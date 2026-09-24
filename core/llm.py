@@ -554,17 +554,17 @@ def gen_image(prompt, size="1024x1024", cfg=None, reference=None):
     headers = {"content-type": "application/json",
                "authorization": f"Bearer {key}", "user-agent": UA}
     quality = image_quality(cfg)
-    if reference:
+    grok_image = "imagine" in (model or "") or image_follow(cfg) == "grok"
+    if reference and not grok_image:
         url = _endpoint(base or "https://api.openai.com/v1", "images/edits")
         body = {"model": model, "prompt": prompt, "n": 1, "size": size, "quality": quality,
                 "image": "data:image/jpeg;base64," + base64.b64encode(reference).decode()}
         try:
-            r = _post(url, headers, body, proxy, timeout=90, retries=1)
+            r = _post(url, headers, body, proxy, timeout=25, retries=0)
             return _image_bytes_from_response(r, proxy)
         except Exception:
             pass
     url = _endpoint(base or "https://api.openai.com/v1", "images/generations")
-    grok_image = "imagine" in (model or "") or image_follow(cfg) == "grok"
     if grok_image:
         body = {"model": model, "prompt": prompt, "n": 1,
                 "aspect_ratio": "1:1", "response_format": "b64_json"}
@@ -573,20 +573,8 @@ def gen_image(prompt, size="1024x1024", cfg=None, reference=None):
     else:
         body = {"model": model, "prompt": prompt, "n": 1, "size": size,
                 "quality": quality}
-    try:
-        r = _post(url, headers, body, proxy, timeout=90, retries=1)
-        return _image_bytes_from_response(r, proxy)
-    except Exception as e:
-        if grok_image:
-            body.pop("response_format", None)
-            body.pop("aspect_ratio", None)
-            body["size"] = size
-            try:
-                r = _post(url, headers, body, proxy, timeout=90, retries=0)
-                return _image_bytes_from_response(r, proxy)
-            except Exception:
-                pass
-        raise e
+    r = _post(url, headers, body, proxy, timeout=45, retries=0)
+    return _image_bytes_from_response(r, proxy)
 
 
 def available():

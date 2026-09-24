@@ -248,15 +248,18 @@ def before_dispatch(chat, kind, payload, ledger, jid):
            for m in own):
         return Decision('observe', 'own_reply_before_send')
     if kind == 'text' and isinstance(payload, str):
-        requested = ticket['mode'] == 'reply' and any(
+        niu_batch = any(niu_mode.is_trigger(m) for m in ticket['batch'])
+        requested = ticket['mode'] == 'reply' and (niu_batch or any(
             _REQUEST.search(m.get('content') or '') or m.get('refer') or m.get('type') != 1
-            for m in ticket['batch'])
+            for m in ticket['batch']))
         if not requested:
             texts = _recent(ledger, ticket['session'], chat, jid)
             if chat == ticket['chat']:
                 texts += [m.get('content') or '' for m in ticket['context']
                           if reply_context.is_self(m, account) and m.get('type') == 1
                           and (m.get('create_time') or 0) >= time.time()-1800][-6:]
+            if niu_mode.is_bot_stamp({"content": payload}):
+                texts = [t for t in texts if not niu_mode.is_bot_stamp({"content": t})]
             if any(near(payload, text) for text in texts if isinstance(text, str)):
                 return Decision('observe', 'recent_reply_duplicate')
     ticket['sent'] = True

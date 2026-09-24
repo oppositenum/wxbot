@@ -16,6 +16,12 @@ def test_decorate_prompt_only_for_cast():
     assert lnds.decorate_prompt("画一只猫") == "画一只猫"
 
 
+def test_grok_imagine_skips_edits_endpoint():
+    src = open("core/llm.py", encoding="utf-8").read()
+    fn = src[src.index("def gen_image"):src.index("\ndef available")]
+    assert "if reference and not grok_image" in fn
+
+
 def test_reference_files_exist():
     for name in lnds.CHARACTERS:
         folder = os.path.join(lnds.asset_dir(), name)

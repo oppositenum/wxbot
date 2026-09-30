@@ -229,6 +229,8 @@ def _cmd_battle_on(args, ctx):
     chat, disp, err = _battle_target(args, ctx)
     if err:
         return err
+    from core import continuous_mode
+    continuous_mode.disable(chat)
     battle_mode.enable(chat)
     return (f"⚔️ 已对「{disp}」开启战斗模式：这个会话的每条消息都会自动回击、据理力争，"
             "不用@也回。只在观点上开火，不会爆粗口/人身攻击。收兵发 /关闭战斗模式。")
@@ -242,6 +244,27 @@ def _cmd_battle_off(args, ctx):
         return err
     battle_mode.disable(chat)
     return f"🕊️ 已对「{disp}」关闭战斗模式，收兵。"
+
+
+def _cmd_continuous_on(args, ctx):
+    """/开启持续模式 [会话]：该会话不用 @ 也逐条接话（玩接龙等）。默认当前会话。"""
+    from core import continuous_mode
+    chat, disp, err = _battle_target(args, ctx)
+    if err:
+        return err
+    continuous_mode.enable(chat)
+    return (f"🔁 已对「{disp}」开启持续模式：不用@也会接话，适合玩成语接龙。"
+            f"{continuous_mode.IDLE_OFF // 60} 分钟没人说话自动关闭，手动关发 /关闭持续模式。")
+
+
+def _cmd_continuous_off(args, ctx):
+    """/关闭持续模式 [会话]：恢复为 @/引用才回。默认当前会话。"""
+    from core import continuous_mode
+    chat, disp, err = _battle_target(args, ctx)
+    if err:
+        return err
+    continuous_mode.disable(chat)
+    return f"⏸️ 已对「{disp}」关闭持续模式，恢复 @ 我才回。"
 
 
 def _cmd_help(args, ctx):
@@ -260,6 +283,8 @@ COMMANDS = {
     '发': (_cmd_send, '/发 <联系人> <内容>  代发一条消息给联系人'),
     '开启战斗模式': (_cmd_battle_on, '/开启战斗模式 [会话]  对该会话逐条自动回击、据理力争（默认当前会话）'),
     '关闭战斗模式': (_cmd_battle_off, '/关闭战斗模式 [会话]  收兵，停止自动回击（默认当前会话）'),
+    '开启持续模式': (_cmd_continuous_on, '/开启持续模式 [会话]  不用@也逐条接话，玩接龙用（默认当前会话，1小时无人说话自动关）'),
+    '关闭持续模式': (_cmd_continuous_off, '/关闭持续模式 [会话]  恢复@我才回（默认当前会话）'),
     '帮助': (_cmd_help, '/帮助  查看全部命令'),
 }
 

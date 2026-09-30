@@ -34,7 +34,7 @@ _GLOBAL_RULES = os.path.join(config.PROJECT_DIR, "bot_rules.json")
 
 from core import account_session as sessions, send_ledger, personalization, conversation_state, reply_policy
 from core import niu_mode
-from core import admin_commands, battle_mode, humanize, context_reset
+from core import admin_commands, battle_mode, continuous_mode, humanize, context_reset
 
 def rules_file():
     return os.path.join(config.account_dir(), "bot_rules.json")
@@ -459,6 +459,10 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
     lines = [turn['content'] for turn in turns]
 
     system += "\n【本轮机器人角色】\n" + persona["persona"]
+    if continuous_mode.is_on(chat_username):
+        system += continuous_mode.PROMPT
+        system += continuous_mode.game_prompt(
+            continuous_mode.idiom_game(list(context_msgs or []) + raw_batch))
     if chat_username.endswith("@chatroom") and _priority_senders(rules, chat_username):
         system += (
             "\n【群聊优先成员】本群有一名已配置的优先成员。涉及她的消息时，以她的实际要求和立场为主，"
@@ -768,6 +772,9 @@ _PAT_COOLDOWN = 60
 # 战斗模式合成规则：让该会话的每条消息都走 reply_ai（语气增强在 _ai_reply 里叠加）。
 _BATTLE_RULE = {"name": "战斗模式", "match": {"type": "all"},
                 "action": {"type": "reply_ai"}}
+# 持续模式合成规则：正常人设，只是不需要 @/引用。
+_CONTINUOUS_RULE = {"name": "持续模式", "match": {"type": "all"},
+                    "action": {"type": "reply_ai"}}
 
 
 @sessions.task
@@ -1034,6 +1041,20 @@ def greet(chat_username, hint=""):
     return dict(r or {}, message=preview, sent=sent, burst=len(sent))
 
 
+def _idiom_retry(game):
+    """模型接错字时，用一个只管接龙的短提示重出一次；仍不合规返回空串。"""
+    used = "、".join(game["used"][-30:])
+    for _ in range(2):
+        out = (llm.chat(
+            "你在玩成语接龙。只输出一个真实存在的四字成语，不要任何别的字。",
+            [{"role": "user", "content": f"给一个以「{game['need']}」字（{game['need_py']}）开头的四字成语，"
+                                         f"优先同一个字，没有就用同音字。{continuous_mode.COMMON}不能是这些：{used}"}],
+            cfg={**llm.load_cfg(), "max_tokens": 20, "no_gpt_fallback": True}) or "").strip()
+        if continuous_mode.check_answer(game, out):
+            return continuous_mode.idiom_of({"type": 1, "content": out})
+    return ""
+
+
 @sessions.task
 def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=None, batch_msgs=None):
     act = rule.get("action", {})
@@ -1066,6 +1087,30 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
         except Exception as e:  # noqa: BLE001
             log(f"  reply_ai LLM 出错：{e}")
             return {"ok": False, "status": "not_sent", "reason": "generation_failed", "retryable": False}
+        continuous = continuous_mode.is_on(chat_username)
+        if continuous:
+            if continuous_mode.is_skip(text):
+                log("  [持续模式] 不是对我说的，不插话")
+                return {"ok": True, "status": "skipped", "reason": "continuous_not_addressed", "retryable": False}
+            text = _split_next(text)[0] if text else text
+            game = continuous_mode.idiom_game(list(context_msgs or []) + list(batch_msgs or [msg]))
+            if continuous_mode.NOT_IDIOM in text:
+                if not game:
+                    return {"ok": True, "status": "skipped", "reason": "continuous_not_addressed", "retryable": False}
+                text = continuous_mode.hint(game)
+                log(f"  [接龙] 对方这步不算数，提示：{text!r}")
+            elif not continuous_mode.check_answer(game, text):
+                log(f"  [接龙] 模型出了 {text!r}，接不上「{game['need']}」或已用过，重出一次")
+                text = _idiom_retry(game) or ""
+                if not text:
+                    log("  [接龙] 重出仍不合规，这轮不发")
+                    return {"ok": False, "status": "not_sent", "reason": "generation_failed", "retryable": False}
+            # 生成要十几秒，对方可能已经出了下一个成语：旧答案作废，交给新批次。
+            now_game = continuous_mode.idiom_game(messages.get_messages(chat_username, limit=40) or [])
+            key = lambda g: (g["last"], g["attempt"]) if g else None
+            if game and (not game["mine"] or game["attempt"]) and key(now_game) != key(game):
+                log(f"  [接龙] 局面已变（链上最新「{now_game['last'] if now_game else '已散局'}」），丢弃过期答案 {text!r}")
+                return {"ok": True, "status": "skipped", "reason": "continuous_stale", "retryable": False}
         if not (text or "").strip():
             niu_empty = (rule.get("name") == "niu") or any(
                 niu_mode.is_trigger(m) for m in (batch_msgs or [msg]))
@@ -1078,7 +1123,10 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
         inbound = "\n".join((m.get("content") or "") for m in (batch_msgs or [msg]) if not m.get("is_self"))
         burst, _ = burst_count(inbound or (msg.get("content") or ""), default=1)
         niu = (rule.get("name") == "niu") or any(niu_mode.is_trigger(m) for m in (batch_msgs or [msg]))
-        if niu:
+        if continuous and not niu:
+            burst = 1
+            parts = _reply_parts(text, 1)[:1]
+        elif niu:
             burst = 1
             parts = _reply_parts(text, 1)[:1]
             parts = [niu_mode.stamp(p) for p in parts]
@@ -1833,6 +1881,10 @@ def run_once(rules, state, log=print):
     watch_set = set(_expand_watch(rules.get("watch", [])))
     # 战斗模式的会话即使不在监听列表也要轮询并参与回复（吵架现场可能是任意群/私聊）。
     watch_set |= set(battle_mode.active_chats())
+    # 持续模式同理；长时间没人说话的先自动关掉，免得一直刷屏。
+    for dead in continuous_mode.expire(now):
+        log(f"[持续模式] {dead} 空闲超时，已自动关闭")
+    watch_set |= set(continuous_mode.active_chats())
     # 管理员私聊即使未加入监听也要能收命令（且不因此触发普通自动回复）。
     admin_set = {a for a in (rules.get("admins") or []) if not a.endswith("@chatroom")}
     try:
@@ -1927,14 +1979,14 @@ def run_once(rules, state, log=print):
                 # 本机器人的定时任务消息：不触发规则/不进待回批(指针已在上面推进,不阻塞)
                 if schedule.is_scheduled_msg(m, chat):
                     continue
-                if battle_mode.is_on(chat):
+                if battle_mode.is_on(chat) or continuous_mode.is_on(chat):
                     continue
                 if not include_self:
                     continue
             # 普通群回复受 group_auto_reply 控制；战斗模式是显式会话开关，
             # 即使普通群回复关闭也必须逐条接管该会话。
             if is_group and rules.get("group_auto_reply") is not True \
-                    and not battle_mode.is_on(chat):
+                    and not battle_mode.is_on(chat) and not continuous_mode.is_on(chat):
                 continue
             # 拍一拍(拍了拍【我】才应,拍别人不掺和)：简短招呼一句,不走整段AI长回复
             # 实测拍一拍以 type49 appmsg 出现(也兼容 10000 系统消息形态)
@@ -1965,6 +2017,12 @@ def run_once(rules, state, log=print):
                     and not _is_priority_sender(m, rules, chat):
                 enqueue_pending(chat, m, msgs, _BATTLE_RULE, time.time())
                 log(f"[战斗模式] {chat} +1条 → 回击队列")
+                continue
+            # 持续模式：该会话不看 @/引用，每条文字都进正常人设的回复队列。
+            if text_like and continuous_mode.is_on(chat) and not m["is_self"]:
+                continuous_mode.touch(chat, time.time())
+                enqueue_pending(chat, m, msgs, _CONTINUOUS_RULE, time.time())
+                log(f"[持续模式] {chat} +1条 → 回复队列")
                 continue
             for rule in rules.get("rules", []):
                 mt = (rule.get("match") or {}).get("type")

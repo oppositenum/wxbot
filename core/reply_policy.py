@@ -35,6 +35,8 @@ LABELS = {
     'recent_reply_duplicate': '与近期发言重复，跳过本次回复',
     'bot_stopped_before_send': '机器人已停止，取消待发回复',
     'account_hourly_cap': '本小时自动发送已达上限，稍后继续',
+    'continuous_not_addressed': '持续模式：群友之间在聊，不插话',
+    'continuous_stale': '持续模式：对方已出下一个，丢弃过期答案',
 }
 
 

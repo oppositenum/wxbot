@@ -537,24 +537,18 @@ def _image_bytes_from_response(r, proxy):
     raise RuntimeError("图像生成返回为空")
 
 
-def gen_image(prompt, size="1024x1024", cfg=None, reference=None):
-    """文生图：调 OpenAI 兼容的 images/generations，返回图片 bytes(PNG/JPEG)。
+def _grok_image_unavailable(err):
+    text = str(err or "")
+    return "HTTP 503" in text or "No eligible Grok me" in text or "No eligible Grok media" in text
 
-    凭据经 image_creds()：优先独立画图中转 cfg['image']，否则退回 gpt 那套 + image_model。
-    注意：中转可能【未给该 key 开通图像权限】(403 permission_error)——此时抛 RuntimeError，
-    由调用方(draw_image 工具)据此如实告诉对方"画不了/未开通"，绝不静默失败或假装画了。
-    有 reference（参考图 bytes）时先走 images/edits；中转不支持再退回文生图。
-    """
+
+def _post_image(prompt, size, cfg, reference, base, key, model, grok_image, quality):
     import base64
-    cfg = cfg or load_cfg()
     proxy = cfg.get("proxy") or None
-    base, key, model = image_creds(cfg)
     if not key:
         raise RuntimeError("未配置画图中转的 api_key（llm_config.json 的 image 块或 gpt 块）")
     headers = {"content-type": "application/json",
                "authorization": f"Bearer {key}", "user-agent": UA}
-    quality = image_quality(cfg)
-    grok_image = "imagine" in (model or "") or image_follow(cfg) == "grok"
     if reference and not grok_image:
         url = _endpoint(base or "https://api.openai.com/v1", "images/edits")
         body = {"model": model, "prompt": prompt, "n": 1, "size": size, "quality": quality,
@@ -575,6 +569,32 @@ def gen_image(prompt, size="1024x1024", cfg=None, reference=None):
                 "quality": quality}
     r = _post(url, headers, body, proxy, timeout=45, retries=0)
     return _image_bytes_from_response(r, proxy)
+
+
+def gen_image(prompt, size="1024x1024", cfg=None, reference=None):
+    """文生图：调 OpenAI 兼容的 images/generations，返回图片 bytes(PNG/JPEG)。
+
+    凭据经 image_creds()：优先独立画图中转 cfg['image']，否则退回 gpt 那套 + image_model。
+    Grok 中转 503 / 无可用 media 账号时，改用 GPT 的 gpt-image-1 再画一次。
+    """
+    cfg = cfg or load_cfg()
+    base, key, model = image_creds(cfg)
+    quality = image_quality(cfg)
+    grok_image = "imagine" in (model or "") or image_follow(cfg) == "grok"
+    try:
+        return _post_image(prompt, size, cfg, reference, base, key, model, grok_image, quality)
+    except Exception as e:
+        if not grok_image or not _grok_image_unavailable(e):
+            raise
+        gpt_base, gpt_key, _ = creds(cfg, "gpt")
+        gpt_model = (image_block(cfg).get("gpt_fallback_model")
+                     or cfg.get("gpt_image_model") or "gpt-image-1")
+        if not gpt_key:
+            raise
+        log = logging.getLogger("wxbot.llm")
+        log.warning("Grok image unavailable (%s); falling back to %s", e, gpt_model)
+        return _post_image(prompt, size, cfg, reference, gpt_base, gpt_key, gpt_model,
+                           False, "low")
 
 
 def available():

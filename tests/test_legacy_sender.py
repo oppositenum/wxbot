@@ -46,7 +46,8 @@ class Legacy(Isolated):
         self.assertIn('搜索聊天记录', src)
         self.assertIn('focus_search_box', open_fn)
         self.assertNotIn('SEARCH_SENTINEL', src)
-        self.assertIn('ctrl+v', open_fn)
+        self.assertIn('xdotool", "type"', open_fn)
+        self.assertIn('search_shows_query', open_fn)
         self.assertNotIn('search_still_open', src)
         self.assertNotIn('click_search(px, py)\n    return search_box_holds', src)
         self.assertNotIn('key("Down")', open_fn)
@@ -55,6 +56,7 @@ class Legacy(Isolated):
         self.assertNotIn('px + w // 2', open_fn)
         self.assertNotIn('py + h // 2', open_fn)
         self.assertIn('clear_input()', send_fn)
+        self.assertIn('already_on_chat', send_fn)
         self.assertNotIn('key("Escape")', send_fn)
         id_open = open_fn[open_fn.index('if searched_by_wechat_id'):open_fn.index('# 群名/备注')]
         self.assertIn('click_search_hit', id_open)

@@ -135,9 +135,33 @@ def abort_if_composer_polluted():
     key("Escape")
 
 
+def search_panel_text(px, py):
+    """侧栏搜索结果区 OCR。用来确认查询词进了搜索，而不是对话框。"""
+    full = "/tmp/wx_search_full.png"
+    crop = "/tmp/wx_search_crop.png"
+    x("scrot", "-o", full)
+    try:
+        from PIL import Image
+        im = Image.open(full)
+        im.crop((px + 16, py + 28, px + 268, py + 220)).save(crop)
+    except Exception:
+        return ""
+    r = x("tesseract", crop, "stdout", "-l", "chi_sim+eng", "--psm", "6")
+    return "".join((r.stdout or "").split())
+
+
+def search_shows_query(px, py, name):
+    q = "".join((name or "").split())
+    if not q:
+        return False
+    got = search_panel_text(px, py)
+    if q.lower() in got.lower():
+        return True
+    return header_matches(got, name)
+
+
 def focus_search_box(px, py):
-    """点一次侧栏搜索，立刻准备贴查询词。不要再读剪贴板判断空框：浮层打开后
-    Ctrl+C 经常读到对话框旧内容，脚本会误判然后停住。"""
+    """点侧栏搜索并清空，随后用键盘输入查询词（不走剪贴板，避免贴进对话框）。"""
     click_search(px, py)
     time.sleep(0.25)
     key("ctrl+a")
@@ -185,6 +209,9 @@ def header_matches(got, expect):
         return True
     import difflib
     ratio = difflib.SequenceMatcher(None, a, b).ratio()
+    # ASCII 群名（Limit）必须几乎整词对上，避免和「老婆」糊成同一会话。
+    if all(ord(c) < 128 for c in b):
+        return b.lower() in a.lower() and ratio >= 0.85
     return ratio >= 0.7
 
 
@@ -241,10 +268,11 @@ def open_chat(wid, name, expect=""):
     if already_on_chat(px, py, w, h, expect):
         return px, py, w, h
     focus_search_box(px, py)
-    set_clip_text(name)
-    time.sleep(0.08)
-    key("ctrl+v")
+    x("xdotool", "type", "--clearmodifiers", "--delay", "25", name)
     time.sleep(0.9)          # 等搜索结果
+    if not search_shows_query(px, py, name):
+        abort_if_composer_polluted()
+        print("ERR:search-unfocused"); sys.exit(3)
     before = header_text(px, py, w, h)
     if searched_by_wechat_id(name):
         click_search_hit(px, py, 128, clicks=2)
@@ -314,7 +342,12 @@ def activate_chat_window(name, expect=""):
 
 def send_text(name, text, expect=""):
     px, py, w, h = activate_chat_window(name, expect)
+    if expect and not already_on_chat(px, py, w, h, expect):
+        print("ERR:wrong-chat"); sys.exit(3)
     focus_input(px, py, w, h)
+    if expect and not already_on_chat(px, py, w, h, expect):
+        abort_if_composer_polluted()
+        print("ERR:wrong-chat"); sys.exit(3)
     clear_input()            # 搜人用的微信号若漏进输入框，先清掉再贴正文
     set_clip_text(text)
     time.sleep(0.2)
@@ -328,7 +361,12 @@ def send_text(name, text, expect=""):
 
 def send_image(name, path, expect=""):
     px, py, w, h = activate_chat_window(name, expect)
+    if expect and not already_on_chat(px, py, w, h, expect):
+        print("ERR:wrong-chat"); sys.exit(3)
     focus_input(px, py, w, h)
+    if expect and not already_on_chat(px, py, w, h, expect):
+        abort_if_composer_polluted()
+        print("ERR:wrong-chat"); sys.exit(3)
     clear_input()
     set_clip_image(path)
     time.sleep(0.25)

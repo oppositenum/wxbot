@@ -62,7 +62,7 @@ class Legacy(Isolated):
         self.assertIn('click_search_hit', id_open)
         self.assertIn('clicks=2', id_open)
         self.assertIn('ERR:chat-not-opened', id_open)
-        self.assertNotIn('ERR:wrong-chat', id_open)
+        self.assertIn('_header_conflicts', id_open)
         self.assertNotIn('key("Return")', id_open)
         self.assertIn('--repeat', src)
         self.assertIn('before = header_text', open_fn)
@@ -103,8 +103,8 @@ class Legacy(Isolated):
 
     def test_header_ocr_typo_still_matches_expected_chat(self):
         src = Path('docker/wx_send_legacy.py').read_text(encoding='utf-8')
-        start = src.index('def header_matches')
-        end = src.index('\ndef open_chat')
+        start = src.index('def _ocr_title')
+        end = src.index('\ndef header_crop_path')
         ns = {'__name__': 'header'}
         exec(compile(src[start:end], 'header.py', 'exec'), ns)
         self.assertTrue(ns['header_matches']('老浪one', '老婆one'))
@@ -112,8 +112,22 @@ class Legacy(Isolated):
         self.assertTrue(ns['header_matches']('漂云', '漂云'))
         self.assertFalse(ns['header_matches']('老婆', '漂云'))
         self.assertFalse(ns['header_matches']('猫来了小队', '老婆two'))
+        # 切号后顶栏「蜜蜜🌱besos」：原图读成 EE'，放大后读成 密蜜sbesos。
+        self.assertTrue(ns['header_matches']("EE'besos\n密蜜sbesos", '蜜蜜🌱besos'))
+        self.assertTrue(ns['header_matches']('密蜜sbesos', '蜜蜜🌱besos'))
+        self.assertFalse(ns['header_matches']("EE'besos", '蜜蜜🌱besos'))
+        self.assertFalse(ns['header_matches']('besos', '蜜蜜🌱besos'))
+        # 两个 besos 不能靠表情尾巴互认。蜜蜜的顶栏不是 🐮🐮。
+        self.assertFalse(ns['header_matches']('密蜜sbesos', '🐮🐮🌱besos'))
+        self.assertFalse(ns['header_matches']("EE'besos", '🐮🐮🌱besos'))
+        self.assertFalse(ns['header_matches']('蜜蜜🌱besos', '🐮🐮🌱besos'))
+        self.assertFalse(ns['header_matches']('besos', '🐮🐮🌱besos'))
+        self.assertTrue(ns['header_matches']('🐮🐮🌱besos', '🐮🐮🌱besos'))
+        self.assertTrue(ns['_header_conflicts']('密蜜sbesos', '🐮🐮🌱besos'))
+        self.assertFalse(ns['_header_conflicts']("EE'besos", '🐮🐮🌱besos'))
         self.assertTrue(ns['searched_by_wechat_id']('suwanwan2005'))
         self.assertTrue(ns['searched_by_wechat_id']('unique_a'))
+        self.assertTrue(ns['searched_by_wechat_id']('myuwhn'))
         self.assertFalse(ns['searched_by_wechat_id']('二奶'))
         self.assertFalse(ns['searched_by_wechat_id']('same name'))
         self.assertFalse(ns['searched_by_wechat_id']('group@chatroom'))

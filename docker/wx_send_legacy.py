@@ -137,8 +137,10 @@ def abort_if_composer_polluted():
 
 def search_panel_text(px, py):
     """侧栏搜索结果区 OCR。用来确认查询词进了搜索，而不是对话框。"""
-    full = "/tmp/wx_search_full.png"
-    crop = "/tmp/wx_search_crop.png"
+    import uuid
+    tag = uuid.uuid4().hex[:10]
+    full = f"/tmp/wx_search_{tag}_full.png"
+    crop = f"/tmp/wx_search_{tag}_crop.png"
     x("scrot", "-o", full)
     try:
         from PIL import Image
@@ -183,10 +185,39 @@ def click_search_hit(px, py, dy, clicks=1):
     time.sleep(0.35)
 
 
+def _shot_paths():
+    """每次截图单独落盘。固定的 /tmp 文件会被别的线程写坏，OCR 就会读到空图。"""
+    import uuid
+    tag = uuid.uuid4().hex[:10]
+    return f"/tmp/wx_header_{tag}_full.png", f"/tmp/wx_header_{tag}_crop.png"
+
+
+def _ocr_title(path):
+    """顶栏字很小，emoji 会把「蜜蜜」读成「EE'」。放大后再认一次，两份结果都参与核对。"""
+    reads = []
+    r = x("tesseract", path, "stdout", "-l", "chi_sim+eng", "--psm", "7")
+    raw = "".join((r.stdout or "").split())
+    if raw:
+        reads.append(raw)
+    try:
+        from PIL import Image, ImageEnhance
+        im = Image.open(path)
+        big = im.resize((im.width * 3, im.height * 3), Image.Resampling.LANCZOS)
+        big = ImageEnhance.Contrast(big).enhance(2.0)
+        scaled = path + ".x3.png"
+        big.save(scaled)
+        r2 = x("tesseract", scaled, "stdout", "-l", "chi_sim+eng", "--psm", "7")
+        scaled_text = "".join((r2.stdout or "").split())
+        if scaled_text and scaled_text not in reads:
+            reads.append(scaled_text)
+    except Exception:
+        pass
+    return reads
+
+
 def header_text(px, py, w, h):
     """读会话顶栏标题。OCR 只做核对，不拿来选人。"""
-    full = "/tmp/wx_header_full.png"
-    crop = "/tmp/wx_header_crop.png"
+    full, crop = _shot_paths()
     x("scrot", "-o", full)
     try:
         from PIL import Image
@@ -194,40 +225,98 @@ def header_text(px, py, w, h):
         im.crop((px + 286, py + 6, px + min(w - 80, 700), py + 52)).save(crop)
     except Exception:
         return ""
-    r = x("tesseract", crop, "stdout", "-l", "chi_sim+eng", "--psm", "7")
-    return "".join((r.stdout or "").split())
+    return "\n".join(_ocr_title(crop))
+
+
+# 本进程刚用唯一微信号点开的会话。表情昵称读不准时，只靠这个放行。
+_opened_by_alias = ""
 
 
 def header_matches(got, expect):
     if not expect:
         return True
+    # header_text 把原图和放大图的识别结果用换行拼在一起，任一读法对上即可。
+    reads = [part for part in (got or "").splitlines() if part.strip()] or [got or ""]
+    for raw in reads:
+        if _header_one(raw, expect):
+            return True
+    return False
+
+
+def _title_parts(text):
+    """拆成汉字、拉丁字母数字、表情/符号个数。🌱 和 🐮 不进汉字。"""
+    import unicodedata
+    han, latin, marks = [], [], 0
+    for c in text or "":
+        if c.isspace():
+            continue
+        o = ord(c)
+        if "\u4e00" <= c <= "\u9fff":
+            han.append(c)
+        elif c.isascii() and c.isalnum():
+            latin.append(c.lower())
+        elif unicodedata.category(c).startswith("S") or o > 0x1F000 or 0xFE00 <= o <= 0xFE0F:
+            marks += 1
+    return "".join(han), "".join(latin), marks
+
+
+def _header_one(got, expect):
     a = "".join((got or "").split())
     b = "".join((expect or "").split())
     if not a or not b:
         return False
-    if b in a or a in b:
+    if a == b or b in a:
+        return True
+    # 只读出「besos」不能当成整段昵称。
+    if a in b and len(a) >= max(4, int(len(b) * 0.85)):
         return True
     import difflib
     ratio = difflib.SequenceMatcher(None, a, b).ratio()
     # ASCII 群名（Limit）必须几乎整词对上，避免和「老婆」糊成同一会话。
     if all(ord(c) < 128 for c in b):
         return b.lower() in a.lower() and ratio >= 0.85
-    return ratio >= 0.7
+    ha, la, _ma = _title_parts(a)
+    hb, lb, mb = _title_parts(b)
+    if hb:
+        # 「蜜蜜」和「密蜜」算同一顶栏；和「苏苏」不是。
+        if not ha or difflib.SequenceMatcher(None, ha, hb).ratio() < 0.5:
+            return False
+        if lb and (lb not in la or len(la) > len(lb) + 2):
+            return False
+        return ratio >= 0.7 and len(a) >= max(4, int(len(b) * 0.75))
+    if mb:
+        # 🐮🐮🌱besos 去掉表情只剩 besos。蜜蜜🌱besos、EE'besos 都带这个尾巴，不能靠它放行。
+        if ha:
+            return False
+        return ratio >= 0.85 and len(a) >= int(len(b) * 0.9)
+    return ratio >= 0.7 and len(a) >= max(4, int(len(b) * 0.75))
+
+
+def _header_conflicts(got, expect):
+    """读出了另一套汉字名。表情读丢可以放过，汉字对不上不能发。"""
+    import difflib
+    hb, _lb, _mb = _title_parts(expect)
+    reads = [part for part in (got or "").splitlines() if part.strip()] or [got or ""]
+    for raw in reads:
+        ha, _la, _ma = _title_parts(raw)
+        if not ha:
+            continue
+        if not hb or difflib.SequenceMatcher(None, ha, hb).ratio() < 0.5:
+            return True
+    return False
 
 
 def searched_by_wechat_id(name):
-    """可搜索的微信号：ASCII、无空格。纯英文短名（Limit）是群名/备注，走标题核对。"""
+    """可搜索的微信号：ASCII、无空格、至少 6 位。纯英文短名（Limit）是群名，走标题核对。
+    myuwhn 这种没有数字的微信号也要点联系人行，不能靠回车停在当前会话。"""
     s = (name or "").strip()
     if not s or " " in s or "@" in s or any(ord(c) >= 128 for c in s):
         return False
-    if len(s) < 6:
-        return False
-    return any(c.isdigit() for c in s) or "_" in s
+    return len(s) >= 6
 
 
 def header_crop_path(px, py, w, h):
-    full = "/tmp/wx_header_full.png"
-    crop = "/tmp/wx_header_crop.png"
+    full, crop = _shot_paths()
     x("scrot", "-o", full)
     try:
         from PIL import Image
@@ -251,9 +340,17 @@ def pane_has_header(path):
 
 def already_on_chat(px, py, w, h, expect):
     """当前顶栏已经是目标会话：不再搜，避免把搜索词打进输入框。"""
+    global _opened_by_alias
     if not expect:
         return False
-    return header_matches(header_text(px, py, w, h), expect)
+    got = header_text(px, py, w, h)
+    if _header_conflicts(got, expect):
+        _opened_by_alias = ""
+        return False
+    if header_matches(got, expect):
+        return True
+    # 刚用唯一微信号点开，顶栏又读不出另一套汉字，才承认这个会话。
+    return bool(_opened_by_alias)
 
 
 def open_chat(wid, name, expect=""):
@@ -264,9 +361,11 @@ def open_chat(wid, name, expect=""):
     time.sleep(0.12)
     key("Escape")
     time.sleep(0.12)
+    global _opened_by_alias
     px, py, w, h = win_geom(wid)
     if already_on_chat(px, py, w, h, expect):
         return px, py, w, h
+    _opened_by_alias = ""
     focus_search_box(px, py)
     x("xdotool", "type", "--clearmodifiers", "--delay", "25", name)
     time.sleep(0.9)          # 等搜索结果
@@ -282,6 +381,10 @@ def open_chat(wid, name, expect=""):
         px, py, w, h = win_geom(wid)
         if not pane_has_header(header_crop_path(px, py, w, h)):
             print("ERR:chat-not-opened"); sys.exit(3)
+        got = header_text(px, py, w, h)
+        if expect and _header_conflicts(got, expect):
+            print("ERR:wrong-chat"); sys.exit(3)
+        _opened_by_alias = name
         return px, py, w, h
     # 群名/备注/文件传输助手：联系人第一条已经高亮时回车打开的是这一行。
     key("Return")

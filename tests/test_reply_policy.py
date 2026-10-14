@@ -33,6 +33,16 @@ class Decisions(unittest.TestCase):
                          'own_reply_after_source')
         self.assertEqual(policy.decide([msg(3, '地点呢？')], [own], 'account-A').action, 'reply')
 
+    def test_automated_reply_after_followup_is_not_a_manual_answer(self):
+        follow = msg(2, '不乖的话，让你当医生了')
+        own = msg(3, '嗯？', True)
+        ctx = [msg(1, '嗯？'), follow, own]
+        with patch.object(policy, '_automated_texts', return_value=['嗯？']):
+            self.assertEqual(policy.decide([follow], ctx, 'account-A', chat='chat-A').action, 'reply')
+        with patch.object(policy, '_automated_texts', return_value=[]):
+            self.assertEqual(policy.decide([follow], ctx, 'account-A', chat='chat-A').reason,
+                             'own_reply_after_source')
+
     def test_similar_text_preserves_changed_facts(self):
         self.assertTrue(policy.near('好的，明天见！', '好的明天见'))
         self.assertTrue(policy.near('今天辛苦了你先好好休息一下有事情我们明天再慢慢聊',
@@ -91,6 +101,26 @@ class Replay(Isolated):
         self.assertEqual([m['local_id'] for m in p2['msgs']], [2])
         self.newer = []
         self.process(p2, '明天四点见')
+        self.assertEqual(self.adapter.calls, 2)
+        self.assertNotIn('chat-A', bot._pending)
+
+    def test_bot_reply_to_first_batch_does_not_skip_message_that_arrived_during_send(self):
+        """老婆one: 先回「嗯？」，发送期间第二句进来，不能当成已经回过了。"""
+        first = self.batch('嗯？', rows=[msg(1707, '嗯？')])
+        bot._pending.pop('chat-A')
+        follow = msg(1708, '不乖的话，让你当医生了')
+        def generate(*a, **k):
+            bot.enqueue_pending('chat-A', follow, [msg(1707, '嗯？'), follow], first['rule'], 100)
+            return '嗯？'
+        with patch.object(bot, '_ai_reply', side_effect=generate):
+            bot.process_pending('chat-A', first, {}, lambda *a: None)
+        self.assertEqual(first['send_status'], 'confirmed')
+        own = msg(1709, '嗯？', True)
+        p2 = bot._pending['chat-A']
+        p2['ctx'] = [msg(1707, '嗯？'), follow, own]
+        self.assertEqual([m['local_id'] for m in p2['msgs']], [1708])
+        self.assertEqual(policy.decide(p2['msgs'], p2['ctx'], 'account-A', chat='chat-A').action, 'reply')
+        self.process(p2, '那我当医生。')
         self.assertEqual(self.adapter.calls, 2)
         self.assertNotIn('chat-A', bot._pending)
 

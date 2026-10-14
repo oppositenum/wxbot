@@ -1,27 +1,48 @@
-# wxbot 一键部署（x86/arm Linux 服务器）
-#   docker compose up -d
-#   浏览器开 http://<host>:6080/vnc.html 扫码登录小号 → http://<host>:5100 用后台
+# wxbot Ubuntu 24.04 one-command deployment (amd64/arm64).
+# Run ./deploy.sh instead of invoking Compose manually.
 services:
   wxbot:
-    image: ${WXBOT_IMAGE:-wxbot-wechat:latest}   # 在 .env 里设 WXBOT_IMAGE 指向你的镜像/registry
+    image: ${WXBOT_IMAGE:-wxbot-wechat:ubuntu-24.04}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
     container_name: wxbot
+    init: true
     restart: unless-stopped
+    # 降"机器人/容器"指纹:真实主机名 + 真实网卡厂商 MAC(Intel OUI 00:1b:21),
+    # 别再暴露容器 12 位哈希主机名与随机本地管理位 MAC。
+    hostname: ${WXBOT_HOSTNAME:-ubuntu-pc}
+    mac_address: ${WXBOT_MAC:-00:1b:21:3a:7c:9e}
     shm_size: "1g"
     security_opt:
       - seccomp=unconfined          # 微信(CEF)需要
     cap_add:
       - SYS_PTRACE                   # 读 /proc/<pid>/mem 提取数据库密钥
+    extra_hosts:
+      # Docker Desktop 自带；Linux 宿主靠这行让容器能回连宿主的多账号助手
+      - "host.docker.internal:host-gateway"
     environment:
-      - VNC_PASSWORD=${VNC_PASSWORD:-}   # 建议设置；留空=noVNC 无密码
-      - SCREEN=${SCREEN:-1360x900x24}
-      - TZ=${TZ:-Asia/Shanghai}
+      VNC_PASSWORD: ${VNC_PASSWORD:?VNC_PASSWORD must be set in .env}
+      SCREEN: ${SCREEN:-1920x1080x24}
+      TZ: ${TZ:-Asia/Shanghai}
+      WXBOT_BOT_AUTOSTART: ${WXBOT_BOT_AUTOSTART:-1}
+      WXBOT_MEDIA_CAPTURE: ${WXBOT_MEDIA_CAPTURE:-1}
+      WXBOT_UI_AUTH: ${WXBOT_UI_AUTH:-1}
+      WXBOT_UI_USER: ${WXBOT_UI_USER:?WXBOT_UI_USER must be set in .env}
+      WXBOT_UI_PASSWORD: ${WXBOT_UI_PASSWORD:?WXBOT_UI_PASSWORD must be set in .env}
+      WXBOT_SECRET: ${WXBOT_SECRET:?WXBOT_SECRET must be set in .env}
+      WXBOT_UI_IDLE: ${WXBOT_UI_IDLE:-600}
+      # 多账号 启动/停止/重启 通过宿主助手执行（容器内无 docker CLI）。
+      WXBOT_SELF_CONTAINER: ${WXBOT_SELF_CONTAINER:-wxbot}
+      WXBOT_HOST_AGENT_URL: ${WXBOT_HOST_AGENT_URL:-http://host.docker.internal:5199}
+      WXBOT_HOST_AGENT_TOKEN: ${WXBOT_HOST_AGENT_TOKEN:-}
     ports:
       # 默认只绑 127.0.0.1（安全）。要局域网/公网访问改 BIND_HOST=0.0.0.0 并务必设 VNC_PASSWORD + 反代加认证
       - "${BIND_HOST:-127.0.0.1}:5100:5100"   # 后台 Web
       - "${BIND_HOST:-127.0.0.1}:6080:6080"   # noVNC(扫码/手动操作微信)
     volumes:
-      - wxdata:/root                 # 微信数据+登录态(持久化，勿删否则要重新扫码)
-      - appdata:/app/accounts        # 密钥/解密库/人设/机器人规则/LLM配置(持久化)
+      - wxdata:/home/wechat          # 微信数据和登录态
+      - appdata:/app/accounts        # 密钥、解密库、人设、规则和配置
 
 volumes:
   wxdata:

@@ -34,6 +34,9 @@ LABELS = {
     'reply_snapshot_unavailable': '消息快照暂不可核对，保留待处理记录',
     'recent_reply_duplicate': '与近期发言重复，跳过本次回复',
     'bot_stopped_before_send': '机器人已停止，取消待发回复',
+    'account_hourly_cap': '本小时自动发送已达上限，稍后继续',
+    'continuous_not_addressed': '持续模式：群友之间在聊，不插话',
+    'continuous_stale': '持续模式：对方已出下一个，丢弃过期答案',
 }
 
 
@@ -66,6 +69,17 @@ def standalone(msg):
         ('refer', 'at_me', 'at_all', 'quote_me'))
 
 
+def skip_closing_replies(chat):
+    """默认跳过单条结束语；联系人关掉该开关后，好的/嗯/收到也按人设回。"""
+    from core import personalization
+    if not chat:
+        return True
+    try:
+        return personalization.get(chat).get('skip_closing_replies', True)
+    except Exception:
+        return True
+
+
 def closing(batch):
     if len(batch) != 1 or not standalone(batch[0]) or batch[0].get('is_self'):
         return False
@@ -77,22 +91,75 @@ def closing(batch):
     return bool(parts) and all(p in _CLOSINGS for p in parts)
 
 
-def decide(batch, context, account):
-    incoming = [m for m in batch if not reply_context.is_self(m, account)]
+def decide(batch, context, account, chat=None):
+    from core import niu_mode, battle_mode
+    chat = chat or ((batch[-1].get('chat') if batch else '') or '')
+    niu = []
+    if not battle_mode.is_on(chat):
+        niu = [niu_mode.inbound(m) for m in batch if niu_mode.is_trigger(m)]
+    incoming = niu or [m for m in batch if not reply_context.is_self(m, account)]
     if not incoming:
         return Decision('observe', 'self_message')
     last = incoming[-1]
     if standalone(last) and plain(last.get('content')).rstrip('。.!！ ') in _CANCEL:
         return Decision('observe', 'reply_cancelled_by_user')
-    if closing(incoming):
+    chat = chat or last.get('chat') or ''
+    if closing(incoming) and skip_closing_replies(chat):
         return Decision('observe', 'single_closing_message')
     source_id = max((m.get('local_id') or 0 for m in incoming), default=0)
-    if source_id and any(reply_context.is_self(m, account) and
-                         (m.get('local_id') or 0) > source_id and meaningful(m)
-                         for m in context):
+    if source_id and _manual_own_after(context, account, source_id, chat):
         return Decision('observe', 'own_reply_after_source')
     return Decision('reply', 'incoming_request' if any(_REQUEST.search(m.get('content') or '')
                                                      for m in incoming) else 'conversation_continues')
+
+
+def _automated_texts(account, chat):
+    """Recent bot submissions for this chat. Empty on any ledger/read failure."""
+    if not account or not chat:
+        return []
+    try:
+        with send_ledger.Ledger().connect() as con:
+            rows = con.execute(
+                "SELECT payload FROM sends WHERE account=? AND chat=? AND kind='text' "
+                "AND status IN ('initiated','submitted','confirmed','uncertain') "
+                "AND created>=? ORDER BY created DESC LIMIT 40",
+                (account, chat, time.time() - 1800)).fetchall()
+        import json
+        out = []
+        for row in rows:
+            if not row['payload']:
+                continue
+            try:
+                out.append(json.loads(row['payload']))
+            except Exception:
+                continue
+        return out
+    except Exception:
+        return []
+
+
+def _manual_own_after(context, account, source_id, chat):
+    """True only if a later own message is not the previous batch's bot reply.
+
+    A reply generated for an earlier frozen batch can land in the DB after a
+    newer inbound that arrived during send. That automated row must not skip
+    the new batch.
+    """
+    from core import niu_mode
+    later = [m for m in context if reply_context.is_self(m, account)
+             and (m.get('local_id') or 0) > source_id and meaningful(m)
+             and not niu_mode.is_trigger(m) and not niu_mode.is_bot_stamp(m)
+             and m.get('type') != 3]
+    if not later:
+        return False
+    automated = _automated_texts(account, chat)
+    for m in later:
+        text = m.get('content') or ''
+        if (m.get('type') == 1 and automated and
+                any(normalized(text) == normalized(t) for t in automated if isinstance(t, str))):
+            continue
+        return True
+    return False
 
 
 def meaningful(msg):
@@ -175,20 +242,26 @@ def before_dispatch(chat, kind, payload, ledger, jid):
     if incoming and (ticket['mode'] != 'reply' or chat != ticket['chat']):
         return Decision('defer', 'newer_inbound_before_send')
     prior = _recent(ledger, ticket['session'], ticket['chat'], jid)
-    own = [m for m in relevant if reply_context.is_self(m, account)]
+    from core import niu_mode
+    own = [m for m in relevant if reply_context.is_self(m, account)
+           and not niu_mode.is_trigger(m) and not niu_mode.is_bot_stamp(m)
+           and m.get('type') != 3]
     if any(m.get('type') != 1 or not any(normalized(m.get('content')) == normalized(t) for t in prior)
            for m in own):
         return Decision('observe', 'own_reply_before_send')
     if kind == 'text' and isinstance(payload, str):
-        requested = ticket['mode'] == 'reply' and any(
+        niu_batch = any(niu_mode.is_trigger(m) for m in ticket['batch'])
+        requested = ticket['mode'] == 'reply' and (niu_batch or any(
             _REQUEST.search(m.get('content') or '') or m.get('refer') or m.get('type') != 1
-            for m in ticket['batch'])
+            for m in ticket['batch']))
         if not requested:
             texts = _recent(ledger, ticket['session'], chat, jid)
             if chat == ticket['chat']:
                 texts += [m.get('content') or '' for m in ticket['context']
                           if reply_context.is_self(m, account) and m.get('type') == 1
                           and (m.get('create_time') or 0) >= time.time()-1800][-6:]
+            if niu_mode.is_bot_stamp({"content": payload}):
+                texts = [t for t in texts if not niu_mode.is_bot_stamp({"content": t})]
             if any(near(payload, text) for text in texts if isinstance(text, str)):
                 return Decision('observe', 'recent_reply_duplicate')
     ticket['sent'] = True

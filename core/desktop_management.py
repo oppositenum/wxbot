@@ -1,22 +1,67 @@
 """Manual desktop management; does not import account readers or send workers."""
 from pathlib import Path
+import json
+import os
 import subprocess
 
-from flask import Blueprint, Flask, jsonify, request, send_from_directory
+from flask import Blueprint, Flask, has_request_context, jsonify, request, send_from_directory
 
 
-PROFILES = {
-    "ubuntu": {"id": "ubuntu", "name": "Ubuntu 微信", "container": "wxbot-ubuntu-manual",
-               "port": 6082, "system": "Ubuntu 24.04 · XFCE", "home": "/home/wechat"},
-    "legacy": {"id": "legacy", "name": "原 Debian 微信", "container": "wxbot",
-               "port": 6080, "system": "Debian 12", "home": "/root"},
+# Fallback used only when the multi-account registry can't be read. Points at the
+# real primary container/port (not the retired Debian "wxbot" container).
+DEFAULT_PROFILES = {
+    "primary": {"id": "primary", "name": "当前微信号", "container": "wxbot-ubuntu-manual",
+                "port": 6082, "system": "Ubuntu 24.04 · XFCE", "home": "/home/wechat"},
 }
 STATIC = Path(__file__).resolve().parents[1] / "static"
 
 
+def _load_profiles():
+    """Instances come from the multi-account registry so this page always matches
+    the accounts manager (adds new WeChats automatically, drops retired ones)."""
+    try:
+        import config
+        reg = Path(config.WORK_DIR) / "multi_accounts.json"
+        accounts = json.loads(reg.read_text("utf-8")).get("accounts", [])
+    except Exception:
+        accounts = []
+    profiles = {}
+    for a in accounts:
+        if a.get("enabled") is False:
+            continue
+        pid = str(a.get("id") or "")
+        if not pid:
+            continue
+        profiles[pid] = {
+            "id": pid,
+            "name": a.get("label") or pid,
+            "container": a.get("container") or f"wxbot-{pid}",
+            "port": a.get("vnc_port") or 6082,
+            "system": "Ubuntu 24.04 · XFCE",
+            "home": "/home/wechat",
+        }
+    return profiles or dict(DEFAULT_PROFILES)
+
+
+def _default_instance(profiles):
+    return next(iter(profiles), "primary")
+
+
 def desktop_url(profile):
+    public_url = os.environ.get("WXBOT_PUBLIC_NOVNC_URL", "").strip()
+    if public_url:
+        return public_url
+    # When the management API is reached through a reverse proxy, keep the
+    # browser on that same public origin. The proxy must route /vnc/ to 6082
+    # and pass WebSocket Upgrade/Connection headers.
+    if has_request_context():
+        host = request.host
+        host_name = host.rsplit(":", 1)[0].strip("[]")
+        if host_name not in {"localhost", "127.0.0.1", "::1"}:
+            scheme = request.headers.get("X-Forwarded-Proto", request.scheme).split(",", 1)[0].strip()
+            return f"{scheme}://{host}/vnc/vnc.html?autoconnect=true&resize=scale&view_only=false&path=vnc/websockify"
     return (f"http://localhost:{profile['port']}/vnc.html"
-            "?autoconnect=true&resize=scale&view_only=false")
+            "?autoconnect=true&resize=scale&view_only=false&path=websockify")
 
 
 def probe(profile):
@@ -38,6 +83,10 @@ def probe(profile):
             if process.returncode not in (0, 1):
                 result["error"] = "暂时无法检查微信进程"
             result["wechat_running"] = process.returncode == 0 and bool(process.stdout.strip())
+    except FileNotFoundError:
+        # Running inside the container: no docker CLI here. The embedded desktop
+        # below is the source of truth, so don't raise a false alarm.
+        result["error"] = None
     except (OSError, subprocess.TimeoutExpired):
         result["error"] = "连接 Docker 超时或失败"
     return result
@@ -53,12 +102,14 @@ def desktop_page():
 
 @bp.get("/api/desktop/instances")
 def instances():
-    return jsonify(default_instance="ubuntu", mode="manual_desktop",
-                   instances=[dict(p, desktop_url=desktop_url(p)) for p in PROFILES.values()])
+    profiles = _load_profiles()
+    return jsonify(default_instance=_default_instance(profiles), mode="manual_desktop",
+                   instances=[dict(p, desktop_url=desktop_url(p)) for p in profiles.values()])
 
 
 def selected_profile():
-    return PROFILES.get(request.args.get("instance", "ubuntu"))
+    profiles = _load_profiles()
+    return profiles.get(request.args.get("instance") or _default_instance(profiles))
 
 
 @bp.get("/api/desktop/status")

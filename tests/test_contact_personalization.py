@@ -32,7 +32,9 @@ class Isolated(unittest.TestCase):
         self.account = 'account-A'
         self.roles = {'P': {'name': '角色 P', 'persona': 'ROLE_P', 'samples': []},
                       'Q': {'name': '角色 Q', 'persona': 'ROLE_Q', 'samples': []}}
-        self.rules = {'watch': ['friend-A'], 'rules': [{'name': 'old', 'match': {'type': 'auto'}, 'action': {'type': 'reply_ai', 'persona': 'P'}}]}
+        self.rules = {'watch': ['friend-A'], 'proactive': {'enabled': True, 'private_share_enabled': True},
+                      'rules': [{'name': 'old', 'match': {'type': 'auto'},
+                                 'action': {'type': 'reply_ai', 'persona': 'P'}}]}
         for target, value in [('config.ACCOUNTS_DIR', self.tmp.name+'/accounts'), ('config.WORK_DIR', self.tmp.name+'/work'),
                               ('config.wxid', lambda: self.account), ('core.distill.load_persona', lambda slug: copy.deepcopy(self.roles.get(slug))),
                               ('core.bot.load_rules', lambda: copy.deepcopy(self.rules)), ('core.llm.load_cfg', lambda: {}),
@@ -90,6 +92,37 @@ class Personas(Isolated):
         self.account = 'account-A';sessions.observe()
         self.assertEqual(self.role()['persona_id'], 'Q')
 
+    def test_delete_persona_releases_bindings_and_unblocks_new_choice(self):
+        from core import distill, bot, schedule
+        p.set_global('P', 0, self.rules)
+        self.change('friend-A', persona_id='Q')
+        rules = copy.deepcopy(self.rules)
+        rules['rules'][0]['action']['persona'] = 'Q'
+        Path(bot.rules_file()).parent.mkdir(parents=True, exist_ok=True)
+        Path(bot.rules_file()).write_text(json.dumps(rules), encoding='utf-8')
+        persona_dir = Path(config.personas_dir()); persona_dir.mkdir(parents=True, exist_ok=True)
+        (persona_dir / 'Q.json').write_text(json.dumps({'slug':'Q','name':'角色 Q','persona':'ROLE_Q'}), encoding='utf-8')
+        schedule.save_tasks([{'id': 1, 'persona': 'Q', 'title': 't'}])
+        out = distill.delete_persona('Q')
+        self.assertTrue(out['ok'])
+        self.assertEqual(out['released']['contacts'], 1)
+        self.assertFalse(out['released']['global_'])
+        self.assertEqual(p.get('friend-A')['persona_id'], None)
+        self.assertEqual(self.role()['persona_id'], 'P')
+        self.assertEqual(json.loads(Path(bot.rules_file()).read_text(encoding='utf-8'))['rules'][0]['action']['persona'], '')
+        self.assertIsNone(schedule.load_tasks()[0]['persona'])
+        self.change('friend-A', persona_id='P')
+        self.assertEqual(self.role()['persona_id'], 'P')
+        self.assertFalse((persona_dir / 'Q.json').exists())
+
+    def test_missing_legacy_unique_does_not_block_global_choice(self):
+        self.rules['rules'][0]['action']['persona'] = 'Q'
+        del self.roles['Q']
+        p.set_global('P', 0, self.rules)
+        self.assertEqual(p.get('__global__')['persona_id'], 'P')
+        with self.assertRaises(ValueError):
+            self.change('friend-A', persona_id='Q')
+
     def test_deleted_corrupt_and_no_global_fallback(self):
         self.change('friend-A', persona_id='Q')
         del self.roles['Q']
@@ -138,6 +171,38 @@ class Personas(Isolated):
         b=p.resolve_persona('room@chatroom',self.rules,other)
         self.assertEqual(a['persona_id'],'P');self.assertEqual(b['persona_id'],'Q')
         self.assertEqual(a['source'],'legacy_rule_conflict');self.assertTrue(a['legacy']['conflict'])
+
+    def test_group_reply_keeps_group_persona_away_from_private_role(self):
+        """群里回某个人时，不能套用她私聊人设，也不能被她一句话切走。"""
+        self.roles['海棠成人'] = {'name': '海棠成人', 'persona': 'PRIVATE_ADULT_ROLE', 'samples': []}
+        self.roles['成语接龙高手'] = {'name': '成语接龙高手', 'persona': 'GROUP_IDIOM_ROLE', 'samples': []}
+        catalog = [{'slug': k, 'name': k} for k in self.roles]
+        self.change('friend-A', persona_id='海棠成人', personalization_enabled=True,
+                    preferences={'address': {'value': '主人', 'locked': True}})
+        self.change('room@chatroom', persona_id='成语接龙高手')
+        private = msg(1, text='老公，换黎深，宝贝儿想做了')
+        leaked = msg(2, text='（一把把你按在桌子上）操，宝贝儿你这小逼今天这么欠操', is_self=True, sender='account-A')
+        quote = msg(3, text='不需要吗', refer={'content': '我不需要', 'chatusr': 'account-A', 'displayname': '我'})
+        captured = []
+        with patch('core.distill.list_personas', return_value=catalog), \
+                patch('core.llm.chat', side_effect=lambda s, m, **k: captured.append((s, m)) or '海阔天空'), \
+                patch('core.bot._sender_name', return_value='老婆'), \
+                patch('core.memory.select_memories', return_value=[]), \
+                patch('core.agent.agent_config', return_value={'enabled': False}):
+            out = bot._ai_reply(self.roles['成语接龙高手'], 'room@chatroom', quote,
+                                [private, leaked, quote], self.rules, batch_msgs=[quote])
+        self.assertEqual(out, '海阔天空')
+        system, turns = captured[0]
+        self.assertIn('GROUP_IDIOM_ROLE', system)
+        self.assertNotIn('PRIVATE_ADULT_ROLE', system)
+        self.assertIn('群聊人设隔离', system)
+        self.assertNotIn('已切换人设', system)
+        self.assertNotIn('称呼：主人', system)
+        self.assertEqual(p.get('friend-A')['persona_id'], '海棠成人')
+        self.assertEqual(p.get('room@chatroom')['persona_id'], '成语接龙高手')
+        blob = '\n'.join(t['content'] for t in turns)
+        self.assertNotIn('小逼', blob)
+        self.assertIn('不需要吗', blob)
 
     def test_first_migration_must_preserve_unique_old_role(self):
         with self.assertRaises(p.Conflict):p.set_global('Q',0,self.rules)
@@ -325,7 +390,11 @@ class Entries(Isolated):
         self.change('friend-A',personalization_enabled=True)
         self.change('friend-A',persona_id='Q',preferences={'tone':{'value':'温和'}})
         systems=[];sends=[]
-        def chat(system,*a,**kw):systems.append(system);return 'synthetic reply'
+        def chat(system,*a,**kw):
+            systems.append(system)
+            if a and '你自己想说的要点' in str(a[0]):
+                systems[-1] += str(a[0])
+            return 'synthetic reply'
         def send(*a,**kw):sends.append(kw['chat_username']);return {'ok':True,'status':'confirmed'}
         context=[msg(1,'你好',create_time=time.time()-100000),msg(2,'你好',is_self=True,sender='account-A',create_time=time.time()-99000)]
         with patch('core.llm.chat',chat), patch('core.llm.available',return_value=True), patch('core.sender.send_text',send), \
@@ -335,9 +404,10 @@ class Entries(Isolated):
                 patch('core.send_ledger.result',return_value=None),patch('core.bot._quiet_now',return_value=False):
             bot.do_action(self.rules['rules'][0],msg(), 'friend-A',{},lambda *a:None,context,self.rules)
             bot.greet('friend-A')
+            bot.greet('friend-A', hint='问她晚饭吃了没')
             bot._reply_pat('friend-A',msg(),self.rules,lambda *a:None)
             self.assertTrue(bot._maybe_nudge('friend-A',context,self.rules,{},lambda *a:None))
-        self.assertEqual(len(systems),4);self.assertEqual(sends,['friend-A']*4)
+        self.assertEqual(len(systems),5);self.assertEqual(sends,['friend-A']*5)
         for system in systems:
             self.assertIn('ROLE_Q',system);self.assertNotIn('ROLE_P',system);self.assertIn('温和',system)
             self.assertLess(system.index('【通用要求】'),system.index('【本轮机器人角色】'))
@@ -346,7 +416,7 @@ class Entries(Isolated):
     def test_group_reply_uses_group_memory_scope_and_no_private_preferences(self):
         self.change('friend-A',preferences={'dislikes':{'value':'PRIVATE_STYLE'}})
         captured=[]
-        with patch('core.llm.chat',side_effect=lambda system,*a:captured.append(system) or 'mock'), \
+        with patch('core.llm.chat',side_effect=lambda system,*a,**k:captured.append(system) or 'mock'), \
                 patch('core.bot._sender_name',return_value='群成员'),patch('core.memory.select_memories',return_value=[]) as select, \
                 patch('core.agent.agent_config',return_value={'enabled':False}):
             bot._ai_reply(self.roles['P'],'room@chatroom',msg(),[],self.rules)
@@ -356,7 +426,7 @@ class Entries(Isolated):
     def test_reply_current_request_order_and_old_role_not_control(self):
         self.change('friend-A',preferences={'length':{'value':'简短'}})
         captured=[]
-        with patch('core.llm.chat',side_effect=lambda s,m:captured.append((s,m)) or 'mock'), \
+        with patch('core.llm.chat',side_effect=lambda s,m,**k:captured.append((s,m)) or 'mock'), \
                 patch('core.bot._sender_name',return_value='对方'),patch('core.memory.select_memories',return_value=[]), \
                 patch('core.agent.agent_config',return_value={'enabled':False}),patch('core.schedule.is_scheduled_msg',return_value=False):
             bot._ai_reply(self.roles['Q'],'friend-A',msg(text='请详细说明每一步'),
@@ -364,7 +434,236 @@ class Entries(Isolated):
         system,user=captured[0]
         self.assertNotIn('ROLE_P',system);self.assertIn('旧机器人回复只供理解',system)
         self.assertNotIn('回复长度：简短',system);self.assertNotIn('回 1~2 句',user[0]['content'])
-        self.assertIn('请详细说明每一步',user[0]['content'])
+
+    def test_immersive_persona_is_executed_not_reduced_to_tone_filter(self):
+        captured=[]
+        with patch('core.llm.chat',side_effect=lambda s,m,**k:captured.append(s) or 'mock'), \
+                patch('core.bot._sender_name',return_value='对方'),patch('core.memory.select_memories',return_value=[]), \
+                patch('core.agent.agent_config',return_value={'enabled':False}):
+            bot._ai_reply({'name':'成人3','persona':'按对方要的尺度说话，把气氛做起来。'},
+                          'friend-A',msg(text='太素了，你不会荤话'),[],self.rules)
+        system=captured[0]
+        self.assertIn('角色执行·最高优先',system)
+        self.assertNotIn('只决定你【说话的语气/风格】',system)
+        self.assertNotIn('闲聊寒暄就简短口语几句,别凑长',system)
+        self.assertIn('按对方要的尺度说话',system)
+        self.assertLess(system.index('【通用要求】'),system.index('【本轮机器人角色】'))
+
+    def test_fresh_wording_blocks_recent_own_phrases(self):
+        captured=[]
+        history=[msg(1,'继续'), msg(2,'老婆，还跪着，从根撸到头就停', is_self=True, sender='account-A')]
+        with patch('core.llm.chat',side_effect=lambda s,m,**k:captured.append(s) or 'mock'), \
+                patch('core.bot._sender_name',return_value='对方'),patch('core.memory.select_memories',return_value=[]), \
+                patch('core.agent.agent_config',return_value={'enabled':False}):
+            bot._ai_reply(self.roles['Q'],'friend-A',msg(3,text='真乖'),history,self.rules)
+        system=captured[0]
+        self.assertIn('用词轮换',system)
+        self.assertIn('从根撸到头就停',system)
+        self.assertIn('本轮禁止原样再用',system)
+
+    def test_greet_with_hint_asks_model_to_rewrite_admin_text(self):
+        captured=[]
+        def chat(system, history, **k):
+            captured.append((system, history[-1]['content'] if history else ''))
+            return '晚饭吃了没，老婆'
+        with patch('core.llm.chat',chat), patch('core.llm.available',return_value=True), \
+                patch('core.sender.send_text',lambda *a,**kw: {'ok':True,'status':'confirmed'}), \
+                patch('core.bot.send_name_for',return_value='对方'), patch('core.messages.get_messages',return_value=[]), \
+                patch('core.conversation_state.ticket',return_value={'ok':True}), \
+                patch('core.conversation_state.allowed',return_value=True), \
+                patch('core.humanize.typing_delay',return_value=0):
+            r=bot.greet('friend-A', hint='问她晚饭吃了没')
+        self.assertEqual(r['message'],'晚饭吃了没，老婆')
+        system, last = captured[0]
+        self.assertIn('你自己想说的要点', system)
+        self.assertIn('晚饭吃了没', system)
+        self.assertNotIn('晚饭吃了没', last)
+        self.assertIn('不是对方刚说的', last)
+        self.assertIn('第一人称', system)
+        self.assertIn('禁止当成对方发言来回答', last)
+
+    def test_greet_repeat_parses_natural_counts_and_sends_that_many(self):
+        self.assertEqual(bot.greet_repeat('继续发2-3次')[0], 3)
+        self.assertEqual(bot.greet_repeat('连发三条')[0], 3)
+        self.assertEqual(bot.greet_repeat('发十次')[0], 10)
+        self.assertEqual(bot.greet_repeat('发11次')[0], 10)
+        self.assertEqual(bot.greet_repeat('问她晚饭吃了没')[0], 1)
+        for cue in ('你自己玩吧', '你自己开发', '你来弄', '继续', '多发几次', '自己开发吧'):
+            self.assertEqual(bot.burst_count(cue)[0], 3, cue)
+        self.assertEqual(bot.burst_count('发5次，你自己开发')[0], 5)
+        n, rest = bot.greet_repeat('问她晚饭，继续发2-3次')
+        self.assertEqual(n, 3)
+        self.assertIn('晚饭', rest)
+        self.assertNotIn('2-3', rest)
+        sends=[]
+        replies=iter(['第一条\n[[NEXT]]\n第二条\n[[NEXT]]\n第三条'])
+        with patch('core.llm.chat', side_effect=lambda *a, **k: next(replies)), patch('core.llm.available', return_value=True), \
+                patch('core.sender.send_text', lambda *a, **kw: sends.append(a[1]) or {'ok': True, 'status': 'confirmed'}), \
+                patch('core.bot.send_name_for', return_value='对方'), patch('core.messages.get_messages', return_value=[]), \
+                patch('core.conversation_state.ticket', return_value={'ok': True}), \
+                patch('core.conversation_state.allowed', return_value=True), \
+                patch('core.humanize.typing_delay', return_value=0), \
+                patch('core.bot._part_gap', return_value=0):
+            r=bot.greet('friend-A', hint='继续发2-3次')
+        self.assertEqual(sends, ['第一条', '第二条', '第三条'])
+        self.assertEqual(r['burst'], 3)
+
+    def test_long_reply_is_split_across_wechat_bubbles(self):
+        long = "第一段完整。" + ("后面还有很长的描写，" * 80) + "最后一句要发完。"
+        parts = []
+        with patch('core.llm.chat', return_value=long), patch('core.agent.agent_config', return_value={'enabled': False}), \
+                patch('core.bot._sender_name', return_value='对方'), patch('core.memory.select_memories', return_value=[]), \
+                patch('core.sender.send_text', lambda *a, **kw: parts.append(a[1]) or {'ok': True, 'status': 'confirmed'}), \
+                patch('core.humanize.typing_delay', return_value=0), patch('core.bot._part_gap', return_value=0), \
+                patch('core.bot.send_name_for', return_value='对方'):
+            bot.do_action(self.rules['rules'][0], msg(text='你说'), 'friend-A', {}, lambda *a: None, [], self.rules)
+        self.assertGreater(len(parts), 1)
+        self.assertEqual(''.join(p.replace('\n', '') for p in parts).replace(' ', ''),
+                         long.replace('\n', '').replace(' ', ''))
+        self.assertTrue(all(len(p) <= bot.WX_BUBBLE for p in parts))
+        self.assertTrue(parts[-1].endswith('最后一句要发完。'))
+
+    def test_model_next_marker_is_sent_as_separate_bubbles(self):
+        parts = []
+        with patch('core.llm.chat', return_value='前半段\n【NEXT】\n后半段也要发出去。'), \
+                patch('core.agent.agent_config', return_value={'enabled': False}), \
+                patch('core.bot._sender_name', return_value='对方'), patch('core.memory.select_memories', return_value=[]), \
+                patch('core.sender.send_text', lambda *a, **kw: parts.append(a[1]) or {'ok': True, 'status': 'confirmed'}), \
+                patch('core.humanize.typing_delay', return_value=0), patch('core.bot._part_gap', return_value=0), \
+                patch('core.bot.send_name_for', return_value='对方'):
+            bot.do_action(self.rules['rules'][0], msg(text='你好'), 'friend-A', {}, lambda *a: None, [], self.rules)
+        self.assertEqual(parts, ['前半段', '后半段也要发出去。'])
+
+    def test_reply_continue_cue_sends_three_parts(self):
+        parts=[]
+        def chat(system, history=None, *a, **k):
+            if '必须输出 3 条' in system or '必须输出 3 段' in system:
+                return '一\n[[NEXT]]\n二\n[[NEXT]]\n三'
+            return '补'
+        with patch('core.llm.chat', chat), patch('core.agent.agent_config', return_value={'enabled': False}), \
+                patch('core.bot._sender_name', return_value='对方'), patch('core.memory.select_memories', return_value=[]), \
+                patch('core.sender.send_text', lambda *a, **kw: parts.append(a[1]) or {'ok': True, 'status': 'confirmed'}), \
+                patch('core.humanize.typing_delay', return_value=0), patch('core.bot._part_gap', return_value=0), \
+                patch('core.bot.send_name_for', return_value='对方'):
+            bot.do_action(self.rules['rules'][0], msg(text='你自己开发'), 'friend-A', {}, lambda *a: None, [], self.rules)
+        self.assertEqual(parts, ['一', '二', '三'])
+
+    def test_named_persona_switch_updates_contact_and_reply(self):
+        self.roles['黎深'] = {'name': '黎深', 'persona': '我是黎深。', 'samples': []}
+        self.roles['夏以昼成人'] = {'name': '夏以昼成人', 'persona': '我是夏以昼，成人向。', 'samples': []}
+        catalog = [{'slug': k, 'name': k} for k in ('黎深', '夏以昼成人')]
+        self.change('friend-A', persona_id='夏以昼成人')
+        captured=[]
+        with patch('core.distill.list_personas', return_value=catalog), \
+                patch('core.llm.chat', side_effect=lambda s, m, **k: captured.append(s) or '刚下台，手套还没摘。'), \
+                patch('core.bot._sender_name', return_value='对方'), patch('core.memory.select_memories', return_value=[]), \
+                patch('core.agent.agent_config', return_value={'enabled': False}):
+            out = bot._ai_reply(self.roles['Q'], 'friend-A', msg(text='老公，换黎深'), [], self.rules)
+        self.assertEqual(out, '刚下台，手套还没摘。')
+        self.assertEqual(p.get('friend-A')['persona_id'], '黎深')
+        self.assertIn('已切换人设', captured[0])
+        self.assertIn('我是黎深', captured[0])
+
+    def test_adult_intent_switches_without_saying_成人(self):
+        catalog = [{'slug': '夏以昼', 'name': '夏以昼'}, {'slug': '夏以昼成人', 'name': '夏以昼成人'}]
+        with patch('core.distill.list_personas', return_value=catalog):
+            self.assertEqual(p.match_switch('想做了，进入状态', current='夏以昼'), '夏以昼成人')
+            self.assertIsNone(p.match_switch('晚饭吃了没', current='夏以昼'))
+            self.assertIsNone(p.match_switch('你还是当黎深吧', current='夏以昼'))
+
+    def test_strip_hmm_openers_without_emptying_message(self):
+        self.assertEqual(bot._strip_filler_openers('嗯，累了就歇。'), '累了就歇。')
+        self.assertEqual(bot._strip_filler_openers('嗯。乖。'), '乖。')
+        self.assertEqual(bot._strip_filler_openers('嗯'), '嗯')
+        self.assertEqual(bot._strip_filler_openers('老婆，过来。'), '老婆，过来。')
+
+    def test_lookup_request_searches_even_when_agent_off(self):
+        self.change('friend-A', agent_enabled=False)
+        captured=[]
+        with patch('core.llm.chat', side_effect=lambda s, m, **k: captured.append(s) or '偏航线今天上了'), \
+                patch('core.tools.web_search', return_value='1. 夏以昼主线分线今日更新') as search, \
+                patch('core.agent.run', forbidden), patch('core.bot._sender_name', return_value='对方'), \
+                patch('core.memory.select_memories', return_value=[]), \
+                patch('core.agent.agent_config', return_value={'enabled': True, 'tools': ['web_search']}):
+            out=bot._ai_reply(self.roles['Q'],'friend-A',msg(text='你能不能找个夏以昼最近游戏更新资料，今天的'),[],self.rules)
+        self.assertEqual(out,'偏航线今天上了')
+        self.assertGreaterEqual(search.call_count,1)
+        self.assertIn('已联网搜索', captured[0])
+        self.assertIn('夏以昼主线分线今日更新', captured[0])
+
+    def test_babyface_talk_is_rewritten_as_adult_look(self):
+        ask, turns, changed = bot._rewrite_babyface_talk(
+            '【本批新消息，需要回应】\n对方「x」本次说：可我喜欢小孩那一挂～\n是看起来\n但是实际不是',
+            [{'role': 'user', 'content': '可我喜欢小孩那一挂～'}])
+        self.assertTrue(changed)
+        self.assertIn('娃娃脸', ask)
+        self.assertNotIn('小孩', ask)
+        self.assertNotIn('小孩', turns[0]['content'])
+        captured=[]
+        with patch('core.llm.chat',side_effect=lambda s,m,**k:captured.append((s,m)) or 'mock'), \
+                patch('core.bot._sender_name',return_value='对方'),patch('core.memory.select_memories',return_value=[]), \
+                patch('core.agent.agent_config',return_value={'enabled':False}):
+            bot._ai_reply(self.roles['Q'],'friend-A',msg(text='可我喜欢小孩那一挂～'),[],self.rules)
+        system, history = captured[0]
+        self.assertIn('娃娃脸', system)
+        self.assertIn('娃娃脸', ''.join(m['content'] for m in history))
+        self.assertNotIn('小孩', ''.join(m['content'] for m in history))
+
+    def test_contact_can_disable_agent_and_stay_on_plain_chat(self):
+        self.change('friend-A', agent_enabled=False)
+        captured=[]
+        with patch('core.llm.chat',side_effect=lambda s,m,**k:captured.append(s) or 'plain'), \
+                patch('core.llm.chat_tools',forbidden), patch('core.agent.run',forbidden), \
+                patch('core.bot._sender_name',return_value='对方'),patch('core.memory.select_memories',return_value=[]), \
+                patch('core.agent.agent_config',return_value={'enabled':True,'tools':['web_search']}):
+            self.assertEqual(bot._ai_reply(self.roles['Q'],'friend-A',msg(text='继续'),[],self.rules),'plain')
+        self.assertTrue(captured)
+
+    def test_image_request_still_draws_when_contact_agent_is_off(self):
+        self.change('friend-A', agent_enabled=False)
+        chats=[]
+        def chat(system, history, **k):
+            chats.append(system)
+            if '本轮只写画面' in system:
+                return 'a kneeling adult with a beige bucket hat'
+            if '图已用工具发出' in system:
+                return '图发你微信了'
+            return 'plain'
+        with patch('core.llm.chat',chat), patch('core.agent.run',forbidden), \
+                patch('core.tools.draw_image',return_value='[已生成并把图片发给对方成功] 画的是:x') as draw, \
+                patch('core.bot._sender_name',return_value='对方'),patch('core.memory.select_memories',return_value=[]), \
+                patch('core.agent.agent_config',return_value={'enabled':True,'tools':['web_search']}):
+            out=bot._ai_reply(self.roles['Q'],'friend-A',msg(text='以他为样子生成你在做的图'),[],self.rules)
+        self.assertEqual(out,'图发你微信了')
+        self.assertEqual(draw.call_count,1)
+        self.assertIn('beige bucket hat', draw.call_args.args[0])
+
+    def test_likeness_and_just_draw_requests_also_draw(self):
+        self.change('friend-A', agent_enabled=False)
+        for text in ('要像他', '不用玩，我只是想让你画个和他一样的', '你画就行'):
+            replies = iter(['a clothed man in a beige hat', '图发你微信了'])
+            with patch('core.llm.chat', side_effect=lambda *a, **k: next(replies)), \
+                    patch('core.agent.run', forbidden), \
+                    patch('core.tools.draw_image', return_value='[已生成并把图片发给对方成功] 画的是:x') as draw, \
+                    patch('core.bot._sender_name', return_value='对方'), patch('core.memory.select_memories', return_value=[]), \
+                    patch('core.agent.agent_config', return_value={'enabled': True, 'tools': ['web_search']}):
+                out = bot._ai_reply(self.roles['Q'], 'friend-A', msg(text=text), [], self.rules)
+            self.assertEqual(out, '图发你微信了', text)
+            self.assertEqual(draw.call_count, 1, text)
+
+    def test_followup_tweaks_redraw_and_send(self):
+        self.change('friend-A', agent_enabled=False)
+        history = [msg(1, '生成一张图'), msg(2, '图发你了', is_self=True, sender='account-A')]
+        for text in ('正常点', '穿衣服', '再画一张', '要这个脸'):
+            replies = iter(['clothed standing portrait', '图发你微信了'])
+            with patch('core.llm.chat', side_effect=lambda *a, **k: next(replies)), \
+                    patch('core.agent.run', forbidden), \
+                    patch('core.tools.draw_image', return_value='[已生成并把图片发给对方成功] 画的是:x') as draw, \
+                    patch('core.bot._sender_name', return_value='对方'), patch('core.memory.select_memories', return_value=[]), \
+                    patch('core.agent.agent_config', return_value={'enabled': True, 'tools': []}):
+                out = bot._ai_reply(self.roles['Q'], 'friend-A', msg(text=text), history, self.rules)
+            self.assertEqual(out, '图发你微信了', text)
+            self.assertEqual(draw.call_count, 1, text)
 
 
 class Voice(Isolated):
@@ -385,7 +684,7 @@ class Voice(Isolated):
     def test_native_voice_enters_final_reply_context_without_audio_request(self):
         m=msg(type=34,content='[语音]',voice_transcript='请详细解释合成测试',voice_transcript_source='wechat_packed_v1')
         captured=[]
-        with patch('core.llm.chat',side_effect=lambda system,history:captured.append(history) or 'mock'), \
+        with patch('core.llm.chat',side_effect=lambda system,history,**k:captured.append(history) or 'mock'), \
                 patch('core.media.get_msg_voice',side_effect=forbidden),patch('core.bot._sender_name',return_value='对方'), \
                 patch('core.memory.select_memories',return_value=[]),patch('core.agent.agent_config',return_value={'enabled':False}):
             self.assertEqual(bot._ai_reply(self.roles['P'],'friend-A',m,[],self.rules),'mock')

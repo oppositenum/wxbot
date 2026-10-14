@@ -130,7 +130,8 @@ def _capture_img_key_locked(log=lambda m: None, trigger=True):
     pid = (r.stdout or "").strip()
     if not pid:
         return False, "微信未运行"
-    _exec("bash", "-lc", "pkill -9 gdb 2>/dev/null; rm -f /tmp/cap_ready /root/imgkey.txt")
+    _exec("bash", "-lc", "pkill -9 gdb 2>/dev/null; "
+          "rm -f /tmp/cap_ready \"${WXBOT_IMGKEY_FILE:-/root/imgkey.txt}\"")
     # 后台起 gdb 捕获脚本
     if LOCAL:
         subprocess.Popen(["bash", "-lc",
@@ -151,7 +152,8 @@ def _capture_img_key_locked(log=lambda m: None, trigger=True):
                 _exec("bash", "-lc", "DISPLAY=:0 xdotool mousemove 800 400; "
                       "for j in 1 2 3 4; do DISPLAY=:0 xdotool click 4; sleep 0.15; done")
     for _ in range(20):                       # 等抓取结果
-        out = _exec("bash", "-lc", "cat /root/imgkey.txt 2>/dev/null").stdout.strip()
+        out = _exec("bash", "-lc", "cat \"${WXBOT_IMGKEY_FILE:-/root/imgkey.txt}\" "
+                    "2>/dev/null").stdout.strip()
         if out:
             keys_path = config.keys_json()
             os.makedirs(os.path.dirname(keys_path), exist_ok=True)

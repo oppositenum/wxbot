@@ -54,13 +54,14 @@ class Isolated(unittest.TestCase):
 
 class Routes(Isolated):
     cfg = {"provider": "gpt", "gpt": {"base_url": "https://gateway.invalid", "api_key": "SECRET_G", "model": "configured-gpt-name"},
-           "claude": {"base_url": "https://gateway.invalid", "api_key": "SECRET_C", "model": "configured-claude-name"}}
+           "claude": {"base_url": "https://gateway.invalid", "api_key": "SECRET_C", "model": "configured-claude-name"},
+           "grok": {"base_url": "https://api.x.ai/v1", "api_key": "SECRET_K", "model": "configured-grok-name"}}
     specs = [{"name": "lookup", "description": "test", "input_schema": {"type": "object", "properties": {}}}]
 
     def responses(self, values):
         self.requests = []
         values = iter(values)
-        def post(url, headers, body, proxy):
+        def post(url, headers, body, proxy, **_kw):
             self.requests.append((url, copy.deepcopy(body)))
             return next(values)
         p = patch.object(llm, "_post", post); p.start(); self.addCleanup(p.stop)
@@ -107,9 +108,70 @@ class Routes(Isolated):
                 llm.chat_tools("sys", [], self.specs, blocked, self.cfg)
             self.assertEqual(post.call_count, 1)
 
+    def test_grok_uses_openai_compat_and_does_not_fall_back(self):
+        self.responses([self.gpt_call(), self.gpt_text()])
+        cfg = dict(self.cfg, provider="grok")
+        out = llm.chat_tools("PRIVATE_PROMPT", [{"role": "user", "content": "PRIVATE_BODY"}], self.specs,
+                             lambda n, a: "result", cfg, max_rounds=1)
+        self.assertEqual(out, "done")
+        self.assertTrue(all(u.endswith("chat/completions") and b["model"] == "configured-grok-name"
+                            for u, b in self.requests))
+        self.assertTrue(all("api.x.ai" in u for u, _ in self.requests))
+        self.responses([self.gpt_text("hi")])
+        llm.chat("private", [], cfg)
+        self.assertEqual(self.requests[-1][1]["model"], "configured-grok-name")
+        self.assertEqual(self.requests[-1][1].get("reasoning_effort"), "low")
+        self.assertTrue(self.requests[-1][0].endswith("chat/completions"))
+        diag = json.dumps(llm.route_diagnostics())
+        self.assertIn("configured-grok-name", diag)
+        self.assertNotIn("SECRET", diag)
+
+    def test_truncated_chat_is_continued_until_complete(self):
+        calls = []
+        def post(url, headers, body, proxy, **kw):
+            calls.append(body["messages"][-1]["content"] if body.get("messages") else "")
+            if len(calls) == 1:
+                return {"choices": [{"finish_reason": "length", "message": {"content": "前半句，"}}]}
+            return {"choices": [{"finish_reason": "stop", "message": {"content": "后半句。"}}]}
+        with patch.object(llm, "_post", post):
+            out = llm.chat("sys", [{"role": "user", "content": "hi"}], dict(self.cfg, max_tokens=200))
+        self.assertEqual(out, "前半句，后半句。")
+        self.assertEqual(len(calls), 2)
+
+    def test_grok_transient_failure_retries_then_falls_back_to_gpt(self):
+        calls = []
+        def post(url, headers, body, proxy, **kw):
+            calls.append((url, body.get("model"), kw.get("retries")))
+            if body.get("model") == "configured-grok-name":
+                raise RuntimeError("模型接口 HTTP 503；未切换 provider/model")
+            return {"choices": [{"message": {"content": "gpt-ok"}}]}
+        with patch.object(llm, "_post", post):
+            out = llm.chat("sys", [{"role": "user", "content": "hi"}], dict(self.cfg, provider="grok"))
+        self.assertEqual(out, "gpt-ok")
+        self.assertEqual([c[1] for c in calls], ["configured-grok-name", "configured-gpt-name"])
+
+    def test_grok_content_policy_does_not_fall_back_to_gpt(self):
+        def post(*a, **k):
+            raise RuntimeError("模型接口 HTTP 403；未切换 provider/model：content policy")
+        with patch.object(llm, "_post", post) as mocked:
+            with self.assertRaises(RuntimeError):
+                llm.chat("sys", [], dict(self.cfg, provider="grok"))
+
+    def test_grok_env_key_and_default_base(self):
+        cfg = {"provider": "grok"}
+        with patch.dict(os.environ, {"XAI_API_KEY": "ENV_GROK_KEY"}, clear=False):
+            base, key, model = llm.creds(cfg, "grok")
+        self.assertEqual(key, "ENV_GROK_KEY")
+        self.assertEqual(model, "grok-4.5")
+        self.responses([self.gpt_text("ok")])
+        with patch.dict(os.environ, {"XAI_API_KEY": "ENV_GROK_KEY"}, clear=False):
+            self.assertEqual(llm.chat("sys", [{"role": "user", "content": "hi"}], cfg), "ok")
+        self.assertTrue(self.requests[-1][0].startswith("https://api.x.ai/v1/"))
+
     def test_main_chat_diagnostics_and_explicit_tools_do_not_change_chat(self):
         self.responses([self.gpt_text()])
         llm.chat("private", [], dict(self.cfg, tools_provider="claude"))
+        self.assertNotIn("reasoning_effort", self.requests[-1][1])
         self.assertEqual(llm.route_diagnostics()[0]["provider"], "gpt")
         self.assertEqual(llm.route_diagnostics()[0]["phase"], "chat")
 
@@ -365,12 +427,127 @@ class Authorization(Isolated):
             saved = json.loads(path.read_text())
             self.assertEqual(saved["gpt"], cfg["gpt"])
             self.assertEqual(saved["claude"], cfg["claude"])
+            self.assertEqual(saved["grok"], cfg["grok"])
             self.assertEqual(client.get("/api/llm").json["tool_route"]["model"], "literal-custom-name")
             self.assertEqual(client.post("/api/llm/config", json={"provider": ""}).status_code, 400)
             self.assertEqual(client.post("/api/llm/config", json={"tools_provider": "unknown"}).status_code, 400)
             self.assertEqual(client.post("/api/llm/config", json={"tools_model": {"api_key": "bad"}}).status_code, 400)
+            self.assertEqual(client.post("/api/llm/config", json={"provider": "grok"}).status_code, 200)
+            self.assertEqual(json.loads(path.read_text())["provider"], "grok")
             client.post("/api/llm/config", json={"tools_provider": "", "tools_model": ""})
-            self.assertEqual(client.get("/api/llm").json["tool_route"]["model"], "configured-gpt-name")
+            self.assertEqual(client.get("/api/llm").json["tool_route"]["provider"], "grok")
+            self.assertEqual(client.get("/api/llm").json["tool_route"]["model"], "configured-grok-name")
+
+    def test_reasoning_effort_roundtrip(self):
+        import server
+        path = self.root / "llm_config.json"
+        path.write_text(json.dumps(copy.deepcopy(Routes.cfg)))
+        with patch.object(llm, "CONFIG_FILE", str(path)), \
+             patch.object(llm, "load_cfg", side_effect=lambda: json.loads(path.read_text())):
+            client = server.app.test_client()
+            self.assertEqual(client.get("/api/llm").json["grok_reasoning_effort"], "low")
+            r = client.post("/api/llm/config", json={"grok_reasoning_effort": "high", "gpt_reasoning_effort": "none"})
+            self.assertEqual(r.status_code, 200)
+            saved = json.loads(path.read_text())
+            self.assertEqual(saved["grok_reasoning_effort"], "high")
+            self.assertEqual(saved["gpt_reasoning_effort"], "none")
+            self.assertEqual(client.post("/api/llm/config", json={"grok_reasoning_effort": "bogus"}).status_code, 400)
+            extras = llm._compat_extras("grok", saved)
+            self.assertEqual(extras.get("reasoning_effort"), "high")
+            self.assertEqual(llm._compat_extras("gpt", saved), {})
+
+    def test_image_follow_grok_uses_grok_creds_and_named_model(self):
+        cfg = copy.deepcopy(Routes.cfg)
+        cfg["image"] = {"follow": "grok", "model": "grok-imagine-image", "quality": "low"}
+        base, key, model = llm.image_creds(cfg)
+        self.assertEqual(base, "https://api.x.ai/v1")
+        self.assertEqual(key, "SECRET_K")
+        self.assertEqual(model, "grok-imagine-image")
+        info = llm.image_info(cfg)
+        self.assertEqual(info["follow"], "grok")
+        self.assertTrue(info["has_key"])
+        self.assertNotIn("SECRET", json.dumps(info))
+
+    def test_image_config_roundtrip_and_rejects_bad_follow(self):
+        import server
+        path = self.root / "llm_config.json"
+        path.write_text(json.dumps(copy.deepcopy(Routes.cfg)))
+        with patch.object(llm, "CONFIG_FILE", str(path)), \
+             patch.object(llm, "load_cfg", side_effect=lambda: json.loads(path.read_text())):
+            client = server.app.test_client()
+            r = client.post("/api/llm/config", json={"image": {
+                "follow": "grok", "model": "grok-imagine-image", "quality": "low"}})
+            self.assertEqual(r.status_code, 200)
+            saved = json.loads(path.read_text())
+            self.assertEqual(saved["image"]["follow"], "grok")
+            self.assertEqual(saved["image"]["model"], "grok-imagine-image")
+            self.assertEqual(saved["gpt"]["api_key"], "SECRET_G")
+            shown = client.get("/api/llm").json["image"]
+            self.assertEqual(shown["model"], "grok-imagine-image")
+            self.assertTrue(shown["has_key"])
+            self.assertNotIn("SECRET", client.get("/api/llm").get_data(as_text=True))
+            self.assertEqual(client.post("/api/llm/config", json={"image": {"follow": "unknown"}}).status_code, 400)
+            self.assertEqual(client.post("/api/llm/config", json={"image": "bad"}).status_code, 400)
+
+    def test_auto_profile_extract_off_by_default(self):
+        bot._last_learn.clear()
+        called = []
+        with patch.object(bot, "load_rules", return_value={}), \
+             patch.object(bot.agent, "agent_config", return_value={"enabled": True}), \
+             patch.object(bot.llm, "available", return_value=True), \
+             patch.object(bot.memory, "update_style_from_messages"), \
+             patch.object(bot.memory, "extract_from_messages", side_effect=lambda *a, **k: called.append(1) or 1):
+            bot._maybe_learn("wxid_friend", [{"sender": "wxid_friend", "content": "x"}], print)
+        self.assertEqual(called, [])
+
+    def test_auto_profile_extract_runs_when_enabled(self):
+        bot._last_learn.clear()
+        called = []
+        with patch.object(bot, "load_rules", return_value={"learn_profiles": True}), \
+             patch.object(bot.agent, "agent_config", return_value={"enabled": True}), \
+             patch.object(bot.llm, "available", return_value=True), \
+             patch.object(bot.memory, "update_style_from_messages"), \
+             patch.object(bot.memory, "extract_from_messages", side_effect=lambda *a, **k: called.append(1) or 1), \
+             patch.object(bot.memory, "load_profile", return_value={"facts": []}):
+            bot._maybe_learn("wxid_friend", [{"sender": "wxid_friend", "content": "x"}], print)
+        self.assertEqual(called, [1])
+
+    def test_extract_now_ignores_auto_switch(self):
+        bot._last_learn.clear()
+        called = []
+        msgs = [{"sender": "wxid_friend", "content": "hello", "is_self": False}]
+        with patch.object(bot, "load_rules", return_value={"learn_profiles": False}), \
+             patch.object(bot.agent, "agent_config", return_value={"enabled": True}), \
+             patch.object(bot.llm, "available", return_value=True), \
+             patch.object(bot.messages, "get_messages", return_value=msgs), \
+             patch.object(bot.memory, "update_style_from_messages"), \
+             patch.object(bot.memory, "extract_from_messages", side_effect=lambda *a, **k: called.append(1) or 1), \
+             patch.object(bot.memory, "load_profile", return_value={"facts": []}):
+            out = bot.extract_now("wxid_friend")
+        self.assertEqual(called, [1])
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["updated"], 1)
+
+    def test_watch_api_can_set_include_self(self):
+        rules_path = self.root / "bot_rules.json"
+        rules_path.write_text(json.dumps({"watch": ["g@chatroom"], "include_self": False}))
+        with patch.object(bot, "rules_file", return_value=str(rules_path)), \
+             patch.object(bot, "load_rules", side_effect=lambda: json.loads(rules_path.read_text())):
+            rules = bot.load_rules()
+            rules["include_self"] = True
+            rules_path.write_text(json.dumps(rules))
+            self.assertTrue(bot.load_rules()["include_self"])
+
+    def test_learn_profiles_flag_persists_in_rules(self):
+        rules_path = self.root / "bot_rules.json"
+        rules_path.write_text(json.dumps({"watch": []}))
+        with patch.object(bot, "rules_file", return_value=str(rules_path)), \
+             patch.object(bot, "load_rules", side_effect=lambda: json.loads(rules_path.read_text())):
+            self.assertFalse(bot.learn_profiles_enabled())
+            rules = bot.load_rules()
+            rules["learn_profiles"] = True
+            rules_path.write_text(json.dumps(rules))
+            self.assertTrue(bot.learn_profiles_enabled())
 
 
 if __name__ == "__main__":

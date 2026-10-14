@@ -1,53 +1,37 @@
+# Compatibility entrypoint for the existing wxbot-ubuntu-manual data volume.
+# New installations use ../../deploy.sh and ../../docker-compose.yml.
 services:
   ubuntu-wechat:
-    image: wxbot-ubuntu-manual:24.04
+    image: ${WXBOT_IMAGE:-wxbot-ubuntu-manual:24.04}
     build:
       context: ../..
       dockerfile: docker/ubuntu-manual/Dockerfile
-      args:
-        APT_PROXY: ${APT_PROXY:-DIRECT}
-        HTTP_PROXY: ""
-        HTTPS_PROXY: ""
-        http_proxy: ""
-        https_proxy: ""
-        ALL_PROXY: ""
-        all_proxy: ""
     container_name: wxbot-ubuntu-manual
-    platform: linux/arm64
     init: true
-    restart: "no"
+    restart: unless-stopped
+    # 降"机器人/容器"指纹:真实主机名 + 真实网卡厂商 MAC(Intel OUI 00:1b:21),
+    # 别再暴露容器 12 位哈希主机名与随机本地管理位 MAC。
+    hostname: ${WXBOT_HOSTNAME:-ubuntu-pc}
+    mac_address: ${WXBOT_MAC:-00:1b:21:3a:7c:9e}
     shm_size: 1gb
     security_opt:
       - seccomp=unconfined
     cap_add:
       - SYS_PTRACE
-    environment:
-      TZ: Asia/Shanghai
-      http_proxy: ""
-      https_proxy: ""
-      HTTP_PROXY: ""
-      HTTPS_PROXY: ""
-      ALL_PROXY: ""
-      all_proxy: ""
-      SCREEN: 1360x900x24
-      XDG_CURRENT_DESKTOP: XFCE
-      XDG_SESSION_TYPE: x11
-      DESKTOP_SESSION: xfce
-      no_proxy: "localhost,127.0.0.1,::1"
-      NO_PROXY: "localhost,127.0.0.1,::1"
-      WXBOT_BOT_AUTOSTART: "1"
-      WXBOT_LOCAL_ADMIN: "1"
-      WXBOT_MEDIA_CAPTURE: "0"
-      WXBOT_NOVNC_URL: "http://localhost:6082/vnc.html?autoconnect=true&resize=scale&view_only=false"
-      WXBOT_ADMIN_READ_TOKEN: "123"
+    # This compatibility entrypoint is invoked from this subdirectory, so
+    # Compose would otherwise ignore the repository-root .env on recreation.
+    # Keep credentials and runtime settings in that one ignored file.
+    env_file:
+      - ../../.env
     ports:
-      - "127.0.0.1:5100:5100"
-      - "127.0.0.1:6082:6080"
-      - "127.0.0.1:5902:5900"
+      - 127.0.0.1:5100:5100
+      - 127.0.0.1:6082:6080
+      - 127.0.0.1:5902:5900
     volumes:
       - ubuntu-wechat-home:/home/wechat
       - ../../accounts:/app/accounts
-      - ../../output/ubuntu-manual-images:/home/wechat/Pictures:ro
+      - ../../output/ubuntu-manual-images:/home/wechat/Pictures
+
 volumes:
   ubuntu-wechat-home:
     name: wxbot-ubuntu-manual-home

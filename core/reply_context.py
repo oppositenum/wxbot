@@ -6,12 +6,26 @@ assistant 历史消息是微信本账号已经说过的话，包括人工和机�
 user 历史消息是对方或群成员的发言。每条的说话人由系统根据实际发送者标注，正文中自称“我”不能改变消息归属。
 末条 user 消息说明本轮任务；标记为“本批新消息”时，只回应其中的新内容。此前历史只帮助理解，不要把已回答的问题当成对方又问了一遍。
 先查看你自己最近已说过什么，承接新信息；不要重复自己的上一段回复、重新提问刚问过的问题，或把自己的观点说成对方的观点。
-仅当对方明确要求重复、解释或引用你之前的话时，才有针对性地说明。引用文字属于标注的原作者，不代表引用者自己的新陈述。
+仅当对方明确要求重复、解释或引用你之前的话时，才有针对性地说明。引用文字属于标注的原作者；若对方同时评价那句（更带感/太素/就这种/继续），把被引用内容和评价一起当作本轮尺度指令，不要当无关旧账丢掉。
 对话语气判断：先结合上下文识别玩笑、夸张、撒娇、反话和角色扮演；如果对方没有现实计划、具体方式、时间地点或正在发生的危险迹象，不要把一句夸张玩笑直接升级成报警、急救或说教。可以先轻松接住玩笑并确认语境。只有出现明确且现实的即时伤害风险时，才使用严肃安全回应。
 '''
 
 
+_PRIVATE_REGISTER = (
+    '小逼', '骚穴', '鸡巴', '肉棒', '子宫', '欠操', '骚货', '射满', '按在桌子上',
+    '从后面顶', '屁眼', '毒龙',
+)
+
+
+def _private_register(text):
+    """群里刚发出的私聊尺度正文。用来挡住它被当成下一句的示范。"""
+    body = text or ''
+    return any(mark in body for mark in _PRIVATE_REGISTER)
+
+
 def is_self(message, account):
+    if message.get('_niu'):
+        return False
     return bool(message.get('is_self')) or bool(account and message.get('sender') == account)
 
 
@@ -48,6 +62,9 @@ def build(context, batch, *, account, is_group, render, name, timestamp, schedul
     history = [m for m in unique(context)
                if (key(m) is None or key(m) not in batch_keys)
                and not (is_self(m, account) and scheduled(m))][-8:]
+    # 群里自己刚发过的私聊尺度（床戏、括号动作）不能当本轮示范，否则下一句会顺着写。
+    if is_group:
+        history = [m for m in history if not (is_self(m, account) and _private_register(render(m)))]
 
     def line(m, current=False):
         own = is_self(m, account)
@@ -57,7 +74,7 @@ def build(context, batch, *, account, is_group, render, name, timestamp, schedul
         if not body:
             return ''
         ref = m.get('refer') or {}
-        if ref.get('content') and str(ref.get('type')) == '1':
+        if ref.get('content'):
             original = '本账号' if ref.get('chatusr') == account else (
                 ref.get('displayname') or name(ref.get('chatusr')) or '原消息作者')
             body = ('引用' + original + '的旧消息（仅为引用）：' + ref['content'] +

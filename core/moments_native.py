@@ -4,6 +4,7 @@ No network vision, hooks, database writes or unchecked chat-sender fallback.
 Callers must own docker_wx.UI_LOCK for the entire prepare/submit/cleanup cycle.
 """
 import csv
+import difflib
 import hashlib
 import io
 import json
@@ -24,6 +25,11 @@ def norm(text):
     return re.sub(r'[^\w\u4e00-\u9fff]', '', text).lower()
 
 
+# Emoji / pictograph / symbol ranges that corrupt OCR of a tiny name strip.
+_EMOJI = re.compile('[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF'
+                    '\u2190-\u21ff\u2b00-\u2bff\u2300-\u23ff\ufe0f\u200d]')
+
+
 class NativeError(m.Unavailable):
     pass
 
@@ -38,6 +44,7 @@ class Native:
         self.editor = None
         self.opened = False
         self.submitted = False
+        self.like_pending = False
 
     @staticmethod
     def capability():
@@ -190,20 +197,73 @@ class Native:
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         proc.communicate(text.encode(), timeout=3)
 
+    # The comment context menu is a fixed vertical stack in this order.
+    MENU=['复制','搜一搜','回复','删除']
+
+    def _menu_open(self, x, y):
+        """Right-click a comment and OCR the popped-up context menu region."""
+        self.click(x, y, 3)
+        screen = self.shot()
+        box = (max(0,x-10), max(0,y-10), min(screen.width,x+190), min(screen.height,y+190))
+        return self.ocr(box)
+
+    def _menu_point(self, allrows, want):
+        """Locate a menu item's click point among the fixed 复制/搜一搜/回复/删除 stack.
+
+        OCR fuses the copy glyph into its label ("全复制"/"作复制") and, near the
+        screen bottom, bleed-through comment text garbles whichever item overlaps
+        it — so we match each label by substring on the short menu rows, then, if
+        the wanted item itself is unreadable, infer its position from the evenly
+        spaced neighbours (the order and row spacing are fixed).
+        """
+        idx={l:i for i,l in enumerate(self.MENU)}
+        found={}
+        for r in sorted(allrows,key=lambda r:r['y']):
+            nr=norm(r['text'])
+            if len(nr)>5:continue  # menu labels are short; skip bleed-through comment text
+            for l in self.MENU:
+                if l in nr and l not in found:found[l]=r
+        if not found:raise NativeError('复制菜单项无法唯一识别')
+        wi=idx[want]
+        if want in found:return dict(x=found[want]['x'],y=found[want]['y'])
+        anchors=sorted(((idx[l],r) for l,r in found.items()),key=lambda a:a[0])
+        if len(anchors)>=2:
+            two=sorted(anchors,key=lambda a:abs(a[0]-wi))[:2]
+            (i0,r0),(i1,r1)=sorted(two,key=lambda a:a[0])
+            spacing=(r1['y']-r0['y'])/(i1-i0)
+        else:
+            spacing=30.0
+        if not 18<=spacing<=60:raise NativeError('复制菜单项无法唯一识别')
+        base=min(anchors,key=lambda a:abs(a[0]-wi))
+        return dict(x=base[1]['x'],y=base[1]['y']+(wi-base[0])*spacing)
+
     def copy_at(self, x, y):
         original = self.clip(); sentinel = 'wx-moments-'+os.urandom(8).hex()
         try:
-            self.put_clip(sentinel); self.click(x, y, 3)
-            screen = self.shot()
-            box = (max(0,x-10), max(0,y-10), min(screen.width,x+190), min(screen.height,y+190))
-            hit = self.label('复制', box)
-            self.click(hit['x'], hit['y'])
+            self.put_clip(sentinel)
+            spot=self._menu_point(self._menu_open(x, y),'复制')
+            self.click(spot['x'], spot['y'])
+            # WeChat writes the clipboard asynchronously after the click; poll
+            # briefly so we read the copied text rather than the stale sentinel.
             result = self.clip()
+            for _ in range(10):
+                if result != sentinel:break
+                time.sleep(.1); result = self.clip()
             return '' if result == sentinel else result
         except NativeError:
             self.key('Escape'); return ''
         finally:
             self.put_clip(original)
+
+    def reply_at(self, x, y):
+        """Open the reply editor for the comment at (x,y) via its 回复 menu item.
+
+        A left-click on the comment is ambiguous — a short body puts the row centre
+        on the author's name, which opens their profile card instead of the editor.
+        The 回复 context-menu entry targets the exact comment unambiguously.
+        """
+        spot=self._menu_point(self._menu_open(x, y),'回复')
+        self.click(spot['x'], spot['y'])
 
     def open(self):
         self.proof = self.state()
@@ -286,15 +346,30 @@ class Native:
                 copied_attempts += 1
                 copied=self.copy_at(x+96,top+38)
                 if copied.strip()==item['text'].strip():
-                    # Require the author label as well as the exact unique body.
+                    # The body is already globally unique in cache (line 323) and was
+                    # copied verbatim here, so identity is established. The author label
+                    # is a secondary sanity check against a stale-cache mix-up — but OCR
+                    # of a tiny name strip is lossy (drops chars, chokes on emoji), so
+                    # match it fuzzily and, when OCR reads nothing at all, defer to the
+                    # unique-body proof rather than hard-failing a correct target.
                     authors=self.ocr((x+75,top-15,x+w-40,top+13),psm=6)
-                    names={norm(item['name'])}
+                    raw_names={item['name']}
                     from core import contacts
                     for c in contacts.list_contacts():
                         if c['username']==item['author']:
-                            names.update(norm(c.get(k) or '') for k in ['name','nick_name','remark'])
-                    names.discard('')
-                    if not any(norm(r['text']) in names for r in authors):
+                            raw_names.update(c.get(k) or '' for k in ['name','nick_name','remark'])
+                    raw_names.discard('')
+                    names={norm(n) for n in raw_names};names.discard('')
+                    read=[norm(r['text']) for r in authors];read=[t for t in read if t]
+                    def _name_ok(t):
+                        return any(t==nm or (min(len(t),len(nm))>=2 and (t in nm or nm in t))
+                                   or difflib.SequenceMatcher(None,t,nm).ratio()>=0.6 for nm in names)
+                    # Emoji/pictograph-heavy display names (e.g. "🐮🐮🌱besos") OCR into
+                    # noise on the tiny name strip, so a non-match there is not proof of a
+                    # wrong target. Only veto when at least one expected name is emoji-free
+                    # (reliably OCR-able); otherwise trust the unique-body proof above.
+                    reliable=any(nm and not _EMOJI.search(nm) for nm in raw_names)
+                    if reliable and read and not any(_name_ok(t) for t in read):
                         raise NativeError('动态作者名称未能核对，未发送')
                     self.check(True)
                     return dict(x=x,y=y,w=w,h=h,top=top,body=(x+96,top+38))
@@ -304,6 +379,132 @@ class Native:
                     raise NativeError('聊天发送优先，本次朋友圈定位已暂停')
                 self.run('xdotool','mousemove',str(x+w-30),str(y+h-65),'click','5');time.sleep(.2)
         raise NativeError('没有在当前可见朋友圈中找到目标，未发送')
+
+    def _scroll_to_comment(self, pos, target):
+        """Scroll the target comment into view and return its OCR hit row.
+
+        Comments always render below their post avatar, and find_post leaves our
+        avatar visible, so a target comment is only ever at or below the fold —
+        we only scroll down. Each notch we re-anchor our post's avatar top
+        geometrically (no clipboard copies), keep the region fenced between our
+        avatar and the next post's avatar so a body that is unique only within
+        this post stays unambiguous, and OCR that region. OCR is lossy (it drops
+        or garbles characters), so a row is matched by fuzzy similarity, not exact
+        substring — this only LOCATES a candidate to right-click; copy_at then
+        re-verifies the exact text before anything is sent, so a mis-locate fails
+        cleanly. Raises NativeError (original wording) if nothing resolves in budget.
+        """
+        x,y,w,h,top=(pos[k] for k in ('x','y','w','h','top'))
+        nt=norm(target['text'])
+        def _score(r):
+            nr=norm(r['text'])
+            return difflib.SequenceMatcher(None,nt,nr).ratio() if nr else 0.0
+        NOTCH_MAX=200  # one scroll notch is shorter than a post that has comments
+        own_top=top    # trusted: find_post already copy_at-verified this avatar
+        deadline=time.monotonic()+30
+        last_sig=None;stall=0
+        for _ in range(24):
+            from core import docker_wx
+            if time.monotonic()>deadline or docker_wx.priority_pending():
+                raise NativeError('聊天优先或朋友圈定位超时，本次未发送')
+            avatars=sorted(self._avatars())
+            if own_top is not None:
+                cand=[t for t in avatars if own_top-NOTCH_MAX<=t<=own_top]
+                own_top=max(cand) if cand else None  # None => our avatar left the top (TAIL)
+            if own_top is not None:
+                region_top=own_top+60
+                below=[t for t in avatars if t>own_top+40]
+            else:
+                region_top=y+56  # previous post is already gone above the fold
+                below=list(avatars)  # smallest avatar is the next post
+            bottom=min(below) if below else y+h-25
+            # When the post header itself sits near the fold its comments are still
+            # entirely below the viewport, so the fenced region is empty (top>=bottom):
+            # skip OCR and scroll rather than crop an inverted box.
+            if bottom>region_top+10:
+                rows=self.ocr((x+78,region_top,x+w-20,bottom))
+                best=max(rows,key=_score,default=None)
+                # 0.8 clears real OCR noise (dropped/garbled glyphs score ~0.87-0.93)
+                # while a merely similar neighbouring comment stays below it; copy_at
+                # is the exact gate, so keep scrolling rather than grabbing a weak row.
+                if best is not None and _score(best)>=0.8:return best
+            if own_top is None and below and min(below)<=y+120:break  # next post reached the top
+            sig=tuple(round(t) for t in avatars)
+            stall=stall+1 if sig==last_sig else 0;last_sig=sig
+            if stall>=2:break  # feed bottom, nothing new revealed
+            self.run('xdotool','mousemove',str(x+w-30),str(y+h-65),'click','5');time.sleep(.2)
+        raise NativeError('目标评论未完整显示，未发送')
+
+    # Relative-time markers on the action row. Auto-like only targets posts <24h
+    # old, so the time is always relative (never an absolute 月/年 date, which
+    # would also false-match dates inside the body text).
+    TIME_TOKENS=('刚刚','分钟前','小时前','昨天','天前','周前')
+
+    def _footer_anchor(self, rows, names, lo):
+        """First likes/comment footer row below `lo` (a contact name substring or
+        a comment colon). The gray 时间/··· action row sits just above it."""
+        for r in sorted(rows,key=lambda r:r['y']):
+            if r['y']<=lo:continue
+            t=r['text']
+            if '：' in t or ':' in t:return r['y']
+            nt=norm(t)
+            if any(nm and len(nm)>=2 and nm in nt for nm in names):return r['y']
+        return None
+
+    def _reveal_actionbar(self, pos):
+        """Scroll the post's 时间/··· action row into view and return its OCR row.
+
+        The action row renders below the body and any media, so on a tall (image)
+        post find_post can leave our avatar visible while the row is still below
+        the fold. Mirror _scroll_to_comment's geometry: re-anchor our avatar top
+        each notch (no clipboard copies). Two ways to land the row:
+          * fast path — a readable relative-time token in the coarse region OCR
+            (text posts, where the row isn't occluded by media);
+          * media path — the faint gray time text is dropped by sparse-mode OCR
+            over a tall photo region, but the likes/comment footer below it reads
+            fine, so anchor to the footer and re-OCR the narrow band just above it
+            with psm=6 (line mode reliably reads the small time text there).
+        Only accept a row with room to click below it so the ··· button and popped
+        赞 menu land fully inside the window. Raises NativeError('动态操作栏未识别').
+        """
+        x,y,w,h,top=(pos[k] for k in ('x','y','w','h','top'))
+        from core import contacts
+        names={norm(c.get(k) or '') for c in contacts.list_contacts() for k in ('name','nick_name','remark')}
+        names.discard('')
+        NOTCH_MAX=200
+        own_top=top
+        deadline=time.monotonic()+25
+        last_sig=None;stall=0
+        for _ in range(20):
+            from core import docker_wx
+            if time.monotonic()>deadline or docker_wx.priority_pending():
+                raise NativeError('聊天优先或朋友圈定位超时，本次未发送')
+            avatars=sorted(self._avatars())
+            cand=[t for t in avatars if own_top-NOTCH_MAX<=t<=own_top+8]
+            own_top=max(cand) if cand else (min(avatars) if avatars else own_top)
+            below=[t for t in avatars if t>own_top+40]
+            bottom=min(below) if below else y+h-15
+            if bottom>own_top+52:
+                rows=self.ocr((x+75,own_top+42,x+w-15,bottom))
+                times=[r for r in rows if any(t in r['text'] for t in self.TIME_TOKENS)]
+                if times:
+                    hit=max(times,key=lambda r:r['y'])
+                    if hit['y']<=y+h-30:return hit  # fast path: readable time row
+                fy=self._footer_anchor(rows,names,own_top+90)
+                if fy and fy>own_top+130:
+                    # Tight bands just above the footer; psm=6 reads the gray time
+                    # text that the tall sparse-mode region OCR above missed.
+                    for by in (fy-60,fy-44,fy-76):
+                        band=self.ocr((x+75,max(by,own_top+80),x+w-15,by+30),psm=6)
+                        th=[r for r in band if any(t in r['text'] for t in self.TIME_TOKENS)]
+                        if th:
+                            hit=max(th,key=lambda r:r['y'])
+                            if hit['y']<=y+h-30:return hit
+            sig=tuple(round(t) for t in avatars)
+            stall=stall+1 if sig==last_sig else 0;last_sig=sig
+            if stall>=2:break  # feed bottom, nothing new revealed
+            self.run('xdotool','mousemove',str(x+w-30),str(y+h-65),'click','5');time.sleep(.2)
+        raise NativeError('动态操作栏未识别')
 
     def input_text(self, point, text):
         self.click(*point)
@@ -328,16 +529,17 @@ class Native:
             target=matches[0]
             if sum(c['text']==target['text'] for c in item['comments'])!=1 or not norm(target['text']):
                 raise NativeError('评论内容重复或为空，无法核对回复对象')
-            # Only search within this post (stop at next avatar).
-            next_tops=[t for t in self._avatars() if t>top+40]
-            bottom=min(next_tops) if next_tops else y+h-25
-            rows=self.ocr((x+78,top+60,x+w-20,bottom))
-            hits=[r for r in rows if norm(target['text']) in norm(r['text'])]
-            if len(hits)!=1:raise NativeError('目标评论未完整显示，未发送')
-            hit=hits[0]
+            # Later comments can sit below the fold; scroll the target into view
+            # (fenced within this post) before verifying and clicking it.
+            hit=self._scroll_to_comment(pos,target)
             copied=self.copy_at(hit['x'],hit['y'])
-            if norm(copied) not in {norm(target['text']),norm(target['name']+target['text'])}:raise NativeError('目标评论正文核对失败')
-            self.click(hit['x'],hit['y'])
+            # copy_at yields one whole comment. A top-level comment copies as the
+            # body alone (or 昵称+正文); a reply copies as "昵称 回复 某人：正文",
+            # so also accept when both the author name and the exact body appear.
+            nc=norm(copied);nt=norm(target['text']);nn=norm(target['name'])
+            if nc not in {nt,norm(target['name']+target['text'])} and not (nt and nt in nc and nn and nn in nc):
+                raise NativeError('目标评论正文核对失败')
+            self.reply_at(hit['x'],hit['y'])
         else:
             rows=self.ocr((x+75,top+42,x+w-15,min(y+h,top+260)))
             times=[r for r in rows if any(t in r['text'] for t in ['分钟前','小时前','昨天','天前','刚刚','月','年'])]
@@ -356,6 +558,31 @@ class Native:
         self.input_text((x+115,y+min(bands)+22),text)
         send=self.label('发送',(x+w-120,y+max(bands)-55,x+w-20,y+max(bands)))
         self.submit_point=(send['x'],send['y'])
+        self.anchor=self.shot((x,y,x+w,y+60)).tobytes()
+
+    def prepare_like(self, item):
+        """Stage a 赞 (like) on someone else's post: locate it, pop the ···
+        action menu (same one that holds 评论), find the 赞 entry and remember
+        its point WITHOUT clicking — submit() performs the single irreversible
+        click after process_one re-checks policy. There is no editor/text, so
+        this never touches the clipboard. Clicking 赞 twice would UN-like, so the
+        job-state ban on replaying an initiated job is what guarantees one click.
+        """
+        pos=self.find_post(item);x,y,w,h=(pos[k] for k in ('x','y','w','h'))
+        # The 时间/··· action row sits BELOW the body and any media, so on a tall
+        # (image) post find_post can leave the avatar visible while the action row
+        # is still below the fold. Scroll it fully into view (also handles the
+        # common already-visible case) before popping the menu.
+        row=self._reveal_actionbar(pos)
+        self.click(x+w-40,row['y'])  # pop the 赞 | 评论 menu
+        # The 赞 glyph is small and OCR-hostile (tesseract reads it as 移/贰/… as
+        # often as 赞), but 评论 right next to it reads reliably and the popup is
+        # fixed-layout, so anchor on 评论 (this also confirms the menu popped) and
+        # step left by the constant 赞↔评论 gap (~96px at this DPI).
+        c=self.label('评论',(x+w-143,row['y']-18,x+w-65,row['y']+19),exact=False)
+        self.editor=self.window
+        self.submit_point=(c['x']-96,c['y'])
+        self.like_pending=True
         self.anchor=self.shot((x,y,x+w,y+60)).tobytes()
 
     def prepare_publish(self, text, paths):
@@ -403,7 +630,12 @@ class Native:
     def submit(self):
         self.check(True)
         wid=self.run('xdotool','getactivewindow').decode().strip()
-        if not self.staged or wid!=self.editor:
+        if wid!=self.editor:
+            raise NativeError('提交前编辑窗口已变化')
+        if self.like_pending:
+            # 无文案:直接点一下 赞 即可(点第二次会取消赞,故只点一次由任务状态保证)。
+            self.like_pending=False;self.submitted=True;self.click(*self.submit_point);return
+        if not self.staged:
             raise NativeError('提交前编辑窗口已变化')
         point,text=self.staged;old=self.clip()
         try:
@@ -416,6 +648,8 @@ class Native:
         if self.submitted:return  # do not touch an editor/feed after an ambiguous click
         try:
             self.check()
+            if self.like_pending:
+                self.key('Escape')  # 关掉点开但未点击的 赞/评论 弹出菜单
             if self.staged:
                 old=self.clip();point,text=self.staged
                 self.click(*point);self.key('ctrl+a');self.key('ctrl+c')

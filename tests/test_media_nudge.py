@@ -1,10 +1,18 @@
 """离线测试：纯图片触发回复(延长去抖) + 对方沉默后的主动跟进(1-2次,不扰)。
 全 mock,不发真实消息、不调付费模型。 跑: python3 tests/test_media_nudge.py
 """
+if __name__ != '__main__' and __import__('os').environ.get('WXBOT_SCRIPT_TEST_CHILD') != '1':
+    import os as _os, subprocess as _subprocess, sys as _sys, pytest as _pytest
+    _r = _subprocess.run([_sys.executable, __file__], env=dict(_os.environ, WXBOT_SCRIPT_TEST_CHILD='1'), text=True, capture_output=True)
+    print(_r.stdout, end='')
+    if _r.stderr: print(_r.stderr, end='', file=_sys.stderr)
+    assert _r.returncode == 0, 'media nudge script test failed'
+    _pytest.skip('script test executed in isolated child process', allow_module_level=True)
 import os
 import sys
 import tempfile
 import time
+from concurrent.futures import TimeoutError
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config  # noqa: E402
@@ -16,7 +24,7 @@ config.wxid = lambda: 'offline-test'
 os.makedirs(os.path.join(_TMP, 'offline-test'), exist_ok=True)
 config.account_dir = lambda: os.path.join(_TMP, 'offline-test')
 
-from core import bot, llm, sender, distill, messages, schedule, decrypt, agent, conversation_state  # noqa: E402
+from core import bot, llm, sender, distill, messages, schedule, decrypt, agent, conversation_state, personalization  # noqa: E402
 
 passed, failed = 0, []
 
@@ -34,6 +42,7 @@ CHAT = "wxid_friend01"
 NOW = time.mktime((2026, 9, 9, 14, 0, 0, 0, 0, -1))
 
 RULES = {"include_self": False, "watch": [CHAT], "poll_interval": 5,
+         "proactive": {"enabled": True, "private_share_enabled": True},
          "rules": [{"name": "style-reply", "match": {"type": "auto"},
                     "action": {"type": "reply_ai", "persona": "P"}}]}
 
@@ -48,18 +57,39 @@ distill.load_persona = lambda slug: ({"name": "P", "persona": "你是助手",
                                       "samples": []} if slug else None)
 distill.pick_samples = lambda *a, **k: []
 agent.agent_config = lambda r=None: {"enabled": False, "tools": []}
+personalization.update(CHAT, {'conversation_control_enabled': True}, 0)
 bot.send_name_for = lambda u: "朋友"
 bot._sender_name = lambda w: "朋友"
 bot._enrich_media = lambda c, m: (m.get("content") or "")
 bot._media_result = lambda c, m: bot.media_read.Result("success", "图片", "离线模拟图片描述")
+# 本用例精确断言去抖窗口边界(MEDIA_SETTLE/SETTLE),把拟人化的随机抖动/打字延迟/
+# 深夜跳过固定为中性,使时序确定、不真的 sleep(拟人化本身另有 test_humanize.py 覆盖)。
+bot.humanize.settle_factor = lambda: 1.0
+bot.humanize.typing_delay = lambda *a, **k: 0
+bot.humanize.night_drop = lambda *a, **k: False
+bot.humanize.send_ready = lambda *a, **k: True
+bot.humanize.wait_gap = lambda: 0.0
+bot.humanize.send_mark = lambda *a, **k: None
 decrypt.run = lambda force=False: None
 schedule.is_scheduled_msg = lambda m, chat=None: bool(
     m.get("is_self") and (m.get("content") or "").startswith("【定时提醒】"))
 
 
-conversation_state.latest = lambda chat, after=0: messages.get_messages(chat, limit=1000)
+# The nudge cases pass their complete observed conversation explicitly.  Keep
+# the refresh read empty so it verifies the ticket without inventing a second
+# message source or waiting on a database poll.
+conversation_state.latest = lambda chat, after=0: []
 
 def run():
+    def run_once_wait(rules, state):
+        futures = bot.run_once(rules, state, log=lambda *_: None) or []
+        for future in futures:
+            try:
+                future.result(timeout=5)
+            except TimeoutError as exc:
+                raise AssertionError("_process_worker timed out") from exc
+        return futures
+
     # ---- 1. _settle_for：含文字批=普通去抖;纯媒体批=更长窗 ----
     check("settle-text", bot._settle_for([{"type": 3}, {"type": 1}]) == bot.SETTLE)
     check("settle-media", bot._settle_for([{"type": 3}]) == bot.MEDIA_SETTLE)
@@ -73,21 +103,23 @@ def run():
     state = bot.load_state()
     bot.load_pending()
     bot._pending.clear()
-    bot.run_once(RULES, state, log=lambda *_: None)   # 首见:只记指针
+    run_once_wait(RULES, state)   # 首见:只记指针
     msg_store["msgs"].append(
         {"local_id": 2, "server_id": 2, "type": 3, "is_self": False,
          "content": "[图片]", "create_time": NOW, "sender": CHAT})
-    bot.run_once(RULES, state, log=lambda *_: None)
+    run_once_wait(RULES, state)
     check("image-queued", CHAT in bot._pending
           and bot._pending[CHAT]["msgs"][0]["type"] == 3)
     # 8s(普通SETTLE)后不该回(纯媒体要等MEDIA_SETTLE)
     bot._pending[CHAT]["last_seen"] = time.time() - (bot.SETTLE + 2)
+    bot._pending[CHAT]["first_seen"] = bot._pending[CHAT]["last_seen"]
     sent.clear()
-    bot.run_once(RULES, state, log=lambda *_: None)
+    run_once_wait(RULES, state)
     check("media-waits-longer", CHAT in bot._pending and not sent)
     # 超过 MEDIA_SETTLE → 回复
     bot._pending[CHAT]["last_seen"] = time.time() - (bot.MEDIA_SETTLE + 2)
-    bot.run_once(RULES, state, log=lambda *_: None)
+    bot._pending[CHAT]["first_seen"] = bot._pending[CHAT]["last_seen"]
+    run_once_wait(RULES, state)
     check("media-replied", sent and sent[-1][0] == CHAT and CHAT not in bot._pending)
     # 图+文字混批:普通 SETTLE 就回
     msg_store["msgs"].append(
@@ -96,11 +128,57 @@ def run():
     msg_store["msgs"].append(
         {"local_id": 4, "server_id": 4, "type": 1, "is_self": False,
          "content": "看这个", "create_time": NOW + 62, "sender": CHAT})
-    bot.run_once(RULES, state, log=lambda *_: None)
+    run_once_wait(RULES, state)
     bot._pending[CHAT]["last_seen"] = time.time() - (bot.SETTLE + 1)
+    bot._pending[CHAT]["first_seen"] = bot._pending[CHAT]["last_seen"]
     sent.clear()
-    bot.run_once(RULES, state, log=lambda *_: None)
+    run_once_wait(RULES, state)
     check("mixed-normal-settle", sent and CHAT not in bot._pending)
+
+    # ---- 2b. 纯语音批：微信「转文字」是异步落库的 ----
+    # 未拿到转写前不该回落"这条语音我没能读取"，落库后用文字正常回；宽限期到了才兜底。
+    bot._pending.clear()
+    llm.load_cfg = lambda: {}                       # 未开自带 STT，得靠微信那份转写
+    # local_id 用 20+，避开本文件前面章节已在同一 CHAT 用过的 1~4(否则 reply 幂等键相撞)。
+    v_store = {"msgs": [{"local_id": 19, "server_id": 19, "type": 1, "is_self": False,
+                         "content": "旧消息", "create_time": NOW - 9000, "sender": CHAT}]}
+    messages.get_messages = lambda chat, limit=40: [dict(x) for x in v_store["msgs"]]
+    state2 = bot.load_state()
+    state2[CHAT] = 19                                # 指针钉在旧文字之后，避免把它当新消息重放
+    v_store["msgs"].append({"local_id": 20, "server_id": 20, "type": 34, "is_self": False,
+                            "content": "[语音 1\"]", "create_time": NOW, "sender": CHAT})
+    run_once_wait(RULES, state2)
+    check("voice-queued", CHAT in bot._pending)
+    # 过了 MEDIA_SETTLE 但转写仍未落库 → 继续等，不回复
+    for key in ("first_seen", "last_seen"):
+        bot._pending[CHAT][key] = time.time() - (bot.MEDIA_SETTLE + 2)
+    sent.clear()
+    run_once_wait(RULES, state2)
+    check("voice-waits-transcript", CHAT in bot._pending and not sent)
+    # 微信转写落库 → 补进快照并用文字回复
+    for m in v_store["msgs"]:
+        if m["local_id"] == 20:
+            m["voice_transcript"] = "你好，你好。"
+            m["voice_transcript_source"] = "wechat_packed_v1"
+    run_once_wait(RULES, state2)
+    check("voice-replied-after-transcript", sent and CHAT not in bot._pending)
+    check("voice-transcript-not-waiting", not bot._voice_batch_waiting(CHAT, [
+        {"local_id": 20, "type": 34, "voice_transcript": "你好，你好。"}]))
+    # 宽限期到了仍无转写 → 带兜底回，不无限等
+    bot._pending.clear()
+    v_store["msgs"].append({"local_id": 21, "server_id": 21, "type": 34, "is_self": False,
+                            "content": "[语音 2\"]", "create_time": NOW + 300, "sender": CHAT})
+    run_once_wait(RULES, state2)
+    for key in ("first_seen", "last_seen"):
+        bot._pending[CHAT][key] = time.time() - (bot.VOICE_GRACE + 2)
+    sent.clear()
+    run_once_wait(RULES, state2)
+    check("voice-grace-timeout-replies", sent and CHAT not in bot._pending)
+    # 开了自带 STT 就不必等微信转写
+    llm.load_cfg = lambda: {"enable_stt": True}
+    check("voice-stt-no-wait", not bot._voice_batch_waiting(CHAT, [
+        {"local_id": 9, "type": 34, "content": "[语音 3\"]"}]))
+    llm.load_cfg = lambda: {}
 
     # ---- 3. 主动跟进状态机 ----
     def mk(last_is_self, silence, extra_self=None):

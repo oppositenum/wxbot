@@ -8,12 +8,12 @@
 #   ./wxbotctl.sh logs [行数]         查看最近日志
 #
 # 可通过环境变量覆盖：
-#   WXBOT_CONTAINER=wxbot-ubuntu-manual
+#   WXBOT_CONTAINER=wxbot
 #   WXBOT_PORT=5100
 
 set -Eeuo pipefail
 
-CONTAINER="${WXBOT_CONTAINER:-wxbot-ubuntu-manual}"
+CONTAINER="${WXBOT_CONTAINER:-wxbot}"
 PORT="${WXBOT_PORT:-5100}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

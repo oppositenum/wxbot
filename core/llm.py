@@ -1,5 +1,6 @@
-"""统一 LLM 客户端：支持 Claude(Anthropic) 与 GPT(OpenAI)，走可选代理。
+"""统一 LLM 客户端：支持 Claude / GPT / Grok 三套独立中转，走可选代理。
 仅用标准库 urllib，避免额外依赖。配置读 llm_config.json。
+Claude 走 Anthropic Messages；GPT 与 Grok 走 OpenAI 兼容 Chat Completions。
 """
 import json
 import logging
@@ -30,33 +31,61 @@ def load_cfg():
     return {}
 
 
+PROVIDERS = ("claude", "gpt", "grok")
+_DEFAULT_MODELS = {
+    "claude": "claude-sonnet-5",
+    "gpt": "gpt-4o",
+    "grok": "grok-4.5",
+}
+_DEFAULT_BASE = {
+    "claude": "https://api.anthropic.com",
+    "gpt": "https://api.openai.com/v1",
+    "grok": "https://api.x.ai/v1",
+}
+
+
 def _default_model(provider):
-    return "claude-sonnet-5" if provider == "claude" else "gpt-4o"
+    return _DEFAULT_MODELS.get(provider, "gpt-4o")
+
+
+def _default_base(provider):
+    return _DEFAULT_BASE.get(provider, "https://api.openai.com/v1")
+
+
+def _api_key(cfg_or_sub, provider=""):
+    key = (cfg_or_sub.get("api_key") if isinstance(cfg_or_sub, dict) else "") or ""
+    if key:
+        return key
+    if provider == "grok":
+        return os.environ.get("XAI_API_KEY") or os.environ.get("WXBOT_LLM_KEY", "")
+    return os.environ.get("WXBOT_LLM_KEY", "")
 
 
 def creds(cfg, provider):
     """取某 provider 的凭据 (base_url, api_key, model)。
 
-    支持【两套独立中转】：cfg 里 cfg['claude']/cfg['gpt'] 各含 base_url/api_key/model。
+    支持【独立中转】：cfg 里 cfg['claude']/cfg['gpt']/cfg['grok'] 各含 base_url/api_key/model。
     没有独立配置时退回扁平旧字段(单中转)：base_url/api_key/(model 或 gpt_model)。
     """
     sub = cfg.get(provider)
     if isinstance(sub, dict) and (sub.get("api_key") or sub.get("base_url")):
         base = (sub.get("base_url") or cfg.get("base_url") or "").rstrip("/")
-        key = sub.get("api_key") or os.environ.get("WXBOT_LLM_KEY", "")
+        key = _api_key(sub, provider)
         model = sub.get("model") or _default_model(provider)
         return base, key, model
     base = (cfg.get("base_url") or "").rstrip("/")
-    key = cfg.get("api_key") or os.environ.get("WXBOT_LLM_KEY", "")
+    key = _api_key(cfg, provider)
     if provider == "claude":
-        model = cfg.get("model", "claude-sonnet-5")
+        model = cfg.get("model") or _default_model(provider)
+    elif provider == "grok":
+        model = cfg.get("grok_model") or cfg.get("model") or _default_model(provider)
     else:
-        model = cfg.get("gpt_model") or cfg.get("model") or "gpt-4o"
+        model = cfg.get("gpt_model") or cfg.get("model") or _default_model(provider)
     return base, key, model
 
 
 # Adapter protocol support, not a claim about any gateway model's capabilities.
-TOOL_PROVIDERS = frozenset({"claude", "gpt"})
+TOOL_PROVIDERS = frozenset(PROVIDERS)
 _ROUTE_LOG = deque(maxlen=100)
 _ROUTE_LOCK = threading.Lock()
 
@@ -95,6 +124,40 @@ def _opener(proxy):
     return urllib.request.build_opener()
 
 
+REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh")
+
+
+def reasoning_effort(provider, cfg=None):
+    """Grok/GPT 的 reasoning_effort。none=不发送该字段（适合非推理模型）。"""
+    cfg = cfg or {}
+    if provider == "grok":
+        v = (cfg.get("grok_reasoning_effort") or "low").strip().lower()
+    elif provider == "gpt":
+        v = (cfg.get("gpt_reasoning_effort") or "low").strip().lower()
+    else:
+        return ""
+    return v if v in REASONING_EFFORTS else "low"
+
+
+def _compat_extras(provider, cfg):
+    effort = reasoning_effort(provider, cfg)
+    if not effort or effort == "none":
+        return {}
+    return {"reasoning_effort": effort}
+
+
+def _openai_text(r):
+    msg = ((r.get("choices") or [{}])[0].get("message") or {})
+    return (msg.get("content") or "").strip()
+
+
+def _chat_truncated(provider, response):
+    if provider == "claude":
+        return response.get("stop_reason") == "max_tokens"
+    choice = (response.get("choices") or [{}])[0]
+    return choice.get("finish_reason") in ("length", "max_tokens")
+
+
 def _post(url, headers, body, proxy, timeout=60, retries=3):
     import time
     import urllib.error
@@ -109,7 +172,14 @@ def _post(url, headers, body, proxy, timeout=60, retries=3):
                 # 网关抖动(502/503/504)或并发限流(429)重试；429 退避更久
                 time.sleep((3.0 if e.code == 429 else 1.5) * (attempt + 1))
                 continue
-            raise RuntimeError(f"模型接口 HTTP {e.code}；未切换 provider/model") from None
+            detail = ""
+            try:
+                detail = (e.read() or b"").decode("utf-8", "ignore")[:240]
+            except Exception:
+                detail = ""
+            raise RuntimeError(
+                f"模型接口 HTTP {e.code}；未切换 provider/model"
+                + (f"：{detail}" if detail else "")) from None
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             if attempt < retries:                         # 超时/连接抖动重试
                 time.sleep(1.5 * (attempt + 1))
@@ -128,51 +198,91 @@ def _endpoint(base, tail):
     return base + "/v1/" + tail
 
 
-def chat(system, messages, cfg=None):
-    """messages: [{"role":"user"/"assistant","content":str}]，返回回复文本。
-    provider 决定用 claude 还是 gpt 那套独立中转(见 creds)。"""
-    cfg = cfg or load_cfg()
-    provider = cfg.get("provider", "claude")
-    if provider not in ("claude", "gpt"):
+def _transient_chat_error(err):
+    text = str(err)
+    if "content policy" in text.lower() or "HTTP 403" in text:
+        return False
+    return any(s in text for s in ("HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504", "HTTP 429", "连接失败"))
+
+
+def _chat_once(system, messages, cfg, provider):
+    """打一轮指定 provider，不含跨模型回退。"""
+    if provider not in PROVIDERS:
         raise CapabilityError("所选 provider 没有聊天适配器")
-    proxy = cfg.get("proxy") or None          # 空=直连(不隐式走系统代理)
-    max_tokens = cfg.get("max_tokens", 600)
+    proxy = cfg.get("proxy") or None
+    max_tokens = cfg.get("max_tokens") or 600
     temperature = cfg.get("temperature", 0.9)
     base, key, model = creds(cfg, provider)
     if not key:
         raise RuntimeError(f"未配置 {provider} 的 api_key（在 AI 设置里填该套中转）")
-
     _request_route(provider, model, "chat", uuid.uuid4().hex)
+    timeout = 20 if cfg.get("probe") else (90 if provider == "grok" else 60)
+    retries = 0 if (cfg.get("single_attempt") or cfg.get("probe")) else (1 if provider == "grok" else 3)
     if provider == "claude":
         body = {"model": model, "max_tokens": max_tokens,
                 "system": system, "messages": messages}
         if temperature is not None and cfg.get("send_temperature"):
             body["temperature"] = temperature
         headers = {"content-type": "application/json", "x-api-key": key,
-                   "authorization": f"Bearer {key}",   # 中转常用 Bearer
+                   "authorization": f"Bearer {key}",
                    "anthropic-version": "2023-06-01", "user-agent": UA}
-        url = _endpoint(base or "https://api.anthropic.com", "messages")
-        r = _post(url, headers, body, proxy, retries=0) if cfg.get("single_attempt") else _post(url, headers, body, proxy)
+        url = _endpoint(base or _default_base(provider), "messages")
+        r = _post(url, headers, body, proxy, timeout=timeout, retries=retries)
         parts = r.get("content", [])
-        return "".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
-
-    # OpenAI / GPT 兼容
-    url = _endpoint(base or "https://api.openai.com/v1", "chat/completions")
+        text = "".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
+        return text, _chat_truncated(provider, r)
+    url = _endpoint(base or _default_base(provider), "chat/completions")
     msgs = ([{"role": "system", "content": system}] if system else []) + messages
     body = {"model": model, "max_tokens": max_tokens, "messages": msgs}
+    body.update(_compat_extras(provider, cfg))
     if temperature is not None and cfg.get("send_temperature"):
         body["temperature"] = temperature
     headers = {"content-type": "application/json", "authorization": f"Bearer {key}",
                "user-agent": UA}
-    r = _post(url, headers, body, proxy, retries=0) if cfg.get("single_attempt") else _post(url, headers, body, proxy)
-    return r["choices"][0]["message"]["content"].strip()
+    r = _post(url, headers, body, proxy, timeout=timeout, retries=retries)
+    return _openai_text(r), _chat_truncated(provider, r)
+
+
+def chat(system, messages, cfg=None):
+    """messages: [{"role":"user"/"assistant","content":str}]，返回回复文本。
+    provider 决定用 claude / gpt / grok 哪套独立中转(见 creds)。
+    主模型是 grok 时：本模型已含一次重试；仍 5xx/超时则再用 GPT 打一轮。"""
+    cfg = cfg or load_cfg()
+    provider = cfg.get("provider", "claude")
+    try:
+        text, truncated = _chat_once(system, messages, cfg, provider)
+    except Exception as err:
+        if (provider != "grok" or cfg.get("probe") or cfg.get("single_attempt")
+                or cfg.get("no_gpt_fallback") or not _transient_chat_error(err)):
+            raise
+        _, gpt_key, _ = creds(cfg, "gpt")
+        if not gpt_key:
+            raise
+        text, truncated = _chat_once(system, messages, cfg, "gpt")
+        provider = "gpt"
+    if cfg.get("probe") or (cfg.get("max_tokens") or 600) <= 64:
+        return text
+    rounds = 0
+    while truncated and text and rounds < 2:
+        rounds += 1
+        more, truncated = _chat_once(
+            system,
+            list(messages) + [
+                {"role": "assistant", "content": text},
+                {"role": "user", "content": "从被截断处接着写完，不要重复已写内容，只输出续写。"},
+            ],
+            cfg, provider)
+        if not more:
+            break
+        text = (text.rstrip() + more).strip()
+    return text
 
 
 def chat_tools(system, messages, tools, dispatch, cfg=None, max_rounds=6):
     """One explicit route for all tool rounds and finalization; no credential-based fallback.
 
     tools_provider/tools_model override the main route only when explicitly set.
-    GPT uses Chat Completions function calls; Claude uses Messages tool blocks.
+    GPT/Grok use Chat Completions function calls; Claude uses Messages tool blocks.
     Gateway rejection propagates as a limitation/error, never as another model's reply.
     """
     cfg = load_cfg() if cfg is None else cfg
@@ -188,10 +298,10 @@ def chat_tools(system, messages, tools, dispatch, cfg=None, max_rounds=6):
     headers = {"content-type": "application/json", "authorization": f"Bearer {key}", "user-agent": UA}
     if provider == "claude":
         headers.update({"x-api-key": key, "anthropic-version": "2023-06-01"})
-        url = _endpoint(base or "https://api.anthropic.com", "messages")
+        url = _endpoint(base or _default_base(provider), "messages")
         convo = list(messages)
     else:
-        url = _endpoint(base or "https://api.openai.com/v1", "chat/completions")
+        url = _endpoint(base or _default_base(provider), "chat/completions")
         convo = ([{"role": "system", "content": system}] if system else []) + list(messages)
     allowed = {t["name"] for t in tools}
 
@@ -206,7 +316,8 @@ def chat_tools(system, messages, tools, dispatch, cfg=None, max_rounds=6):
     turn = 0
     while turn <= max_rounds:
         final = turn == max_rounds
-        body = {"model": model, "max_tokens": cfg.get("max_tokens", 800), "messages": convo}
+        body = {"model": model, "max_tokens": cfg.get("max_tokens") or 800, "messages": convo}
+        body.update(_compat_extras(provider, cfg))
         if cfg.get("send_temperature") and cfg.get("temperature") is not None:
             body["temperature"] = cfg["temperature"]
         if provider == "claude":
@@ -218,7 +329,8 @@ def chat_tools(system, messages, tools, dispatch, cfg=None, max_rounds=6):
                 "name": t["name"], "description": t.get("description", ""),
                 "parameters": t["input_schema"]}} for t in tools]
         _request_route(provider, model, "tools_final" if final else "tools_round", rid)
-        r = _post(url, headers, body, proxy)
+        r = _post(url, headers, body, proxy, timeout=90 if provider == "grok" else 60,
+                  retries=1 if provider == "grok" else 3)
         if provider == "claude":
             content = r.get("content", [])
             calls = [c for c in content if c.get("type") == "tool_use"]
@@ -233,7 +345,7 @@ def chat_tools(system, messages, tools, dispatch, cfg=None, max_rounds=6):
         else:
             msg = r["choices"][0]["message"]
             calls = msg.get("tool_calls") or []
-            text = (msg.get("content") or "").strip()
+            text = _openai_text(r)
             if calls and not final:
                 convo.append({"role": "assistant", "content": msg.get("content"), "tool_calls": calls})
                 for c in calls:
@@ -281,7 +393,7 @@ def embed(texts, cfg=None):
 def describe_image(img_bytes, media_type="image/jpeg",
                    prompt="用一句中文简短、客观地描述这张图片的主要内容（是什么/在做什么），不要评论、不要猜测。",
                    cfg=None, strict=False):
-    """让多模态模型看图并返回一句中文描述。支持 Claude / OpenAI 视觉。
+    """让多模态模型看图并返回一句中文描述。支持 Claude / GPT / Grok 视觉。
     视觉用哪套中转：cfg['vision_provider'] 指定，缺省跟随主 provider。"""
     import base64
     cfg = cfg or load_cfg()
@@ -303,21 +415,23 @@ def describe_image(img_bytes, media_type="image/jpeg",
             headers = {"content-type": "application/json", "x-api-key": key,
                        "authorization": f"Bearer {key}",
                        "anthropic-version": "2023-06-01", "user-agent": UA}
-            url = _endpoint(base or "https://api.anthropic.com", "messages")
+            url = _endpoint(base or _default_base(provider), "messages")
             r = _post(url, headers, body, proxy)
             return "".join(p.get("text", "") for p in r.get("content", [])
                            if p.get("type") == "text").strip() or None
-        # OpenAI 视觉
+        # OpenAI / Grok 视觉
         model = cfg.get("vision_model") or model0
-        url = _endpoint(base or "https://api.openai.com/v1", "chat/completions")
+        url = _endpoint(base or _default_base(provider), "chat/completions")
         body = {"model": model, "max_tokens": 300, "messages": [{"role": "user",
                 "content": [{"type": "text", "text": prompt},
                             {"type": "image_url", "image_url": {
                              "url": f"data:{media_type};base64,{b64}"}}]}]}
         headers = {"content-type": "application/json",
                    "authorization": f"Bearer {key}", "user-agent": UA}
-        r = _post(url, headers, body, proxy)
-        return r["choices"][0]["message"]["content"].strip() or None
+        body.update(_compat_extras(provider, cfg))
+        r = _post(url, headers, body, proxy, timeout=20 if cfg.get("probe") else (90 if provider == "grok" else 60),
+                  retries=0 if cfg.get("probe") else 1)
+        return _openai_text(r) or None
     except Exception:
         if strict:
             raise RuntimeError("媒体接口请求或响应失败") from None
@@ -362,47 +476,57 @@ def transcribe(audio_bytes, filename="voice.mp3", content_type="audio/mpeg", cfg
         return None
 
 
+IMAGE_FOLLOWS = ("", "gpt", "grok")
+IMAGE_QUALITIES = ("low", "standard", "medium", "auto")
+
+
+def image_block(cfg):
+    return cfg.get("image") if isinstance(cfg.get("image"), dict) else {}
+
+
+def image_follow(cfg):
+    follow = (image_block(cfg).get("follow") or "").strip()
+    return follow if follow in PROVIDERS else ""
+
+
+def image_quality(cfg):
+    sub = image_block(cfg)
+    quality = sub.get("quality") or cfg.get("image_quality") or "low"
+    return quality if isinstance(quality, str) and quality.strip() else "low"
+
+
 def image_creds(cfg):
     """取【画图专用】凭据 (base_url, api_key, model)。
 
-    优先用独立的画图中转 cfg['image'] = {base_url, api_key, model}(推荐：
-    画图往往要单独的能画图的 key/中转，别和聊天文本模型混)。
+    优先用独立的画图中转 cfg['image'] = {base_url, api_key, model, follow}。
+    follow=gpt/grok 时用该聊天中转的 URL/key，模型仍用 image.model。
     没配独立块时，退回 gpt 那套凭据 + cfg['image_model']（默认 gpt-image-1）。
     """
-    sub = cfg.get("image")
-    if isinstance(sub, dict) and (sub.get("api_key") or sub.get("base_url")):
+    sub = image_block(cfg)
+    follow = image_follow(cfg)
+    if follow:
+        base, key, _ = creds(cfg, follow)
+        default = "grok-imagine-image" if follow == "grok" else "gpt-image-1"
+        model = sub.get("model") or cfg.get("image_model") or default
+        return base, key, model
+    if sub.get("api_key") or sub.get("base_url"):
         base = (sub.get("base_url") or "").rstrip("/")
         key = sub.get("api_key") or ""
-        model = sub.get("model") or "gpt-image-1"
+        model = sub.get("model") or cfg.get("image_model") or "gpt-image-1"
         return base, key, model
     base, key, _ = creds(cfg, "gpt")
     model = cfg.get("image_model") or "gpt-image-1"
     return base, key, model
 
 
-def gen_image(prompt, size="1024x1024", cfg=None):
-    """文生图：调 OpenAI 兼容的 images/generations，返回图片 bytes(PNG/JPEG)。
-
-    凭据经 image_creds()：优先独立画图中转 cfg['image']，否则退回 gpt 那套 + image_model。
-    注意：中转可能【未给该 key 开通图像权限】(403 permission_error)——此时抛 RuntimeError，
-    由调用方(draw_image 工具)据此如实告诉对方"画不了/未开通"，绝不静默失败或假装画了。
-    """
-    import base64
-    cfg = cfg or load_cfg()
-    proxy = cfg.get("proxy") or None
+def image_info(cfg):
     base, key, model = image_creds(cfg)
-    if not key:
-        raise RuntimeError("未配置画图中转的 api_key（llm_config.json 的 image 块或 gpt 块）")
-    url = _endpoint(base or "https://api.openai.com/v1", "images/generations")
-    headers = {"content-type": "application/json",
-               "authorization": f"Bearer {key}", "user-agent": UA}
-    quality = "standard"
-    if isinstance(cfg.get("image"), dict):
-        quality = cfg["image"].get("quality") or quality
-    quality = cfg.get("image_quality") or quality
-    r = _post(url, headers, {"model": model, "prompt": prompt, "n": 1, "size": size,
-                             "quality": quality},
-              proxy, timeout=120)
+    return {"follow": image_follow(cfg), "base_url": base, "model": model,
+            "quality": image_quality(cfg), "has_key": bool(key)}
+
+
+def _image_bytes_from_response(r, proxy):
+    import base64
     d = (r.get("data") or [{}])[0]
     if d.get("b64_json"):
         return base64.b64decode(d["b64_json"])
@@ -413,10 +537,70 @@ def gen_image(prompt, size="1024x1024", cfg=None):
     raise RuntimeError("图像生成返回为空")
 
 
+def _grok_image_unavailable(err):
+    text = str(err or "")
+    return "HTTP 503" in text or "No eligible Grok me" in text or "No eligible Grok media" in text
+
+
+def _post_image(prompt, size, cfg, reference, base, key, model, grok_image, quality):
+    import base64
+    proxy = cfg.get("proxy") or None
+    if not key:
+        raise RuntimeError("未配置画图中转的 api_key（llm_config.json 的 image 块或 gpt 块）")
+    headers = {"content-type": "application/json",
+               "authorization": f"Bearer {key}", "user-agent": UA}
+    if reference and not grok_image:
+        url = _endpoint(base or "https://api.openai.com/v1", "images/edits")
+        body = {"model": model, "prompt": prompt, "n": 1, "size": size, "quality": quality,
+                "image": "data:image/jpeg;base64," + base64.b64encode(reference).decode()}
+        try:
+            r = _post(url, headers, body, proxy, timeout=25, retries=0)
+            return _image_bytes_from_response(r, proxy)
+        except Exception:
+            pass
+    url = _endpoint(base or "https://api.openai.com/v1", "images/generations")
+    if grok_image:
+        body = {"model": model, "prompt": prompt, "n": 1,
+                "aspect_ratio": "1:1", "response_format": "b64_json"}
+        if quality and quality != "standard":
+            body["quality"] = quality
+    else:
+        body = {"model": model, "prompt": prompt, "n": 1, "size": size,
+                "quality": quality}
+    r = _post(url, headers, body, proxy, timeout=45, retries=0)
+    return _image_bytes_from_response(r, proxy)
+
+
+def gen_image(prompt, size="1024x1024", cfg=None, reference=None):
+    """文生图：调 OpenAI 兼容的 images/generations，返回图片 bytes(PNG/JPEG)。
+
+    凭据经 image_creds()：优先独立画图中转 cfg['image']，否则退回 gpt 那套 + image_model。
+    Grok 中转 503 / 无可用 media 账号时，改用 GPT 的 gpt-image-1 再画一次。
+    """
+    cfg = cfg or load_cfg()
+    base, key, model = image_creds(cfg)
+    quality = image_quality(cfg)
+    grok_image = "imagine" in (model or "") or image_follow(cfg) == "grok"
+    try:
+        return _post_image(prompt, size, cfg, reference, base, key, model, grok_image, quality)
+    except Exception as e:
+        if not grok_image or not _grok_image_unavailable(e):
+            raise
+        gpt_base, gpt_key, _ = creds(cfg, "gpt")
+        gpt_model = (image_block(cfg).get("gpt_fallback_model")
+                     or cfg.get("gpt_image_model") or "gpt-image-1")
+        if not gpt_key:
+            raise
+        log = logging.getLogger("wxbot.llm")
+        log.warning("Grok image unavailable (%s); falling back to %s", e, gpt_model)
+        return _post_image(prompt, size, cfg, reference, gpt_base, gpt_key, gpt_model,
+                           False, "low")
+
+
 def available():
     cfg = load_cfg()
     provider = cfg.get("provider", "claude")
-    return provider in ("claude", "gpt") and bool(creds(cfg, provider)[1])
+    return provider in PROVIDERS and bool(creds(cfg, provider)[1])
 
 
 if __name__ == "__main__":

@@ -33,14 +33,14 @@ def clipset(v):
 def state():
  pids=run('pgrep','-x','wechat').decode().split()
  if len(pids)!=1:raise RuntimeError('client_count_not_one')
- pid=pids[0];roots={}
+ pid=pids[0];roots={};expected=os.environ.get('WXBOT_XWECHAT_ROOT','/root/xwechat_files')
  for fd in glob.glob('/proc/'+pid+'/fd/*'):
   try:p=os.readlink(fd)
   except OSError:continue
   # Only open, live canonical account DBs. Exclude deleted, backup and all_users.
   if '/db_storage/' not in p:continue
   root,rel=p.split('/db_storage/',1)
-  if os.path.dirname(root)!='/root/xwechat_files' or root.endswith('/all_users'):continue
+  if os.path.dirname(root)!=expected or root.endswith('/all_users'):continue
   if os.path.exists(p):roots.setdefault(root,set()).add(rel)
  candidates=[root for root,rels in roots.items() if {'contact/contact.db','session/session.db','message/message_0.db'}<=rels]
  if len(candidates)!=1:raise RuntimeError('active_account_ambiguous')

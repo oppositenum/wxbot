@@ -26,10 +26,13 @@ CHINA = ZoneInfo('Asia/Shanghai')
 _sync_lock = threading.Lock()
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 DEFAULTS = dict(revision=0, sync_enabled=False, sync_interval_minutes=10,
-                auto_comment=False, auto_publish=False, chat_reflection=False, quiet_start='22:00', quiet_end='08:00',
-                daily_comment_limit=0, daily_publish_limit=1, min_interval_minutes=0,
+                auto_comment=False, auto_publish=False, auto_like=False, chat_reflection=False, quiet_start='22:00', quiet_end='08:00',
+                auto_chat_after_like=False, daily_chat_limit=5, late_night_override=True,
+                daily_comment_limit=0, daily_publish_limit=0, daily_like_limit=0, min_interval_minutes=0,
+                publish_interval_minutes=120,
                 friend_allowlist=[], publish_time='12:30', moods=['喜悦', '平静', '趣事'],
-                comment_since=0, publish_since=0)
+                publish_images=True, publish_web_opinions=True,
+                comment_since=0, publish_since=0, like_since=0, chat_since=0)
 
 
 class Conflict(ValueError):
@@ -43,7 +46,8 @@ class Unavailable(RuntimeError):
 def capabilities():
     from core.moments_native import Native
     ready, reason = Native.capability()
-    return dict(read=True, drafts=True, send=ready, auto_comment=ready, auto_publish=ready, chat_reflection=ready,
+    return dict(read=True, drafts=True, send=ready, auto_comment=ready, auto_publish=ready, auto_like=ready,
+                auto_chat_after_like=ready, chat_reflection=ready,
                 media_preview=False, image_publish=ready, reason=reason)
 
 
@@ -155,36 +159,60 @@ def parse_feed(tid, author, xml):
                 title=_text(t, 'ContentObject/title', 1000), comments=comments, likes=likes)
 
 
-def sync():
-    """Decrypt into a temporary snapshot; commit only after complete validation.
+@contextlib.contextmanager
+def _decrypted_timeline():
+    """Decrypt sns.db into a temporary snapshot and yield a read-only connection.
 
     No GUI navigation, model/network calls or key capture. Account root is pinned.
     """
+    with sessions.bind() as token:
+        base = config.db_storage_dir()
+        if not base or config._strip_folder_suffix(Path(base).parent.name) != token['account']:
+            raise Unavailable('当前账号的数据目录无法确认')
+        src = Path(base) / 'sns/sns.db'
+        if not src.is_file():
+            raise Unavailable('尚未发现朋友圈缓存，请先在微信中打开朋友圈')
+        from core.decrypt import decrypt_db
+        with open(config.keys_json()) as f:
+            key = json.load(f).get('sns/sns.db')
+        if not key:
+            raise Unavailable('当前账号缺少朋友圈读取密钥，请在已有密钥管理中处理')
+        with tempfile.TemporaryDirectory(prefix='wx-moments-') as d:
+            p = str(Path(d) / 'sns.db')
+            decrypt_db(str(src), key, p)
+            with contextlib.closing(sqlite3.connect('file:' + p + '?mode=ro', uri=True)) as c:
+                if c.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+                    raise Unavailable('微信正在同步，缓存快照不完整，请稍后重试')
+                yield c
+
+
+def sync():
+    """Commit the timeline snapshot only after complete validation."""
     if not _sync_lock.acquire(blocking=False):
         raise Conflict('朋友圈正在同步，请稍后刷新')
     try:
-        with sessions.bind() as token:
-            base = config.db_storage_dir()
-            if not base or config._strip_folder_suffix(Path(base).parent.name) != token['account']:
-                raise Unavailable('当前账号的数据目录无法确认')
-            src = Path(base) / 'sns/sns.db'
-            if not src.is_file():
-                raise Unavailable('尚未发现朋友圈缓存，请先在微信中打开朋友圈')
-            from core.decrypt import decrypt_db
-            with open(config.keys_json()) as f:
-                key = json.load(f).get('sns/sns.db')
-            if not key:
-                raise Unavailable('当前账号缺少朋友圈读取密钥，请在已有密钥管理中处理')
-            with tempfile.TemporaryDirectory(prefix='wx-moments-') as d:
-                p = str(Path(d) / 'sns.db')
-                decrypt_db(str(src), key, p)
-                with contextlib.closing(sqlite3.connect('file:' + p + '?mode=ro', uri=True)) as c:
-                    if c.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
-                        raise Unavailable('微信正在同步，缓存快照不完整，请稍后重试')
-                    rows = c.execute('SELECT tid,user_name,content FROM SnsTimeLine').fetchall()
-            return ingest(rows)
+        with _decrypted_timeline() as c:
+            rows = c.execute('SELECT tid,user_name,content FROM SnsTimeLine').fetchall()
+        return ingest(rows)
     finally:
         _sync_lock.release()
+
+
+def raw_content(feed_id):
+    """Just-in-time raw timeline XML for one feed (image url/key live only here).
+
+    Decrypts on demand and returns the single matching row's XML; the url/key it
+    contains are used transiently for media download and never persisted.
+    """
+    fid = _id(feed_id)
+    with _decrypted_timeline() as c:
+        for tid, _user, content in c.execute('SELECT tid,user_name,content FROM SnsTimeLine'):
+            try:
+                if _id(tid) == fid:
+                    return content
+            except (ValueError, TypeError):
+                continue
+    return None
 
 
 def ingest(rows):
@@ -221,7 +249,7 @@ def settings():
 
 
 def save_settings(patch, revision):
-    if not isinstance(patch, dict) or set(patch) - (set(DEFAULTS) - {'revision','comment_since','publish_since'}):
+    if not isinstance(patch, dict) or set(patch) - (set(DEFAULTS) - {'revision','comment_since','publish_since','like_since','chat_since'}):
         raise ValueError('未知设置字段')
     with database() as c:
         c.execute('BEGIN IMMEDIATE')
@@ -230,11 +258,15 @@ def save_settings(patch, revision):
             raise Conflict('设置已更新，请重新加载后保存')
         previous = dict(value)
         value.update(patch)
-        for key in ['sync_enabled', 'auto_comment', 'auto_publish', 'chat_reflection']:
+        for key in ['sync_enabled', 'auto_comment', 'auto_publish', 'auto_like', 'auto_chat_after_like',
+                    'late_night_override', 'chat_reflection', 'publish_images', 'publish_web_opinions']:
             if type(value[key]) is not bool:
                 raise ValueError('开关必须是布尔值')
         for key, lo, hi in [('sync_interval_minutes', 5, 1440), ('daily_comment_limit', 0, 1000),
-                            ('daily_publish_limit', 0, 1000), ('min_interval_minutes', 0, 10080)]:
+                            ('daily_publish_limit', 0, 1000), ('daily_like_limit', 0, 1000),
+                            ('daily_chat_limit', 0, 1000),
+                            ('min_interval_minutes', 0, 10080),
+                            ('publish_interval_minutes', 30, 1440)]:
             if type(value[key]) is not int or not lo <= value[key] <= hi:
                 raise ValueError('频率或数量超出允许范围')
         for key in ['quiet_start', 'quiet_end', 'publish_time']:
@@ -242,10 +274,16 @@ def save_settings(patch, revision):
                 raise ValueError('免打扰时间应为 HH:MM')
         if value['quiet_start'] == value['quiet_end']:
             raise ValueError('免打扰开始和结束时间不能相同')
-        if value['auto_publish']:
+        # Only reject when the user actively moves the publish time INTO the quiet
+        # window. Sliding the quiet window over an unchanged publish_time must not
+        # fail the whole save (that made 免打扰 edits appear to "reset" — the form
+        # posts every field at once, so one rejected field discards them all). The
+        # scheduler already skips auto-publish during quiet hours, so a publish_time
+        # that later falls inside quiet stays consistent at runtime.
+        if value['auto_publish'] and value['publish_time'] != previous['publish_time']:
             a,b,t=value['quiet_start'],value['quiet_end'],value['publish_time']
             if (a<=t<b if a<b else t>=a or t<b):
-                raise Conflict('发布时间处于免打扰时段，请调整时间后保存')
+                raise Conflict('发布时间处于免打扰时段，请调整发布时间后保存')
         friends = value['friend_allowlist']
         if not isinstance(friends, list) or len(friends) > 200 or any(not isinstance(x, str) for x in friends):
             raise ValueError('好友范围无效')
@@ -255,12 +293,12 @@ def save_settings(patch, revision):
             if any(x not in known or x.endswith('@chatroom') for x in friends):
                 raise ValueError('好友不属于当前账号')
         value['friend_allowlist'] = list(dict.fromkeys(friends))
-        if (value['auto_comment'] or value['auto_publish'] or value['chat_reflection']) and not capabilities()['send']:
+        if (value['auto_comment'] or value['auto_publish'] or value['auto_like'] or value['auto_chat_after_like'] or value['chat_reflection']) and not capabilities()['send']:
             raise Unavailable(capabilities()['reason'])
         if not isinstance(value['moods'], list) or not value['moods'] or any(x not in ['喜悦','愤怒','轻微烦躁','平静','趣事','随想'] for x in value['moods']):
             raise ValueError('请选择有效的情绪与话题')
         value['moods'] = list(dict.fromkeys(value['moods']))
-        for flag, watermark in [('auto_comment','comment_since'),('auto_publish','publish_since')]:
+        for flag, watermark in [('auto_comment','comment_since'),('auto_publish','publish_since'),('auto_like','like_since'),('auto_chat_after_like','chat_since')]:
             if value[flag] and not previous[flag]:value[watermark] = time.time()
         value['revision'] += 1
         _set(c, 'settings', value)

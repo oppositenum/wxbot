@@ -58,6 +58,23 @@ class Builder(unittest.TestCase):
         self.assertIn('引用本账号的旧消息', current)
         self.assertIn('对方「chat-A」本次说：这句话是什么意思', current)
 
+    def test_quote_without_type_still_includes_referenced_body(self):
+        quoted = msg(2, '这种是不是更带感', refer={
+            'chatusr':'account-A', 'content':'先前那句具体的话'})
+        _, current, _ = build([], [quoted])
+        self.assertIn('先前那句具体的话', current)
+        self.assertIn('这种是不是更带感', current)
+
+    def test_private_quote_author_falls_back_to_fromusr(self):
+        from core import messages
+        xml = '''<msg><appmsg><title>这种是不是更带感</title><type>57</type>
+        <refermsg><type>1</type><fromusr>account-A</fromusr><chatusr></chatusr>
+        <displayname>bot</displayname><content>先前那句具体的话</content></refermsg></appmsg></msg>'''
+        title, refer = messages._parse_refer(xml)
+        self.assertEqual(title, '这种是不是更带感')
+        self.assertEqual(refer['chatusr'], 'account-A')
+        self.assertEqual(refer['content'], '先前那句具体的话')
+
     def test_group_members_are_labeled_and_only_account_is_assistant(self):
         history, current, _ = build([msg(1,'甲说的',sender='member-A'),
                                     msg(2,'本账号说的',True)], [msg(3,'乙说的',sender='member-B')], True)
@@ -72,6 +89,18 @@ class Builder(unittest.TestCase):
         for i in range(20,45):self.assertEqual(current.count('新消息'+str(i)),1)
         old=msg(1,'服务器编号碰巧等于另条本地编号',True);old['server_id']=20
         self.assertEqual(len(build([old]+batch,batch)[0]),2)
+
+    def test_group_drops_private_register_self_reply_but_keeps_normal_chat(self):
+        dirty = msg(1, '操，宝贝儿你这小逼今天这么欠操', True)
+        normal = msg(2, '海阔天空', True)
+        incoming = msg(3, '不需要吗', sender='wife')
+        history, current, _ = build([dirty, normal, incoming], [incoming], group=True)
+        blob = '\n'.join(m['content'] for m in history) + current
+        self.assertNotIn('小逼', blob)
+        self.assertIn('海阔天空', blob)
+        self.assertIn('不需要吗', current)
+        private_history, _, _ = build([dirty], [incoming], group=False)
+        self.assertIn('小逼', '\n'.join(m['content'] for m in private_history))
 
     def test_scheduled_self_message_is_excluded_but_users_reference_kept(self):
         history, current, _ = build([msg(1,'【定时提醒】合成提醒',True)],
@@ -123,7 +152,7 @@ class Integration(Isolated):
         turns=[{'role':'user','content':'synthetic question'},
                {'role':'assistant','content':'synthetic prior answer'},
                {'role':'user','content':'synthetic new question'}]
-        for provider in ['claude','gpt']:
+        for provider in ['claude','gpt','grok']:
             cfg={'provider':provider,provider:{'api_key':'TEST_ONLY','base_url':'https://example.invalid','model':'test-model'}}
             response=({'content':[{'type':'text','text':'result'}]} if provider=='claude'
                       else {'choices':[{'message':{'content':'result'}}]})
@@ -134,6 +163,10 @@ class Integration(Isolated):
                     body=post.call_args.args[2]
                     actual=[m for m in body['messages'] if m['role']!='system']
                     self.assertEqual(actual,turns)
+                    if provider in ('gpt', 'grok'):
+                        self.assertEqual(body.get('reasoning_effort'), 'low')
+                    else:
+                        self.assertNotIn('reasoning_effort', body)
 
 
 if __name__=='__main__':unittest.main()

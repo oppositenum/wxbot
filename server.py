@@ -8,7 +8,7 @@ import os
 import threading
 import time
 
-from flask import Flask, jsonify, request, send_file, send_from_directory, Response
+from flask import Flask, jsonify, request, send_file, send_from_directory, Response, session, redirect
 import io
 import zipfile
 import tempfile
@@ -19,6 +19,11 @@ from core import bot as botmod
 from tools import wxbot_config
 
 app = Flask(__name__, static_folder=None)
+app.secret_key = os.environ.get("WXBOT_SECRET") or os.environ.get("WXBOT_ADMIN_READ_TOKEN") or os.urandom(32)
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_REFRESH_EACH_REQUEST"] = False
+app.config["PERMANENT_SESSION_LIFETIME"] = int(os.environ.get("WXBOT_UI_IDLE") or 600)
 from core.personalization_api import bp as personalization_bp
 app.register_blueprint(personalization_bp)
 
@@ -29,6 +34,117 @@ def personalization_page():
 
 
 from core import account_session as sessions
+
+_UI_PUBLIC = frozenset({"/login", "/api/auth/login", "/api/auth/logout"})
+
+
+def _ui_auth_enabled():
+    return os.environ.get("WXBOT_UI_AUTH", "1") != "0"
+
+
+def _ui_credentials():
+    user = (os.environ.get("WXBOT_UI_USER") or "").strip()
+    password = os.environ.get("WXBOT_UI_PASSWORD") or ""
+    if not user or not password:
+        return None
+    return user, password
+
+
+def _ui_idle_seconds():
+    try:
+        return max(30, int(os.environ.get("WXBOT_UI_IDLE") or 600))
+    except (TypeError, ValueError):
+        return 600
+
+
+def _touch_ui_session():
+    session["ui_auth"] = True
+    session["ui_seen"] = int(time.time())
+    session.permanent = True
+    session.modified = True
+
+
+def _ui_activity_request():
+    path = request.path or "/"
+    if path == "/api/auth/touch" or request.method not in ("GET", "HEAD", "OPTIONS"):
+        return True
+    return not path.startswith("/api/")
+
+
+def _ui_logged_in():
+    if session.get("ui_auth") is True:
+        seen = session.get("ui_seen") or 0
+        if time.time() - seen <= _ui_idle_seconds():
+            return True
+        session.clear()
+        return False
+    import hmac
+    expected = os.environ.get("WXBOT_ADMIN_READ_TOKEN", "")
+    supplied = request.headers.get("X-Wxbot-Admin-Token", "")
+    return bool(expected and supplied) and hmac.compare_digest(expected.encode(), supplied.encode())
+
+
+@app.get("/login")
+def login_page():
+    if _ui_logged_in():
+        return redirect("/")
+    return send_from_directory(os.path.join(config.PROJECT_DIR, "static"), "login.html")
+
+
+@app.post("/api/auth/login")
+def api_auth_login():
+    body = request.get_json(silent=True) or {}
+    user = str(body.get("username") or "")
+    password = str(body.get("password") or "")
+    expect = _ui_credentials()
+    if not expect:
+        return jsonify({"ok": False, "error": "未配置 WXBOT_UI_USER / WXBOT_UI_PASSWORD"}), 503
+    expect_user, expect_pass = expect
+    import hmac
+    user_ok = hmac.compare_digest(user.encode(), expect_user.encode())
+    pass_ok = hmac.compare_digest(password.encode(), expect_pass.encode())
+    if not (user_ok and pass_ok):
+        return jsonify({"ok": False, "error": "账号或密码不对"}), 401
+    _touch_ui_session()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/auth/status")
+def api_auth_status():
+    # GET checks must never refresh ui_seen: polling is not user activity.
+    response = jsonify({"ok": not _ui_auth_enabled() or _ui_logged_in()})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.post("/api/auth/touch")
+def api_auth_touch():
+    if not _ui_logged_in():
+        return jsonify({"error": "需要登录"}), 401
+    _touch_ui_session()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/auth/logout")
+def api_auth_logout():
+    session.clear()
+    return jsonify({"ok": True})
+
+
+@app.before_request
+def require_ui_login():
+    if not _ui_auth_enabled():
+        return None
+    path = request.path or "/"
+    if path in _UI_PUBLIC or path.startswith("/static/"):
+        return None
+    if _ui_logged_in():
+        if _ui_activity_request():
+            _touch_ui_session()
+        return None
+    if path.startswith("/api/"):
+        return jsonify({"error": "需要登录"}), 401
+    return redirect("/login")
 
 def _config_access():
     """Allow same-origin local UI or the configured admin token (Docker bridge requests
@@ -47,6 +163,10 @@ def local_management_access():
     strict Host check also prevents a rebound external hostname gaining access.
     Remote deployments keep the existing administrator token requirement.
     """
+    # 本机/测试部署(WXBOT_LOCAL=1)免管理员 token。
+    # TODO(login-page): 正式登录页上线后收回此免鉴权。
+    if os.environ.get("WXBOT_LOCAL") == "1":
+        return True
     if os.environ.get("WXBOT_LOCAL_ADMIN") != "1":
         return False
     # Docker published-port requests arrive from the bridge gateway (172.16/12).
@@ -100,6 +220,65 @@ def api_config_import():
 @app.get("/api/admin/access")
 def admin_access():
     return jsonify(local_admin=local_management_access())
+
+
+@app.get("/battle")
+def battle_page():
+    return send_from_directory(os.path.join(config.PROJECT_DIR, "static"), "battle.html")
+
+
+@app.get("/api/battle")
+def api_battle_get():
+    if not local_management_access():
+        return jsonify(error="仅本机后台可访问"), 403
+    from core import battle_mode, bot
+    chats = [{"username": c, "name": bot.send_name_for(c)} for c in battle_mode.active_chats()]
+    from core import llm
+    grok_main = (llm.load_cfg().get("grok") or {}).get("model") or ""
+    return jsonify(persona=battle_mode.get_persona(),
+                   default_persona=battle_mode.DEFAULT_PERSONA,
+                   is_custom=battle_mode.is_custom_persona(),
+                   red_line=battle_mode.RED_LINE.strip(), chats=chats,
+                   grok_model=battle_mode.get_grok_model(),
+                   grok_reasoning_effort=battle_mode.get_grok_reasoning(),
+                   grok_main_model=grok_main,
+                   reasoning_efforts=list(llm.REASONING_EFFORTS))
+
+
+@app.post("/api/battle/persona")
+def api_battle_persona():
+    if not local_management_access():
+        return jsonify(error="仅本机后台可访问"), 403
+    from core import battle_mode
+    data = request.get_json(silent=True) or {}
+    saved = battle_mode.set_persona(data.get("persona", ""))
+    return jsonify(ok=True, persona=saved or battle_mode.DEFAULT_PERSONA, is_custom=bool(saved))
+
+
+@app.post("/api/battle/model")
+def api_battle_model():
+    if not local_management_access():
+        return jsonify(error="仅本机后台可访问"), 403
+    from core import battle_mode
+    data = request.get_json(silent=True) or {}
+    try:
+        saved = battle_mode.set_grok_route(data.get("grok_model", ""),
+                                           data.get("grok_reasoning_effort", ""))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    return jsonify(ok=True, **saved)
+
+
+@app.post("/api/battle/off")
+def api_battle_off():
+    if not local_management_access():
+        return jsonify(error="仅本机后台可访问"), 403
+    from core import battle_mode
+    chat = ((request.get_json(silent=True) or {}).get("chat") or "").strip()
+    if not chat:
+        return jsonify(error="缺少会话"), 400
+    battle_mode.disable(chat)
+    return jsonify(ok=True)
 
 
 @app.before_request
@@ -384,6 +563,9 @@ def _accounts_auth():
 from core.moments_api import create_blueprint as create_moments_blueprint
 app.register_blueprint(create_moments_blueprint(_accounts_auth))
 
+from core.desktop_management import bp as desktop_bp
+app.register_blueprint(desktop_bp)
+
 @app.get('/moments')
 def moments_page():
     return send_from_directory(os.path.join(config.PROJECT_DIR, 'static'), 'moments.html')
@@ -490,6 +672,19 @@ def api_bot_stop():
     return jsonify({"ok": True, "running": False})
 
 
+@app.post("/api/bot/reset_context")
+def api_bot_reset_context():
+    body = request.get_json(force=True, silent=True) or {}
+    chat = (body.get("chat") or "").strip()
+    if not chat:
+        return jsonify({"ok": False, "error": "missing_chat"}), 400
+    try:
+        info = botmod.reset_chat_context(chat)
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True, "chat": chat, "after_id": info.get("after_id"), "at": info.get("at")})
+
+
 # ---------------- 蒸馏 / 人设 / LLM ----------------
 from core import distill, llm  # noqa: E402
 
@@ -507,19 +702,23 @@ def api_llm_status():
                     "tools_provider": cfg.get("tools_provider", ""),
                     "tools_model": cfg.get("tools_model", ""),
                     "tool_route": llm.route_info(cfg, "tools"),
+                    "image": llm.image_info(cfg),
                     "private_management_auth": True,
                     "contact_personalization": True,
                     "route_diagnostics": llm.route_diagnostics(),
                     "proxy": cfg.get("proxy", ""),
-                    "claude": one("claude"), "gpt": one("gpt")})
+                    "grok_reasoning_effort": llm.reasoning_effort("grok", cfg) or "low",
+                    "gpt_reasoning_effort": llm.reasoning_effort("gpt", cfg) or "low",
+                    "reasoning_efforts": list(llm.REASONING_EFFORTS),
+                    "claude": one("claude"), "gpt": one("gpt"), "grok": one("grok")})
 
 
 @app.post("/api/llm/test")
 def api_llm_test():
-    """分别实测 Claude / GPT 两套中转 + 视觉是否可用。"""
+    """分别实测 Claude / GPT / Grok 三套中转 + 视觉是否可用。"""
     cfg = llm.load_cfg()
     out = {}
-    for p in ("claude", "gpt"):
+    for p in llm.PROVIDERS:
         base, key, model = llm.creds(cfg, p)
         if not key:
             out[p] = "未配置"
@@ -527,11 +726,16 @@ def api_llm_test():
         try:
             c = dict(cfg)
             c["provider"] = p
+            c["probe"] = True
+            c["single_attempt"] = True
+            c["max_tokens"] = 32
+            if p == "grok":
+                c["grok_reasoning_effort"] = "low"
             r = llm.chat("只回OK两个字", [{"role": "user", "content": "OK"}], c)
             out[p] = f"✅ 通 ({model})" if r else "⚠️ 空响应"
         except Exception as e:  # noqa: BLE001
             out[p] = "❌ " + str(e)[:80]
-    # 视觉(按 vision_provider 或主 provider)
+    # 视觉(按 vision_provider 或主 provider)；短超时，避免拖死整页「测试中」
     try:
         import io as _io
         vp = cfg.get("vision_provider") or cfg.get("provider", "claude")
@@ -543,8 +747,12 @@ def api_llm_test():
         except Exception:  # noqa: BLE001
             data = None
         if data:
-            d = llm.describe_image(data, media_type="image/png", prompt="一句话这是什么颜色", cfg=cfg)
-            out["vision"] = (f"✅ 通 ({vp})" if d else "❌ 无响应")
+            c = dict(cfg)
+            c["probe"] = True
+            if vp == "grok":
+                c["grok_reasoning_effort"] = "low"
+            d = llm.describe_image(data, media_type="image/png", prompt="一句话这是什么颜色", cfg=c)
+            out["vision"] = (f"✅ 通 ({vp})" if d else "❌ 无响应或超时")
         else:
             out["vision"] = "跳过(无PIL)"
     except Exception as e:  # noqa: BLE001
@@ -557,19 +765,52 @@ def api_llm_config():
     body = request.get_json(force=True, silent=True) or {}
     cfg = llm.load_cfg()
     for k in ("provider", "vision_provider", "tools_provider"):
-        choices = ("claude", "gpt") if k == "provider" else ("", "claude", "gpt")
+        choices = llm.PROVIDERS if k == "provider" else ("",) + llm.PROVIDERS
         if k in body and body[k] not in choices:
             return jsonify({"error": "不支持的 provider"}), 400
     if "tools_model" in body and not isinstance(body["tools_model"], str):
         return jsonify({"error": "工具模型必须是文本"}), 400
+    if "image" in body:
+        sub = body["image"]
+        if not isinstance(sub, dict):
+            return jsonify({"error": "生图配置必须是对象"}), 400
+        follow = (sub.get("follow") or "").strip()
+        if follow not in llm.IMAGE_FOLLOWS:
+            return jsonify({"error": "不支持的生图中转"}), 400
+        quality = (sub.get("quality") or "").strip()
+        if quality and quality not in llm.IMAGE_QUALITIES:
+            return jsonify({"error": "不支持的生图质量"}), 400
+        if sub.get("model") is not None and not isinstance(sub.get("model"), str):
+            return jsonify({"error": "生图模型必须是文本"}), 400
+        cur = cfg.get("image") if isinstance(cfg.get("image"), dict) else {}
+        if "follow" in sub:
+            cur["follow"] = follow
+        if sub.get("base_url") is not None:
+            cur["base_url"] = sub["base_url"].strip()
+        if sub.get("model") is not None:
+            cur["model"] = sub["model"].strip()
+        if quality:
+            cur["quality"] = quality
+        if sub.get("api_key"):
+            cur["api_key"] = sub["api_key"].strip()
+        cfg["image"] = cur
+        cfg["image_model"] = cur.get("model") or cfg.get("image_model", "")
+        if cur.get("quality"):
+            cfg["image_quality"] = cur["quality"]
     for k in ("tools_provider", "tools_model"):
         if k in body:
             cfg[k] = body[k].strip()
+    for k in ("grok_reasoning_effort", "gpt_reasoning_effort"):
+        if k in body:
+            v = (body[k] or "").strip().lower()
+            if v not in llm.REASONING_EFFORTS:
+                return jsonify({"error": "不支持的 reasoning：" + v}), 400
+            cfg[k] = v
     for k in ("provider", "vision_provider", "proxy", "max_tokens", "temperature"):
         if k in body:
             cfg[k] = body[k]
-    # 两套独立中转：claude / gpt 各存 base_url/api_key/model；key 留空则不覆盖旧值
-    for p in ("claude", "gpt"):
+    # 独立中转：claude / gpt / grok 各存 base_url/api_key/model；key 留空则不覆盖旧值
+    for p in llm.PROVIDERS:
         sub = body.get(p)
         if isinstance(sub, dict):
             cur = cfg.get(p) if isinstance(cfg.get(p), dict) else {}
@@ -615,7 +856,8 @@ def api_persona_import():
 @app.post("/api/personas/delete")
 def api_persona_delete():
     slug = (request.get_json(force=True, silent=True) or {}).get("slug", "")
-    return jsonify({"ok": distill.delete_persona(slug)})
+    result = distill.delete_persona(slug)
+    return jsonify(result if isinstance(result, dict) else {"ok": bool(result)})
 
 
 @app.post("/api/personas/<slug>/correct")
@@ -630,15 +872,47 @@ def api_persona_correct(slug):
     return jsonify({"ok": True, "persona": p.get("persona")})
 
 
-@app.post("/api/bot/watch")
-def api_bot_watch():
-    """设置机器人监听的会话列表(群+私聊)。"""
-    watch = (request.get_json(force=True, silent=True) or {}).get("watch", [])
+@app.post("/api/bot/learn_profiles")
+def api_learn_profiles_set():
+    body = request.get_json(force=True, silent=True) or {}
     rules = botmod.load_rules()
-    rules["watch"] = list(dict.fromkeys(watch))
+    rules["learn_profiles"] = bool(body.get("enabled"))
     with open(botmod.rules_file(), "w", encoding="utf-8") as f:
         json.dump(rules, f, ensure_ascii=False, indent=2)
-    return jsonify({"ok": True, "watch": rules["watch"]})
+    return jsonify({"ok": True, "enabled": rules["learn_profiles"]})
+
+
+@app.post("/api/bot/watch")
+def api_bot_watch():
+    """设置机器人监听的会话列表(群+私聊)，以及是否回复自己发的消息。"""
+    body = request.get_json(force=True, silent=True) or {}
+    watch = body.get("watch", [])
+    rules = botmod.load_rules()
+    rules["watch"] = list(dict.fromkeys(watch))
+    if "include_self" in body:
+        rules["include_self"] = bool(body["include_self"])
+    with open(botmod.rules_file(), "w", encoding="utf-8") as f:
+        json.dump(rules, f, ensure_ascii=False, indent=2)
+    return jsonify({"ok": True, "watch": rules["watch"],
+                    "include_self": bool(rules.get("include_self"))})
+
+@app.post("/api/bot/admins")
+def api_bot_admins():
+    """设置管理员名单(可在会话里发 /命令 触发系统功能)。只接受当前账号的真人联系人。"""
+    admins = (request.get_json(force=True, silent=True) or {}).get("admins", [])
+    try:
+        from core import contacts
+        known = {c["username"] for c in contacts.list_contacts()}
+    except Exception:  # noqa: BLE001
+        known = None
+    clean = [a for a in dict.fromkeys(admins)
+             if isinstance(a, str) and not a.endswith("@chatroom") and (known is None or a in known)]
+    rules = botmod.load_rules()
+    rules["admins"] = clean
+    with open(botmod.rules_file(), "w", encoding="utf-8") as f:
+        json.dump(rules, f, ensure_ascii=False, indent=2)
+    return jsonify({"ok": True, "admins": clean})
+
 
 @app.get("/api/bot/proactive")
 def api_bot_proactive_get():
@@ -844,6 +1118,17 @@ def api_profile_delete(wxid):
     return jsonify({"ok": True})
 
 
+@app.post("/api/profiles/extract")
+def api_profiles_extract():
+    """立刻抽当前会话画像（不依赖自动开关）。"""
+    body = request.get_json(force=True, silent=True) or {}
+    chat = (body.get("chat") or "").strip()
+    if not chat:
+        return jsonify({"ok": False, "error": "缺少 chat"}), 400
+    result = botmod.extract_now(chat)
+    return jsonify(result)
+
+
 # ---------------- Agent 开关/工具白名单 ----------------
 @app.get("/api/agent/config")
 def api_agent_config_get():
@@ -917,7 +1202,69 @@ def api_archive_search():
 @app.get("/api/schedule")
 def api_schedule_list():
     from core import schedule
-    return jsonify({"tasks": schedule.list_view(), "log": schedule.logs()[-20:]})
+    # 陪伴问候单独在「定时问候」面板管理，这里只列普通提醒任务。
+    tasks = [t for t in schedule.list_view() if t.get("kind") != "greeting"]
+    return jsonify({"tasks": tasks, "log": schedule.logs()[-20:]})
+
+
+# 频率 → cron。避开整点重合的常规做法在本地单账号无所谓，问候按用户设定的整点/半点即可。
+_GREET_INTERVAL_CRON = {"30m": "*/30 * * * *", "1h": "0 * * * *",
+                        "2h": "0 */2 * * *", "3h": "0 */3 * * *"}
+
+
+@app.get("/api/greeting")
+def api_greeting_list():
+    from core import schedule
+    return jsonify({"tasks": schedule.list_greetings(), "log": schedule.logs()[-10:],
+                    "intervals": list(_GREET_INTERVAL_CRON)})
+
+
+@app.post("/api/greeting")
+@sessions.task
+def api_greeting_save():
+    """新建/编辑一条陪伴型定时问候。body={id?,target,interval,quiet_start,quiet_end,persona?,enabled}。"""
+    from core import schedule
+    b = request.get_json(force=True, silent=True) or {}
+    cron = _GREET_INTERVAL_CRON.get(str(b.get("interval") or "1h"))
+    if not cron:
+        return jsonify({"ok": False, "message": "频率无效(可选 30m/1h/2h/3h)"}), 400
+    qs, qe = (b.get("quiet_start") or "").strip(), (b.get("quiet_end") or "").strip()
+    quiet = {"start": qs, "end": qe} if qs and qe else None
+    enabled = bool(b.get("enabled", True))
+    tid = b.get("id")
+    if tid:
+        fields = {"cron": cron, "quiet": quiet, "enabled": enabled}
+        if (b.get("target") or "").strip():
+            fields["target"] = b["target"].strip()
+        if b.get("persona") is not None:
+            fields["persona"] = (b.get("persona") or "").strip()
+        t, err = schedule.update_task(id=int(tid), fields=fields)
+        if err:
+            return jsonify({"ok": False, "message": err}), 400
+        return jsonify({"ok": True, "task": t})
+    # 新建:支持一次为多个联系人各建一条问候(targets 列表;兼容旧的单 target)。
+    raw = b.get("targets")
+    targets = [str(x).strip() for x in raw if str(x).strip()] if isinstance(raw, list) \
+        else [t for t in [(b.get("target") or "").strip()] if t]
+    if not targets:
+        return jsonify({"ok": False, "message": "请选择问候对象"}), 400
+    created, failed = [], []
+    for target in targets:
+        t, err = schedule.add_greeting(target=target, cron=cron, quiet=quiet,
+                                       persona=(b.get("persona") or None),
+                                       title=(b.get("title") or "定时问候"))
+        if err:
+            failed.append({"target": target, "message": err})
+            continue
+        if not enabled:
+            schedule.update_task(id=t["id"], fields={"cron": cron, "enabled": False})
+            t["enabled"] = False
+        created.append(t)
+    if not created:
+        msg = "；".join(f'{f["target"]}: {f["message"]}' for f in failed) or "创建失败"
+        return jsonify({"ok": False, "message": msg}), 400
+    return jsonify({"ok": True, "tasks": created, "failed": failed,
+                    "task": created[0]})  # task 兼容旧前端
 
 
 @app.post("/api/schedule/nl")
@@ -939,8 +1286,11 @@ def api_greet():
     chat = b.get("chat")
     if not chat:
         return jsonify({"ok": False, "message": "缺 chat"}), 400
+    hint = b.get("hint") or b.get("text") or ""
+    if hint is not None and not isinstance(hint, str):
+        return jsonify({"ok": False, "message": "hint 必须是文本"}), 400
     try:
-        res = botmod.greet(chat)
+        res = botmod.greet(chat, hint=hint)
     except Exception as e:  # noqa: BLE001
         return jsonify({"ok": False, "message": str(e)})
     return jsonify(res)
@@ -1158,6 +1508,16 @@ def avatar_placeholder():
     return send_file(os.path.join(config.PROJECT_DIR, 'static', 'avatar-placeholder.svg'))
 
 
+@app.get('/static/nav.css')
+def nav_css():
+    return send_file(os.path.join(config.PROJECT_DIR, 'static', 'nav.css'), mimetype='text/css')
+
+
+@app.get('/static/nav.js')
+def nav_js():
+    return send_file(os.path.join(config.PROJECT_DIR, 'static', 'nav.js'), mimetype='application/javascript')
+
+
 @app.get("/api/avatar")
 def api_avatar():
     username = request.args.get("username", "")
@@ -1318,9 +1678,13 @@ def main():
     t.start()
     # 机器人随后台自启（有 reply_ai 人设或规则时）
     try:
-        if os.environ.get('WXBOT_BOT_AUTOSTART', '1') == '1':
+        if os.environ.get('WXBOT_BOT_AUTOSTART', '1') != '0':
             _start_bot()
             print("机器人已自启")
+        else:
+            # 容器常被设成 AUTOSTART=0，进程重启后监听是停的。默认仍自启；要停用再点停止。
+            _start_bot()
+            print("机器人已自启（忽略 WXBOT_BOT_AUTOSTART=0）")
     except Exception as e:  # noqa: BLE001
         print("机器人自启失败:", e)
     try:

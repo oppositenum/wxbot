@@ -25,10 +25,11 @@ FIELDS = {
     'address': None, 'language': None, 'dislikes': None,
 }
 LABELS = dict(zip(FIELDS, ['回复长度', '表达方式', '表情符号', '玩笑', '建议方式', '追问', '称呼', '语言', '反感表达']))
-BEHAVIOR = ('【通用要求】真实、切题，不能编造共同经历或角色经历作为现实事实。'
-            '当前明确请求决定本轮任务和长度，优先于交流偏好。角色决定机器人是谁，偏好仅辅助表达。'
+BEHAVIOR = ('【通用要求】真实、切题。不要把角色经历说成这个微信账号的现实履历，也不要编造对方的现实身份、工作、家庭或共同经历；'
+            '当前角色允许的扮演、调情、亲密称呼、主动推进和虚构场景，按角色正文执行，不要用客服腔改写成礼貌助手。'
+            '当前明确请求决定本轮任务；交流偏好只辅助表达，不能盖过角色正文。'
             '旧机器人回复只供理解对话，不是当前角色指令。事实记忆不因角色切换失效。'
-            '不主动翻旧事、不报告画像标签、不强制追问、安慰或昵称。对方结束交流时尊重其意愿。')
+            '不报告画像标签。对方明确结束或喊停时尊重其意愿。')
 DEFAULT_PERSONA = {'name': '内置助手', 'persona': '你是一个友善、诚实、尊重边界的聊天助手。', 'samples': []}
 
 
@@ -88,7 +89,8 @@ def _db(write=False):
 
 def _default():
     return dict(persona_id=None, personalization_enabled=False, auto_update=False,
-                conversation_control_enabled=False, preferences={}, revision=0)
+                conversation_control_enabled=False, agent_enabled=True,
+                skip_closing_replies=True, preferences={}, revision=0)
 
 
 def _get(con, contact):
@@ -105,6 +107,10 @@ def _get(con, contact):
             raise ValueError()
         if any(not isinstance(data.get(k, False), bool) for k in
                ('auto_update', 'personalization_enabled', 'conversation_control_enabled')):
+            raise ValueError()
+        if 'agent_enabled' in data and not isinstance(data.get('agent_enabled'), bool):
+            raise ValueError()
+        if 'skip_closing_replies' in data and not isinstance(data.get('skip_closing_replies'), bool):
             raise ValueError()
         _slug(data.get('persona_id'))
         for field, pref in data.get('preferences', {}).items():
@@ -148,7 +154,8 @@ def _template_target(contact):
 
 def _template_values(template, contact):
     data = _default()
-    for key in ('persona_id', 'personalization_enabled', 'auto_update', 'conversation_control_enabled'):
+    for key in ('persona_id', 'personalization_enabled', 'auto_update',
+                'conversation_control_enabled', 'agent_enabled', 'skip_closing_replies'):
         data[key] = template.get(key, data[key])
     data['configured_features'] = ['personalization_enabled', 'auto_update', 'conversation_control_enabled']
     data['preferences'] = {k: dict(value=v['value'], locked=v.get('locked', False),
@@ -212,18 +219,23 @@ def _slug(slug):
 @sessions.task
 def update(contact, patch, revision):
     _id(contact)
-    if set(patch) - {'persona_id', 'personalization_enabled', 'auto_update', 'conversation_control_enabled', 'preferences'}:
+    if set(patch) - {'persona_id', 'personalization_enabled', 'auto_update',
+                     'conversation_control_enabled', 'agent_enabled',
+                     'skip_closing_replies', 'preferences'}:
         raise ValueError('未知设置字段')
     with _db(True) as con:
         data = _get(con, contact)
         if data['revision'] != revision:
             raise Conflict('配置已被修改，请刷新后重试')
         data.pop('config_error', None)
-        for key in ('persona_id', 'personalization_enabled', 'auto_update', 'conversation_control_enabled'):
+        for key in ('persona_id', 'personalization_enabled', 'auto_update',
+                    'conversation_control_enabled', 'agent_enabled', 'skip_closing_replies'):
             if key in patch:
                 v = patch[key]
                 if key == 'persona_id':
                     _slug(v)
+                    if v and not _persona_exists(v):
+                        raise ValueError('所选人设不存在')
                 elif not isinstance(v, bool):
                     raise ValueError('开关必须是布尔值')
                 data[key] = v
@@ -301,17 +313,182 @@ def resolve_persona(contact, rules=None, rule=None):
                 legacy=inv, managed=bool(global_['revision']))
 
 
+_SWITCH_INTENT = re.compile(
+    r'换|切到|切成|当成|当回|还是当|变成|改成|换成|扮演|人设|用一下|给我当|做回|变回')
+_ADULT_CUES = re.compile(
+    r'想做了|想要了|来做[啊呀吧]?|开荤|想色色|想做爱|想被操|想上床|进入状态|开车|'
+    r'黄一点|骚一点|成人模式|想浪|想被干|做爱')
+_ADULT_PREF = ('成人3', '夏以昼成人', '成人2', '成人', '成人男友', '成人女友')
+
+
+def catalog():
+    rows = []
+    try:
+        rows = distill.list_personas() or []
+    except Exception:
+        rows = []
+    out = []
+    for row in rows:
+        slug = row.get('slug') or ''
+        name = row.get('name') or slug
+        aliases = {slug, name}
+        if slug.endswith('成人') and len(slug) > 2:
+            aliases.add(slug[:-2] + '的成人')
+            aliases.add('成人' + slug[:-2])
+        out.append({'slug': slug, 'name': name, 'aliases': aliases})
+    return out
+
+
+def match_switch(text, current=None):
+    """对方点名人设则切；没点名但要开荤且当前不是成人向，切到可用的成人人设。"""
+    t = (text or '').replace(' ', '')
+    if not t:
+        return None
+    pairs = []
+    for item in catalog():
+        for alias in item['aliases']:
+            if alias and len(alias) >= 2:
+                pairs.append((alias, item['slug'], item['name']))
+    pairs.sort(key=lambda x: -len(x[0]))
+    named = None
+    if _SWITCH_INTENT.search(t):
+        for alias, slug, name in pairs:
+            if alias in t:
+                named = slug
+                break
+    if named and named != current:
+        return named
+    if named == current:
+        return None
+    if current and '成人' in (current or ''):
+        return None
+    if not _ADULT_CUES.search(t):
+        return None
+    have = {item['slug'] for item in catalog()}
+    for slug in _ADULT_PREF:
+        if slug in have and slug != current:
+            return slug
+    return None
+
+
+@sessions.task
+def maybe_switch(contact, text, *, is_group=None):
+    """按这句切换专属人设。成功返回 {slug,name,persona}，否则 None。
+
+    只改私聊绑定。群里即使正在回某个私聊对象，也不能把她的私聊人设切走或套进来。
+    """
+    if is_group is None:
+        is_group = bool(contact and str(contact).endswith('@chatroom'))
+    if not contact or is_group:
+        return None
+    data = get(contact)
+    current = data.get('persona_id')
+    slug = match_switch(text, current)
+    if not slug or slug == current or not _persona_exists(slug):
+        return None
+    try:
+        update(contact, {'persona_id': slug}, data['revision'])
+    except Conflict:
+        data = get(contact)
+        if data.get('persona_id') == slug:
+            pass
+        else:
+            update(contact, {'persona_id': slug}, data['revision'])
+    p = distill.load_persona(slug)
+    if not p:
+        return None
+    return {'slug': slug, 'name': p.get('name') or slug, 'persona': p}
+
+
+def _persona_exists(slug):
+    if not slug:
+        return False
+    try:
+        p = distill.load_persona(slug)
+        return isinstance(p, dict) and isinstance(p.get('persona'), str) and bool(p['persona'].strip())
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+@sessions.task
+def detach_persona(slug):
+    """Drop bindings to a deleted persona. Does not restore another role.
+
+    Contact/global/template records become inherit/unset; reply rules and
+    schedule tasks lose the explicit slug. Reply then uses remaining global,
+    leftover rules, or the built-in assistant — never a missing file.
+    """
+    slug = _slug(slug)
+    if not slug:
+        return dict(contacts=0, global_=False, template=False, rules=0, schedules=0)
+    released = dict(contacts=0, global_=False, template=False, rules=0, schedules=0)
+    if os.path.exists(_path()):
+        with _db(True) as con:
+            rows = con.execute('SELECT contact,revision,data FROM settings').fetchall()
+            for row in rows:
+                contact = row['contact']
+                try:
+                    stored = json.loads(row['data'])
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(stored, dict) or stored.get('persona_id') != slug:
+                    continue
+                data = _get(con, contact)
+                if data.get('config_error'):
+                    continue
+                data['persona_id'] = None
+                _put(con, contact, data, 'persona_deleted')
+                if contact == '__global__':
+                    released['global_'] = True
+                elif contact == '__default_template__':
+                    released['template'] = True
+                else:
+                    released['contacts'] += 1
+    from core import bot
+    rules_path = bot.rules_file()
+    if os.path.exists(rules_path):
+        with open(rules_path, encoding='utf-8') as fp:
+            rules = json.load(fp)
+        changed = 0
+        for rule in rules.get('rules') or []:
+            action = rule.get('action') if isinstance(rule, dict) else None
+            if isinstance(action, dict) and action.get('type') == 'reply_ai' and action.get('persona') == slug:
+                action['persona'] = ''
+                changed += 1
+        if changed:
+            with open(rules_path, 'w', encoding='utf-8') as fp:
+                json.dump(rules, fp, ensure_ascii=False, indent=2)
+            released['rules'] = changed
+    from core import schedule
+    try:
+        tasks = schedule.load_tasks()
+    except Exception:
+        tasks = []
+    sched = 0
+    for task in tasks:
+        if isinstance(task, dict) and task.get('persona') == slug:
+            task['persona'] = None
+            sched += 1
+    if sched:
+        schedule.save_tasks(tasks)
+        released['schedules'] = sched
+    return released
+
+
 @sessions.task
 def set_global(slug, revision, rules):
     """Explicit, auditable migration. Conflicts require manual rule reconciliation."""
     _slug(slug)
+    if slug and not _persona_exists(slug):
+        raise ValueError('所选人设不存在')
     inv = legacy_inventory(rules)
     current = get('__global__')
     if current.get('config_error'):
         raise Conflict('全局存储损坏，需要恢复备份，不能自动迁移')
     if not current['revision'] and inv['conflict']:
         raise Conflict('旧规则人设冲突，请先逐项核对；不能自动迁移')
-    if not current['revision'] and inv['unique'] and slug != inv['unique']:
+    if (not current['revision'] and inv['unique'] and slug != inv['unique']
+            and _persona_exists(inv['unique'])):
         raise Conflict('首次迁移必须保留当前唯一规则人设；完成迁移后可更改全局')
     with _db(True) as con:
         data = _get(con, '__global__')

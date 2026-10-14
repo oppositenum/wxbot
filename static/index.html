@@ -4,17 +4,22 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>wxbot 微信后台</title>
+<link rel="stylesheet" href="/static/nav.css">
 <style>
-  :root { --bg:#f5f6f7; --panel:#fff; --line:#e4e6eb; --brand:#07c160; --muted:#8a8f99; }
+  :root { --bg:#f5f7f4; --panel:#fff; --line:#e4e9e5; --brand:#23815a; --muted:#748078; }
   * { box-sizing:border-box; }
   body { margin:0; font:14px/1.5 -apple-system,"PingFang SC",sans-serif; background:var(--bg); color:#1d1f23; }
   header { flex-wrap:wrap; display:flex; align-items:center; gap:14px; padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--line); }
-  header h1 { font-size:15px; margin:0; }
+  header h1 { font-size:15px; margin:0 4px 0 0; font-weight:600; }
+  header .hgroup { display:flex; align-items:center; gap:6px; padding:5px 10px 5px 8px; border:1px solid var(--line); border-radius:10px; background:#fafbfc; }
+  header .hgroup > .glabel { font-size:11px; color:var(--muted); font-weight:600; margin-right:2px; white-space:nowrap; }
   .dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:5px; }
   .ok{background:var(--brand)} .bad{background:#e0554e} .warn{background:#e6a23c}
   .pill { background:#f0f1f3; border-radius:12px; padding:3px 10px; font-size:12px; color:#555; }
-  button { font:inherit; border:none; border-radius:6px; padding:6px 12px; cursor:pointer; background:#eaecef; }
-  button.primary { background:var(--brand); color:#fff; }
+  button { font:inherit; border:1px solid var(--line); border-radius:7px; padding:6px 12px; cursor:pointer; background:#fff; color:#24362e; }
+  button:hover { background:#edf3ee; }
+  button.primary { background:var(--brand); color:#fff; border-color:var(--brand); }
+  button.primary:hover { background:#1e704e; }
   button:disabled { opacity:.5; cursor:default; }
   body { height:100vh; display:flex; flex-direction:column; }
   main { flex:1; min-height:0; display:grid; grid-template-columns:300px 1fr; height:auto; }
@@ -27,7 +32,7 @@
   .list { overflow-y:auto; flex:1; }
   .row { display:flex; align-items:center; gap:9px; padding:9px 11px; cursor:pointer; border-bottom:1px solid #f2f3f5; }
   .row:hover { background:#f7f8fa; }
-  .row.active { background:#eaf7ef; }
+  .row.active { background:#eaf5ef; }
   .avatar { width:36px; height:36px; border-radius:6px; background:#dcdfe4; flex:none; object-fit:cover; }
   .row .name { font-weight:500; }
   .row .sub { color:var(--muted); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:200px; }
@@ -48,35 +53,74 @@
   .empty { color:var(--muted); text-align:center; margin-top:40px; }
   .members { position:fixed; right:0; top:53px; bottom:0; width:280px; background:#fff; border-left:1px solid var(--line); box-shadow:-4px 0 12px rgba(0,0,0,.06); overflow-y:auto; padding:12px; display:none; }
   .members.show { display:block; }
+  .panel-close { position:sticky; top:0; z-index:1; display:flex; justify-content:flex-end; padding:0 0 8px; color:#748078; cursor:pointer; font-size:12px; background:#fff; }
   .members h3 { margin:4px 0 10px; font-size:14px; }
   .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#333; color:#fff; padding:9px 16px; border-radius:8px; opacity:0; transition:.3s; pointer-events:none; }
+  #greetBox { position:fixed; left:50%; top:22%; transform:translateX(-50%); width:min(420px,92vw); background:#fff; border:1px solid var(--line); border-radius:10px; box-shadow:0 8px 30px rgba(0,0,0,.12); padding:14px 16px; z-index:950; display:none; }
+  #greetBox.show { display:block; }
+  #greetBox textarea { width:100%; min-height:88px; padding:8px; border:1px solid var(--line); border-radius:6px; resize:vertical; font:inherit; margin:8px 0; }
   .toast.show { opacity:.95; }
   .lightbox { position:fixed; inset:0; background:rgba(0,0,0,.85); display:none; align-items:center; justify-content:center; z-index:1000; cursor:zoom-out; }
   .lightbox.show { display:flex; }
   .lightbox img { max-width:92%; max-height:92%; border-radius:4px; box-shadow:0 4px 30px rgba(0,0,0,.5); }
+  @media (max-width:820px){
+    header{align-items:stretch;padding:10px;gap:8px}
+    header h1{padding:4px 2px}
+    header .hgroup{flex:1 1 100%; flex-wrap:wrap; padding:6px 8px; gap:5px}
+    header .hgroup > .glabel{width:100%; margin:0 0 1px}
+    header .hgroup button{flex:1 1 auto; min-height:36px}
+    header > .pill{align-self:flex-start}
+    main{display:flex;flex-direction:column;height:auto;min-height:calc(100dvh - 52px)}
+    .side{height:34dvh;min-height:190px;max-height:330px;border-right:0;border-bottom:1px solid var(--line)}
+    .content{height:66dvh;min-height:430px}
+    .chat-head{padding:10px 12px}
+    .msgs{padding:12px 10px}
+    .msg{max-width:90%}
+    .composer{padding:8px;flex-wrap:wrap}
+    .composer input[type=text]{flex:1 1 calc(100% - 78px);min-width:0}
+    .composer #sendBtn{flex:1}
+    .members{top:52px;width:min(300px,calc(100vw - 12px));}
+    #greetBox{top:12%;}
+  }
+  @media (max-width:420px){
+    .tabs div{padding:8px 3px;font-size:12px}
+    .side{min-height:170px}
+    .content{min-height:410px}
+    .composer input[type=text]{flex-basis:100%}
+  }
 </style>
 </head>
 <body>
 <header>
-  <h1>wxbot 微信后台</h1>
-  <span class="pill" id="loginState">加载中…</span>
-  <span class="pill" id="keyState"></span>
-  <span class="pill" id="syncState"></span>
-  <button id="loginBtn">扫码登录(noVNC)</button>
-  <button id="keyBtn">刷新密钥</button>
-  <button id="imgKeyBtn" title="切换微信账号后,注入抓取该账号的图片解密密钥">抓图片密钥</button>
-  <button id="syncBtn">立即同步</button>
-  <button id="botBtn">机器人：…</button>
-  <button id="aiBtn">蒸馏/AI</button>
-  <button id="personalizationBtn" class="primary">画像与人设</button>
-  <button id="watchBtn">监听设置</button>
-  <button id="followBtn">跟发设置</button>
-  <button id="pushBtn">监听推送</button>
-  <button id="scheduleBtn">定时任务</button>
-  <button id="accountsBtn">多账号管理</button>
-  <button onclick="location.href='/moments'">朋友圈</button>
-  <button id="configExportBtn">导出配置</button>
-  <button id="configImportBtn">导入配置</button><input id="configImportFile" type="file" accept=".zip" hidden>
+  <h1>会话</h1>
+  <div class="hgroup"><span class="glabel">连接</span>
+    <span class="pill" id="loginState">加载中…</span>
+    <span class="pill" id="keyState"></span>
+    <span class="pill" id="syncState"></span>
+    <button id="loginBtn">扫码登录(noVNC)</button>
+    <button id="keyBtn">刷新密钥</button>
+    <button id="imgKeyBtn" title="切换微信账号后,注入抓取该账号的图片解密密钥">抓图片密钥</button>
+    <button id="syncBtn">立即同步</button>
+  </div>
+  <div class="hgroup"><span class="glabel">机器人</span>
+    <button id="botBtn">机器人：…</button>
+    <button id="aiBtn">蒸馏/AI</button>
+    <button id="personalizationBtn" class="primary">画像与人设</button>
+  </div>
+  <div class="hgroup"><span class="glabel">规则</span>
+    <button id="watchBtn">监听设置</button>
+    <button id="followBtn">跟发设置</button>
+    <button id="pushBtn">监听推送</button>
+    <button id="adminBtn">管理员设置</button>
+  </div>
+  <div class="hgroup"><span class="glabel">定时</span>
+    <button id="scheduleBtn">定时任务</button>
+    <button id="greetBtnPanel">定时问候</button>
+  </div>
+  <div class="hgroup"><span class="glabel">配置</span>
+    <button id="configExportBtn">导出配置</button>
+    <button id="configImportBtn">导入配置</button><input id="configImportFile" type="file" accept=".zip" hidden>
+  </div>
   <span class="pill" id="mediaState">媒体：连接中</span>
 </header>
 <main>
@@ -94,6 +138,7 @@
     <div class="chat-head">
       <span id="chatTitle">未选择会话</span>
       <span style="display:flex;gap:8px">
+        <button id="resetCtxBtn" style="display:none" title="丢掉本会话旧上下文，之后只用人设和这之后的新消息回复">清理上下文</button>
         <button id="harvestBtn" style="display:none" title="重新检查已经接收到本地的媒体文件">更新媒体</button>
         <button id="membersBtn" style="display:none">群成员</button>
       </span>
@@ -110,12 +155,25 @@
 <div class="members" id="membersPanel"></div>
 <div class="members" id="aiPanel" style="width:340px"></div>
 <div class="members" id="watchPanel" style="width:340px"></div>
+<div class="members" id="adminPanel" style="width:360px"></div>
 <div class="members" id="followPanel" style="width:340px"></div>
 <div class="members" id="pushPanel" style="width:380px"></div>
 <div class="members" id="schedulePanel" style="width:380px"></div>
+<div class="members" id="greetPanel" style="width:380px"></div>
 <div id="personalizationPane" hidden style="position:fixed;inset:0;z-index:900;background:var(--bg)">
   <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 20px;background:white;border-bottom:1px solid var(--line)"><strong>联系人画像与专属人设</strong><button id="closePersonalization">返回聊天</button></div>
   <iframe id="personalizationFrame" title="联系人画像与专属人设管理" style="width:100%;flex:1;min-height:0;border:0"></iframe>
+</div>
+<div id="greetBox">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+    <strong>打招呼</strong>
+    <button type="button" id="greetCancel">取消</button>
+  </div>
+  <div class="sub" id="greetWho" style="margin-top:4px"></div>
+  <textarea id="greetHint" placeholder="可空。不填：自动打招呼。填了：当作你自己想说的话再写丰发出。「继续/你自己开发/你来弄/多发几次」默认连发 3 条；写了次数按次数，最多 10 条。"></textarea>
+  <div style="display:flex;gap:8px;justify-content:flex-end">
+    <button type="button" class="primary" id="greetSend">生成并发送</button>
+  </div>
 </div>
 <div class="toast" id="toast"></div>
 <div class="lightbox" id="lightbox" onclick="this.classList.remove('show')"><img id="lightboxImg" src=""></div>
@@ -126,6 +184,34 @@ let tab = "sessions", data = {sessions:[],contacts:[],groups:[],other:[]}, curre
 document.addEventListener('DOMContentLoaded',()=>{const b=document.querySelector('#accountsBtn');if(b)b.onclick=()=>{location.href='/accounts';};});
 
 function toast(m){ const t=$("#toast"); t.textContent=m; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),2200); }
+let greetTarget=null, greetBtnEl=null;
+function closeGreet(){ $("#greetBox").classList.remove("show"); greetTarget=null; if(greetBtnEl){ greetBtnEl.disabled=false; greetBtnEl.textContent="👋"; } greetBtnEl=null; }
+function openGreet(chat, name, btn){
+  greetTarget=chat; greetBtnEl=btn;
+  $("#greetWho").textContent="发给 "+(name||chat);
+  $("#greetHint").value="";
+  $("#greetBox").classList.add("show");
+  $("#greetHint").focus();
+}
+async function submitGreet(){
+  if(!greetTarget) return;
+  const chat=greetTarget, hint=$("#greetHint").value.trim();
+  const sendBtn=$("#greetSend");
+  sendBtn.disabled=true;
+  if(greetBtnEl){ greetBtnEl.disabled=true; greetBtnEl.textContent="⏳"; }
+  toast(hint ? "按你写的内容生成打招呼…" : "AI 生成打招呼并发送中…");
+  try{
+    const r=await (await fetch("/api/greet",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat, hint})})).json();
+    toast(r.ok ? ((r.verified?"已确认发送: ":"已提交微信: ")+(r.message||"").slice(0,30)) : ((r.status==="uncertain"?"待核对: ":"未发送: ")+(r.message||r.reason||"请求未完成")));
+  }catch(err){ toast("打招呼出错: "+err); }
+  sendBtn.disabled=false;
+  closeGreet();
+}
+document.addEventListener("DOMContentLoaded",()=>{
+  const cancel=$("#greetCancel"), send=$("#greetSend");
+  if(cancel) cancel.onclick=closeGreet;
+  if(send) send.onclick=submitGreet;
+});
 function fmtTime(ts){ if(!ts) return ""; const d=new Date(ts*1000); return d.toLocaleString("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}); }
 function avatarURL(u){ return "/api/avatar?username="+encodeURIComponent(u); }
 
@@ -179,22 +265,12 @@ function render(){
     div.className="row"+(current&&current.username===u?" active":"");
     const unread = x.unread || 0;
     const badge = unread > 0 ? `<div class="badge">${unread>99?'99+':unread}</div>` : "";
-    const greetBtn = (tab==="sessions") ? `<button class="greetBtn" title="AI按上下文打个招呼" style="border:none;background:none;font-size:16px;cursor:pointer;padding:2px 6px;flex-shrink:0">👋</button>` : "";
+    const greetBtn = (tab==="sessions") ? `<button class="greetBtn" title="打招呼：可空点发送，或先填想说的内容再生成" style="border:none;background:none;font-size:16px;cursor:pointer;padding:2px 6px;flex-shrink:0">👋</button>` : "";
     div.innerHTML = `<img class="avatar" src="${src}" onerror="this.onerror=null;this.src='${avatarURL(u)}'">
       <div style="min-width:0;flex:1"><div class="name">${escape_(name)}</div><div class="sub">${escape_(sub)}</div></div>${greetBtn}${badge}`;
     div.onclick = ()=> openChat({username:u, name, is_group:u.endsWith("@chatroom")});
     const gb = div.querySelector(".greetBtn");
-    if(gb) gb.onclick = async (e)=>{
-      e.stopPropagation();
-      if(gb.disabled) return;
-      gb.disabled = true; gb.textContent = "⏳";
-      toast("AI 生成打招呼并发送中…");
-      try{
-        const r = await (await fetch("/api/greet",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat:u})})).json();
-        toast(r.ok ? ((r.verified?"已确认发送: ":"已提交微信: ")+(r.message||"").slice(0,30)) : ((r.status==="uncertain"?"待核对: ":"未发送: ")+(r.message||r.reason||"请求未完成")));
-      }catch(err){ toast("打招呼出错: "+err); }
-      gb.disabled = false; gb.textContent = "👋";
-    };
+    if(gb) gb.onclick = (e)=>{ e.stopPropagation(); openGreet(u, name, gb); };
     list.appendChild(div);
   }
   updateTabBadges();
@@ -225,9 +301,24 @@ async function openChat(chat){
   $("#msgInput").disabled=false; $("#sendBtn").disabled=false; $("#imgBtn").disabled=false;
   $("#membersBtn").style.display = chat.is_group ? "" : "none";
   $("#harvestBtn").style.display = "";
+  $("#resetCtxBtn").style.display = "";
   render();
   await loadMessages(true);   // 打开会话：强制滚到最新(底部)
 }
+
+$("#resetCtxBtn").onclick=async()=>{
+  if(!current) return;
+  if(!confirm("清理「"+(current.name||current.username)+"」的上下文？之后只按当前人设和这之后的新消息回复，旧对话不再当记忆。")) return;
+  const button=$("#resetCtxBtn"); button.disabled=true;
+  try{
+    const r=await fetch("/api/bot/reset_context",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({chat:current.username})});
+    const j=await r.json();
+    if(!r.ok || !j.ok) throw new Error(j.error||"清理失败");
+    toast("已清理上下文，下一句起重新开始");
+  }catch(e){toast(e.message||"清理失败");}
+  finally{button.disabled=false;}
+};
 
 $("#harvestBtn").onclick=async()=>{
   if(!current) return;
@@ -467,8 +558,10 @@ async function renderAI(){
   try{ kb=await(await privateAdminFetch("/api/kb")).json(); }catch(e){}
   try{ profs=await(await privateAdminFetch("/api/profiles")).json(); }catch(e){}
   let activePersona="";
-  try{ const botr=await(await fetch("/api/bot")).json(); const rr=(botr.rules&&botr.rules.rules||[]).find(r=>r.action&&r.action.type==="reply_ai"); activePersona=(rr&&rr.action.persona)||""; }catch(e){}
+  let learnProf=false;
+  try{ const botr=await(await fetch("/api/bot")).json(); const rr=(botr.rules&&botr.rules.rules||[]).find(r=>r.action&&r.action.type==="reply_ai"); activePersona=(rr&&rr.action.persona)||""; learnProf=!!(botr.rules&&botr.rules.learn_profiles); }catch(e){}
   p.innerHTML=`
+    <div class="panel-close" onclick="closePanel('#aiPanel')" role="button" tabindex="0" aria-label="关闭蒸馏与 AI 面板">✕ 关闭</div>
     ${llm.private_management_auth && !localAdminAccess ? `
     <div class="sub">画像与知识库管理需独立授权；凭据仅保留在当前页面内存。</div>
     <input id="privateAdminToken" type="password" autocomplete="off" placeholder="管理员授权凭据" style="width:100%;padding:5px;margin:4px 0">
@@ -476,12 +569,12 @@ async function renderAI(){
     <div class="sub">${escape_(profs.error||kb.error||'')}</div>
     ` : ""}
     ${llm.contact_personalization ? '<p><button onclick="openPersonalization()">联系人画像与专属人设</button></p>' : ''}
-    <h3>AI 设置 <span class="sub" style="font-weight:normal">Claude / GPT 两套独立中转</span></h3>
-    <div class="sub" style="margin-bottom:6px">状态：${llm.configured?'已配置 ✅':'未配置'} · Claude ${llm.claude&&llm.claude.has_key?'🔑':'—'} · GPT ${llm.gpt&&llm.gpt.has_key?'🔑':'—'}</div>
+    <h3>AI 设置 <span class="sub" style="font-weight:normal">Claude / GPT / Grok 三套独立中转</span></h3>
+    <div class="sub" style="margin-bottom:6px">状态：${llm.configured?'已配置 ✅':'未配置'} · Claude ${llm.claude&&llm.claude.has_key?'🔑':'—'} · GPT ${llm.gpt&&llm.gpt.has_key?'🔑':'—'} · Grok ${llm.grok&&llm.grok.has_key?'🔑':'—'}</div>
     <label class="sub">${llm.tool_route ? "主用（聊天及未独立配置的工具/视觉）" : "主用聊天 provider"}</label>
-    <select id="llmProv" style="width:100%;padding:5px;margin:2px 0 6px"><option value="claude">Claude</option><option value="gpt">GPT</option></select>
+    <select id="llmProv" style="width:100%;padding:5px;margin:2px 0 6px"><option value="claude">Claude</option><option value="gpt">GPT</option><option value="grok">Grok</option></select>
     <label class="sub">视觉用(留空=跟随主用)</label>
-    <select id="llmVis" style="width:100%;padding:5px;margin:2px 0 8px"><option value="">跟随主用</option><option value="claude">Claude</option><option value="gpt">GPT</option></select>
+    <select id="llmVis" style="width:100%;padding:5px;margin:2px 0 8px"><option value="">跟随主用</option><option value="claude">Claude</option><option value="gpt">GPT</option><option value="grok">Grok</option></select>
     <div style="background:#f7f8fa;border-radius:6px;padding:8px;margin-bottom:6px">
       <b style="font-size:13px">Claude 中转</b>
       <input id="cBase" placeholder="Base URL" style="width:100%;margin:4px 0;padding:5px" value="${(llm.claude&&llm.claude.base_url)||''}">
@@ -493,16 +586,51 @@ async function renderAI(){
       <input id="gBase" placeholder="Base URL" style="width:100%;margin:4px 0;padding:5px" value="${(llm.gpt&&llm.gpt.base_url)||''}">
       <input id="gKey" placeholder="GPT API key(留空=不改)" style="width:100%;margin-bottom:4px;padding:5px">
       <input id="gModel" placeholder="模型 如 gpt-6-astra" style="width:100%;padding:5px" value="${(llm.gpt&&llm.gpt.model)||''}">
+      <label class="sub">GPT reasoning（越低越快；none=不发送该参数）</label>
+      <select id="gReason" style="width:100%;padding:5px;margin:2px 0 0">
+        ${(llm.reasoning_efforts||['none','low','medium','high','xhigh']).map(v=>`<option value="${v}">${v}</option>`).join('')}
+      </select>
+    </div>
+    <div style="background:#f7f8fa;border-radius:6px;padding:8px;margin-bottom:6px">
+      <b style="font-size:13px">Grok 中转</b>
+      <input id="kBase" placeholder="Base URL 如 https://api.x.ai/v1" style="width:100%;margin:4px 0;padding:5px" value="${(llm.grok&&llm.grok.base_url)||''}">
+      <input id="kKey" placeholder="Grok API key(留空=不改，也可用 XAI_API_KEY)" style="width:100%;margin-bottom:4px;padding:5px">
+      <input id="kModel" placeholder="模型 如 grok-4.5" style="width:100%;padding:5px" value="${(llm.grok&&llm.grok.model)||''}">
+      <label class="sub">Grok reasoning（当前主用 grok-4.5 时，low 比 high 快）</label>
+      <select id="kReason" style="width:100%;padding:5px;margin:2px 0 0">
+        ${(llm.reasoning_efforts||['none','low','medium','high','xhigh']).map(v=>`<option value="${v}">${v}</option>`).join('')}
+      </select>
     </div>
     ${llm.tool_route ? `
     <div class="sub">工具调用：未独立指定时跟随主用，整轮及最终回复使用同一路由。</div>
-    <select id="llmToolsProv" style="width:100%;padding:5px;margin:2px 0 6px"><option value="">跟随主用 provider</option><option value="claude">Claude</option><option value="gpt">GPT</option></select>
+    <select id="llmToolsProv" style="width:100%;padding:5px;margin:2px 0 6px"><option value="">跟随主用 provider</option><option value="claude">Claude</option><option value="gpt">GPT</option><option value="grok">Grok</option></select>
     <input id="llmToolsModel" placeholder="独立工具模型（留空使用该 provider 的模型）" style="width:100%;margin-bottom:6px;padding:5px" value="${escape_(llm.tools_model||'')}">
     <div class="sub">实际请求路由：${escape_(llm.tool_route?.provider||llm.provider)} / ${escape_(llm.tool_route?.model||'')}；这是请求字段，不代表中转底层模型认证。</div>
     ` : ""}
+    <div style="background:#f7f8fa;border-radius:6px;padding:8px;margin-bottom:6px">
+      <b style="font-size:13px">生图</b>
+      <div class="sub">聊天和生图分开配。可自己换模型试手感；密钥留空沿用所选中转。</div>
+      <label class="sub">生图中转</label>
+      <select id="imgFollow" style="width:100%;padding:5px;margin:2px 0 6px">
+        <option value="grok">跟随 Grok 中转</option>
+        <option value="gpt">跟随 GPT 中转</option>
+        <option value="">独立 URL / key</option>
+      </select>
+      <input id="imgModel" placeholder="模型 如 grok-imagine-image 或 grok-imagine-image-2.0" style="width:100%;margin-bottom:4px;padding:5px" value="${escape_((llm.image&&llm.image.model)||'')}">
+      <label class="sub">质量</label>
+      <select id="imgQuality" style="width:100%;padding:5px;margin:2px 0 6px">
+        <option value="low">low（更快）</option>
+        <option value="standard">standard</option>
+        <option value="medium">medium</option>
+        <option value="auto">auto</option>
+      </select>
+      <input id="imgBase" placeholder="独立 Base URL（跟随中转时可留空）" style="width:100%;margin-bottom:4px;padding:5px" value="${escape_((llm.image&&!llm.image.follow&&llm.image.base_url)||'')}">
+      <input id="imgKey" placeholder="独立 API key（留空=不改 / 跟随中转）" style="width:100%;margin-bottom:4px;padding:5px">
+      <div class="sub">当前：${escape_((llm.image&&(llm.image.follow||'独立'))||'未配')} / ${escape_((llm.image&&llm.image.model)||'?')} · ${escape_((llm.image&&llm.image.quality)||'')} · ${llm.image&&llm.image.has_key?'🔑':'无 key'}</div>
+    </div>
     <input id="llmProxy" placeholder="代理(可选,留空=不走代理)" style="width:100%;margin-bottom:6px;padding:5px" value="${llm.proxy||''}">
     <button id="llmSave" class="primary">保存 AI 配置</button>
-    <button id="llmTest">测试两套</button>
+    <button id="llmTest">测试三套</button>
     <div id="llmTestMsg" class="sub" style="margin-top:4px"></div>
     <hr style="margin:12px 0;border:none;border-top:1px solid #eee">
     <h3>Agent 模式 <span class="sub" style="font-weight:normal">(机器人可联网/查历史/查画像/查知识库后再答)</span></h3>
@@ -516,8 +644,11 @@ async function renderAI(){
     <button id="kbAdd" class="primary">切块导入知识库</button>
     <div id="kbList" style="margin-top:8px">${(kb.docs||[]).map(d=>`<div class="row"><div style="flex:1;min-width:0"><div class="sub">[${escape_(d.source||'')}] ${escape_(d.preview||'')}</div></div><button class="kbDel" data-id="${d.id}">删</button></div>`).join("")||'<div class="sub">空</div>'}</div>
     <hr style="margin:12px 0;border:none;border-top:1px solid #eee">
-    <h3>人物画像 <span class="sub" style="font-weight:normal">(长期记忆,聊天中自动累积)</span></h3>
-    <div id="profList">${(profs.profiles||[]).map(pr=>`<div class="row"><div style="flex:1;min-width:0"><div class="name">${escape_(pr.name||pr.wxid)}</div><div class="sub">${pr.facts}条事实 ${pr.summary?('· '+escape_(pr.summary.slice(0,24))):''}</div></div><button class="prView" data-w="${escape_(pr.wxid)}">看</button><button class="prDel" data-w="${escape_(pr.wxid)}">删</button></div>`).join("")||'<div class="sub">还没学到画像(开启AI后聊天会自动累积)</div>'}</div>
+    <h3>人物画像 <span class="sub" style="font-weight:normal">(长期记忆)</span></h3>
+    <label style="display:block;margin-bottom:6px;cursor:pointer"><input type="checkbox" id="learnProfOn" ${learnProf?'checked':''}> 聊天中自动抽画像（费 token，默认关）</label>
+    <button id="learnProfNow">立刻抽当前会话</button>
+    <div class="sub" style="margin:4px 0 8px">关自动时后台不再抽；打开左侧会话后点立刻抽。图/语音只在监听会话回复时识别。</div>
+    <div id="profList">${(profs.profiles||[]).map(pr=>`<div class="row"><div style="flex:1;min-width:0"><div class="name">${escape_(pr.name||pr.wxid)}</div><div class="sub">${pr.facts}条事实 ${pr.summary?('· '+escape_(pr.summary.slice(0,24))):''}</div></div><button class="prView" data-w="${escape_(pr.wxid)}">看</button><button class="prDel" data-w="${escape_(pr.wxid)}">删</button></div>`).join("")||'<div class="sub">还没学到画像。可开自动抽，或打开会话后立刻抽。</div>'}</div>
     <div id="profView" style="margin-top:8px"></div>
     <hr style="margin:12px 0;border:none;border-top:1px solid #eee">
     <h3>蒸馏人设</h3>
@@ -570,6 +701,22 @@ async function renderAI(){
     const r=await(await privateAdminFetch("/api/kb/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:+b.dataset.id})})).json();
     toast(r.ok?"已删除":(r.error||"删除失败")); renderAI();
   });
+  const learnOn=$("#learnProfOn");
+  if(learnOn) learnOn.onchange=async()=>{
+    const r=await(await fetch("/api/bot/learn_profiles",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:learnOn.checked})})).json();
+    toast(r.ok?(learnOn.checked?"已开启自动抽画像":"已关闭自动抽画像"):"保存失败");
+  };
+  const learnNow=$("#learnProfNow");
+  if(learnNow) learnNow.onclick=async()=>{
+    if(!current||!current.username){ toast("先在左侧打开一个会话"); return; }
+    learnNow.disabled=true;
+    try{
+      const r=await(await privateAdminFetch("/api/profiles/extract",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat:current.username})})).json();
+      toast(r.ok?("已抽取，更新 "+(r.updated||0)+" 人"):(r.error||"抽取失败"));
+      if(r.ok) renderAI();
+    }catch(e){ toast("抽取失败"); }
+    finally{ learnNow.disabled=false; }
+  };
   document.querySelectorAll(".prView").forEach(b=>b.onclick=async()=>{
     const d=await(await privateAdminFetch("/api/profiles/"+encodeURIComponent(b.dataset.w))).json();
     if(d.error){ toast(d.error); return; }
@@ -582,12 +729,16 @@ async function renderAI(){
   });
   document.querySelectorAll(".pDel").forEach(b=>b.onclick=async()=>{
     if(!confirm("删除人设 "+b.dataset.s+"?")) return;
-    await fetch("/api/personas/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({slug:b.dataset.s})});
-    toast("已删除"); renderAI();
+    const r=await(await fetch("/api/personas/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({slug:b.dataset.s})})).json();
+    toast(r.ok?"人设已删除，画像中的失效绑定已清除":(r.error||"删除失败")); renderAI();
   });
   if(llm.provider) $("#llmProv").value=llm.provider;
+  if($("#gReason")) $("#gReason").value=llm.gpt_reasoning_effort||"low";
+  if($("#kReason")) $("#kReason").value=llm.grok_reasoning_effort||"low";
   if($("#llmToolsProv")) $("#llmToolsProv").value=llm.tools_provider||"";
   if(llm.vision_provider!==undefined) $("#llmVis").value=llm.vision_provider||"";
+  if($("#imgFollow")) $("#imgFollow").value=(llm.image&&llm.image.follow)||"";
+  if($("#imgQuality") && llm.image&&llm.image.quality) $("#imgQuality").value=llm.image.quality;
   document.querySelectorAll(".pView").forEach(b=>b.onclick=async()=>{
     const slug=b.dataset.s;
     const d=await(await fetch("/api/personas/"+encodeURIComponent(slug))).json();
@@ -606,16 +757,29 @@ async function renderAI(){
   });
   $("#llmSave").onclick=async()=>{
     const body={provider:$("#llmProv").value, vision_provider:$("#llmVis").value,
+      grok_reasoning_effort:$("#kReason")?$("#kReason").value:"low",
+      gpt_reasoning_effort:$("#gReason")?$("#gReason").value:"low",
       ...(llm.tool_route ? {tools_provider:$("#llmToolsProv").value, tools_model:$("#llmToolsModel").value.trim()} : {}), proxy:$("#llmProxy").value.trim(),
       claude:{base_url:$("#cBase").value.trim(), model:$("#cModel").value.trim(), api_key:$("#cKey").value.trim()},
-      gpt:{base_url:$("#gBase").value.trim(), model:$("#gModel").value.trim(), api_key:$("#gKey").value.trim()}};
+      gpt:{base_url:$("#gBase").value.trim(), model:$("#gModel").value.trim(), api_key:$("#gKey").value.trim()},
+      grok:{base_url:$("#kBase").value.trim(), model:$("#kModel").value.trim(), api_key:$("#kKey").value.trim()},
+      image:{follow:$("#imgFollow").value, model:$("#imgModel").value.trim(), quality:$("#imgQuality").value,
+        base_url:$("#imgBase").value.trim(), api_key:$("#imgKey").value.trim()}};
     const r=await(await fetch("/api/llm/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
     toast(r.configured?"AI 已配置 ✅":"已保存"); renderAI();
   };
   $("#llmTest").onclick=async()=>{
-    $("#llmTestMsg").textContent="测试中…";
-    const r=await(await fetch("/api/llm/test",{method:"POST"})).json();
-    $("#llmTestMsg").innerHTML="Claude: "+(r.claude||'?')+"<br>GPT: "+(r.gpt||'?')+"<br>视觉: "+(r.vision||'?');
+    const msg=$("#llmTestMsg"), btn=$("#llmTest");
+    msg.textContent="测试中（每套限时，请稍候）…";
+    btn.disabled=true;
+    const ac=new AbortController();
+    const timer=setTimeout(()=>ac.abort(), 45000);
+    try{
+      const r=await(await fetch("/api/llm/test",{method:"POST",signal:ac.signal})).json();
+      msg.innerHTML="Claude: "+(r.claude||'?')+"<br>GPT: "+(r.gpt||'?')+"<br>Grok: "+(r.grok||'?')+"<br>视觉: "+(r.vision||'?');
+    }catch(e){
+      msg.textContent=(e&&e.name==="AbortError")?"测试超时。聊天接口可能仍可用；Grok 推理较慢，可把视觉改到 GPT 后再测。":("测试失败："+(e.message||e));
+    }finally{ clearTimeout(timer); btn.disabled=false; }
   };
   $("#distPrivBtn").onclick=async()=>{
     const sel=$("#distPriv"); const uname=sel.value; if(!uname){ toast("没有可蒸馏的私聊"); return; }
@@ -659,6 +823,7 @@ async function renderWatch(){
     (await fetch("/api/bot")).json()
   ]);
   const watch=new Set((botr.rules&&botr.rules.watch)||[]);
+  const includeSelf=!!(botr.rules&&botr.rules.include_self);
   const pc=botr.rules&&botr.rules.proactive||{};
   // 群：全部群(名字准)。私聊：最近会话里的真人私聊
   const groups=gs.map(g=>({username:g.username,name:g.name,is_group:true}));
@@ -667,6 +832,7 @@ async function renderWatch(){
   const rowHtml=s=>`<label class="row" style="cursor:pointer"><input type="checkbox" class="wchk" value="${s.username}" ${watch.has(s.username)?"checked":""} style="margin-right:8px"><div style="min-width:0"><div class="name">${escape_(s.name||s.username)}</div><div class="sub">${s.is_group?'群·@我/引用我触发':'私聊·任意消息自动回复'}</div></div></label>`;
   p.innerHTML=`<h3>监听设置 <span style="float:right;cursor:pointer;color:#999" onclick="closePanel('#watchPanel')">✕</span></h3>
     <div class="sub" style="margin-bottom:6px">勾选的才会自动回复。<b>群</b>=被@或引用时回复，开启主动模式后也可在安静时接话；<b>私聊</b>=对方一发消息就回。没勾的不动。</div>
+    <label style="display:block;margin-bottom:8px;cursor:pointer"><input type="checkbox" id="wself" ${includeSelf?'checked':''}> 回复我自己发的消息（默认关；战斗模式开着时等于自己怼自己）</label>
     <input id="wfilter" placeholder="过滤…" style="width:100%;padding:5px;margin-bottom:6px">
     <button id="wsave" class="primary">保存监听</button>
     <div style="margin-top:10px;padding:8px;border:1px solid #ddd"><b>主动回复</b><br>
@@ -684,13 +850,50 @@ async function renderWatch(){
     document.querySelectorAll("#watchPanel label.row").forEach(l=>{ l.style.display=(!f||l.textContent.includes(f))?"":"none"; }); };
   $("#wsave").onclick=async()=>{
     const w=[...document.querySelectorAll(".wchk:checked")].map(c=>c.value);
-    const r=await(await fetch("/api/bot/watch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({watch:w})})).json();
-    toast("已保存监听 "+r.watch.length+" 个会话");
+    const r=await(await fetch("/api/bot/watch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({watch:w,include_self:$("#wself").checked})})).json();
+    toast("已保存监听 "+r.watch.length+" 个会话"+(r.include_self?"（含自己）":""));
   };
   $("#proSave").onclick=async()=>{const b={enabled:$("#proOn").checked,private_share_enabled:$("#proPrivate").checked,group_enabled:$("#proGroup").checked,group_after:Math.max(1,+$("#groupAfter").value)*60,quiet_start:+$("#qStart").value,quiet_end:+$("#qEnd").value};const r=await(await fetch('/api/bot/proactive',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json();toast(r.ok?'已保存主动回复设置':'保存失败');};
   p.classList.add("show");
 }
 $("#watchBtn").onclick=()=>{ const p=$("#watchPanel"); if(p.classList.contains("show")){p.classList.remove("show");return;} $("#aiPanel").classList.remove("show");$("#membersPanel").classList.remove("show");$("#followPanel").classList.remove("show"); renderWatch(); };
+
+async function renderAdmin(){
+  const p=$("#adminPanel");
+  const [ss,botr]=await Promise.all([
+    (await fetch("/api/sessions")).json(),
+    (await fetch("/api/bot")).json()
+  ]);
+  const admins=new Set((botr.rules&&botr.rules.admins)||[]);
+  const isOfficial=u=>u.startsWith("gh_")||u.endsWith("@openim")||u.includes("@kefu")||["brandsessionholder","weixin","filehelper","newsapp"].includes(u);
+  const privs=ss.filter(s=>!s.is_group && !isOfficial(s.username));
+  const rowHtml=s=>`<label class="row" style="cursor:pointer"><input type="checkbox" class="adchk" value="${s.username}" ${admins.has(s.username)?"checked":""} style="margin-right:8px"><div style="min-width:0"><div class="name">${escape_(s.name||s.username)}</div></div></label>`;
+  p.innerHTML=`<h3>管理员设置 <span style="float:right;cursor:pointer;color:#999" onclick="closePanel('#adminPanel')">✕</span></h3>
+    <div class="sub" style="margin-bottom:6px">勾选的人可在与机器人的<b>会话里</b>发 <code>/命令</code> 直接触发系统功能（私聊任意、群里需 @我）。请只授权你信任的账号。</div>
+    <div style="margin:6px 0;padding:8px;border:1px solid #ddd;font-size:12px;line-height:1.7">
+      <b>可用命令</b><br>
+      <code>/朋友圈 内容</code> 发朋友圈（内容留空=自动生成）<br>
+      <code>/配图朋友圈 内容</code> 发图文朋友圈（用内容生成配图）<br>
+      <code>/同步朋友圈</code> 立即同步<br>
+      <code>/朋友圈状态</code> 查看同步与自动化状态<br>
+      <code>/设置 项 开|关</code> 项：自动评论/自动发布/聊天反思/配图/网络观点/同步<br>
+      <code>/发 联系人 内容</code> 代发一条消息<br>
+      <code>/帮助</code> 查看全部命令
+    </div>
+    <input id="adfilter" placeholder="过滤…" style="width:100%;padding:5px;margin-bottom:6px">
+    <button id="adsave" class="primary">保存管理员</button>
+    <div style="margin-top:8px"><b>联系人 (${privs.length})</b></div>
+    <div id="adlist">${privs.map(rowHtml).join("")}</div>`;
+  $("#adfilter").oninput=()=>{ const f=$("#adfilter").value.trim();
+    document.querySelectorAll("#adminPanel label.row").forEach(l=>{ l.style.display=(!f||l.textContent.includes(f))?"":"none"; }); };
+  $("#adsave").onclick=async()=>{
+    const a=[...document.querySelectorAll(".adchk:checked")].map(c=>c.value);
+    const r=await(await fetch("/api/bot/admins",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({admins:a})})).json();
+    toast("已保存管理员 "+r.admins.length+" 人");
+  };
+  p.classList.add("show");
+}
+$("#adminBtn").onclick=()=>{ const p=$("#adminPanel"); if(p.classList.contains("show")){p.classList.remove("show");return;} $("#aiPanel").classList.remove("show");$("#membersPanel").classList.remove("show");$("#watchPanel").classList.remove("show");$("#followPanel").classList.remove("show"); renderAdmin(); };
 
 async function renderFollow(){
   const p=$("#followPanel");
@@ -847,6 +1050,76 @@ async function renderSchedule(){
   });
 }
 
+$("#greetBtnPanel").onclick=()=>{ const p=$("#greetPanel"); if(p.classList.contains("show")){p.classList.remove("show");return;} document.querySelectorAll(".members").forEach(x=>x.classList.remove("show")); renderGreeting(); p.classList.add("show"); };
+const _CRON2INT={"*/30 * * * *":"30m","0 * * * *":"1h","0 */2 * * *":"2h","0 */3 * * *":"3h"};
+const _INT_LABEL={"30m":"每30分钟","1h":"每1小时","2h":"每2小时","3h":"每3小时"};
+async function renderGreeting(edit){
+  const p=$("#greetPanel");
+  let d={tasks:[]}; try{ d=await(await fetch("/api/greeting")).json(); }catch(e){}
+  let ss=[]; try{ ss=await(await fetch("/api/sessions")).json(); }catch(e){}
+  const isOfficial=u=>u.startsWith("gh_")||u.endsWith("@openim")||u.includes("@kefu")||["brandsessionholder","weixin","filehelper","newsapp"].includes(u);
+  const privs=ss.filter(s=>!s.is_group && !isOfficial(s.username));
+  const e=edit||{};
+  const qs=(e.quiet&&e.quiet.start)||"23:00", qe=(e.quiet&&e.quiet.end)||"08:00";
+  const curInt=_CRON2INT[e.cron||""]||"1h";
+  const opts=privs.map(s=>`<option value="${escape_(s.username)}" ${e.target_username===s.username?"selected":""}>${escape_(s.name||s.username)}</option>`).join("");
+  const rows=(d.tasks||[]).map(t=>`<div class="row" style="align-items:flex-start;flex-wrap:wrap">
+      <div style="flex:1;min-width:0">
+        <div class="name">${escape_(t.target_display||t.target||'')} 👤 ${t.enabled===false?'<span class="sub">(已停用)</span>':''}</div>
+        <div class="sub" style="white-space:normal">${escape_(_INT_LABEL[_CRON2INT[t.cron||'']]||t.schedule_desc||'')}${t.quiet?(' · 免打扰 '+escape_(t.quiet.start)+'–'+escape_(t.quiet.end)):''} · 下次 ${escape_(t.next||'?')}</div>
+      </div>
+      <button class="grEdit" data-id="${t.id}" title="编辑">改</button>
+      <button class="grRun" data-id="${t.id}" title="立即试发一次" style="margin-left:4px">▶</button>
+      <button class="grDel" data-id="${t.id}" style="margin-left:4px">删</button>
+    </div>`).join("") || '<div class="sub">还没有定时问候</div>';
+  p.innerHTML=`<h3>定时问候 <span style="float:right;cursor:pointer;color:#999" onclick="closePanel('#greetPanel')">✕</span></h3>
+    <div class="sub" style="margin-bottom:8px">到点会按当前时段、用该会话的聊天人设，自由发一句"就在身边"的陪伴问候（想你了/早餐做好了/陪你在床头…）。免打扰时段内不发；对方正在聊天时本次自动跳过。</div>
+    <div style="padding:8px;border:1px solid #ddd;border-radius:6px;margin-bottom:8px">
+      <input type="hidden" id="grId" value="${e.id||''}">
+      <label class="sub">问候对象${e.id?'':'（可多选：按住 Ctrl/⌘ 或拖选，可给多人各建一条）'}</label>
+      <select id="grTarget" ${e.id?'':'multiple size="5"'} style="width:100%;padding:5px;margin:2px 0 6px">${opts||'<option value="">（无联系人）</option>'}</select>
+      <label class="sub">频率</label>
+      <select id="grInt" style="width:100%;padding:5px;margin:2px 0 6px">
+        ${Object.keys(_INT_LABEL).map(k=>`<option value="${k}" ${curInt===k?"selected":""}>${_INT_LABEL[k]}</option>`).join("")}
+      </select>
+      <label class="sub">免打扰（不发问候）</label>
+      <div style="display:flex;gap:6px;align-items:center;margin:2px 0 6px">
+        <input type="time" id="grQs" value="${qs}" style="flex:1;padding:5px">
+        <span class="sub">到</span>
+        <input type="time" id="grQe" value="${qe}" style="flex:1;padding:5px">
+      </div>
+      <label class="row" style="cursor:pointer;margin-bottom:6px"><input type="checkbox" id="grEn" ${e.enabled===false?"":"checked"} style="margin-right:8px">启用</label>
+      <button id="grSave" class="primary">${e.id?'保存修改':'新建问候'}</button>
+      ${e.id?'<button id="grNew" style="margin-left:4px">取消编辑</button>':''}
+      <span id="grMsg" class="sub" style="margin-left:6px"></span>
+    </div>
+    <h3>已设问候 <span class="sub" style="font-weight:normal">${(d.tasks||[]).length} 条</span></h3>
+    ${rows}`;
+  $("#grSave").onclick=async()=>{
+    const id=$("#grId").value||undefined;
+    const sel=[...$("#grTarget").selectedOptions].map(o=>o.value).filter(Boolean);
+    const body={ id, interval:$("#grInt").value, quiet_start:$("#grQs").value,
+      quiet_end:$("#grQe").value, enabled:$("#grEn").checked };
+    if(id){ body.target=sel[0]||$("#grTarget").value; } else { body.targets=sel; }
+    if(!(id?body.target:body.targets.length)){ $("#grMsg").textContent="请选择对象"; return; }
+    $("#grMsg").textContent="保存中…";
+    try{
+      const r=await(await fetch("/api/greeting",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
+      if(r.ok){ const n=(r.tasks||[r.task]).length; toast("已保存"+(n>1?("("+n+"人)"):"")); renderGreeting(); }
+      else { $("#grMsg").textContent="⚠️ "+(r.message||"保存失败"); }
+    }catch(err){ $("#grMsg").textContent="出错:"+err; }
+  };
+  if($("#grNew")) $("#grNew").onclick=()=>renderGreeting();
+  document.querySelectorAll(".grDel").forEach(b=>b.onclick=async()=>{
+    await fetch("/api/schedule/"+b.dataset.id+"/delete",{method:"POST"}); toast("已删除"); renderGreeting();
+  });
+  document.querySelectorAll(".grRun").forEach(b=>b.onclick=async()=>{
+    await fetch("/api/schedule/"+b.dataset.id+"/run",{method:"POST"}); toast("已试发(看聊天)"); });
+  document.querySelectorAll(".grEdit").forEach(b=>b.onclick=()=>{
+    const t=(d.tasks||[]).find(x=>String(x.id)===b.dataset.id); if(t) renderGreeting(t);
+  });
+}
+
 let botRunning=false;
 async function loadBot(){
   try{ const b=await(await fetch("/api/bot")).json();
@@ -876,5 +1149,6 @@ setInterval(loadStatus, 8000); setInterval(loadBot, 8000);
 setInterval(()=>{ if(current && !sending) loadMessages(); }, 1200);
 setInterval(refreshSessions, 3000);
 </script>
+<script src="/static/nav.js"></script>
 </body>
 </html>

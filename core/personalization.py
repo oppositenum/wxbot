@@ -372,9 +372,14 @@ def match_switch(text, current=None):
 
 
 @sessions.task
-def maybe_switch(contact, text):
-    """按这句切换专属人设。成功返回 {slug,name,persona}，否则 None。群聊不切。"""
-    if not contact or contact.endswith('@chatroom'):
+def maybe_switch(contact, text, *, is_group=None):
+    """按这句切换专属人设。成功返回 {slug,name,persona}，否则 None。
+
+    只改私聊绑定。群里即使正在回某个私聊对象，也不能把她的私聊人设切走或套进来。
+    """
+    if is_group is None:
+        is_group = bool(contact and str(contact).endswith('@chatroom'))
+    if not contact or is_group:
         return None
     data = get(contact)
     current = data.get('persona_id')

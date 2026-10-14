@@ -90,6 +90,18 @@ class Builder(unittest.TestCase):
         old=msg(1,'服务器编号碰巧等于另条本地编号',True);old['server_id']=20
         self.assertEqual(len(build([old]+batch,batch)[0]),2)
 
+    def test_group_drops_private_register_self_reply_but_keeps_normal_chat(self):
+        dirty = msg(1, '操，宝贝儿你这小逼今天这么欠操', True)
+        normal = msg(2, '海阔天空', True)
+        incoming = msg(3, '不需要吗', sender='wife')
+        history, current, _ = build([dirty, normal, incoming], [incoming], group=True)
+        blob = '\n'.join(m['content'] for m in history) + current
+        self.assertNotIn('小逼', blob)
+        self.assertIn('海阔天空', blob)
+        self.assertIn('不需要吗', current)
+        private_history, _, _ = build([dirty], [incoming], group=False)
+        self.assertIn('小逼', '\n'.join(m['content'] for m in private_history))
+
     def test_scheduled_self_message_is_excluded_but_users_reference_kept(self):
         history, current, _ = build([msg(1,'【定时提醒】合成提醒',True)],
                                     [msg(2,'【定时提醒】是什么意思')])

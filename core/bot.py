@@ -436,7 +436,8 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
         return (llm.chat(sys_n, [{"role": "user", "content": q}],
                          cfg={**llm.load_cfg(), "max_tokens": 80, "no_gpt_fallback": True,
                               "single_attempt": True}) or "").strip()
-    switched = personalization.maybe_switch(chat_username, inbound_raw)
+    is_group = chat_username.endswith("@chatroom")
+    switched = personalization.maybe_switch(chat_username, inbound_raw, is_group=is_group)
     if switched:
         persona = switched['persona']
 
@@ -459,6 +460,13 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
     lines = [turn['content'] for turn in turns]
 
     system += "\n【本轮机器人角色】\n" + persona["persona"]
+    if is_group:
+        system += (
+            "\n【群聊人设隔离】现在在群里。只使用上面这个群人设。"
+            "对方私聊里的人设、称呼（主人/老婆/宝贝儿/小狗）、尺度和玩法一律不用，"
+            "哪怕她刚刚在私聊里正在用那套说话，也哪怕她在群里用了私聊里的称呼。"
+            "群里不写括号动作，不开床戏，不把私聊内容复述到群里。"
+        )
     if continuous_mode.is_on(chat_username):
         system += continuous_mode.PROMPT
         system += continuous_mode.game_prompt(

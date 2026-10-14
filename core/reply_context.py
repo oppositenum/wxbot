@@ -11,6 +11,18 @@ user 历史消息是对方或群成员的发言。每条的说话人由系统根
 '''
 
 
+_PRIVATE_REGISTER = (
+    '小逼', '骚穴', '鸡巴', '肉棒', '子宫', '欠操', '骚货', '射满', '按在桌子上',
+    '从后面顶', '屁眼', '毒龙',
+)
+
+
+def _private_register(text):
+    """群里刚发出的私聊尺度正文。用来挡住它被当成下一句的示范。"""
+    body = text or ''
+    return any(mark in body for mark in _PRIVATE_REGISTER)
+
+
 def is_self(message, account):
     if message.get('_niu'):
         return False
@@ -50,6 +62,9 @@ def build(context, batch, *, account, is_group, render, name, timestamp, schedul
     history = [m for m in unique(context)
                if (key(m) is None or key(m) not in batch_keys)
                and not (is_self(m, account) and scheduled(m))][-8:]
+    # 群里自己刚发过的私聊尺度（床戏、括号动作）不能当本轮示范，否则下一句会顺着写。
+    if is_group:
+        history = [m for m in history if not (is_self(m, account) and _private_register(render(m)))]
 
     def line(m, current=False):
         own = is_self(m, account)

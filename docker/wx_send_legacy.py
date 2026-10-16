@@ -92,25 +92,105 @@ def close_overlays():
 
 
 def ensure_focused(wid):
-    """windowactivate 在 XFCE 里经常只点亮窗口、键盘焦点还在别处。"""
+    """windowactivate 在 XFCE 里经常只点亮窗口、键盘焦点还在别处。
+    不点标题栏，也不双击：双击会被微信当成标题栏双击，窗口跟着放大。"""
+    keep_window_size(wid)
+    x("xdotool", "windowactivate", "--sync", wid)
+    x("xdotool", "windowraise", wid)
+    x("xdotool", "windowfocus", "--sync", wid)
+    time.sleep(0.2)
+    if x("xdotool", "getactivewindow").stdout.strip() != str(win_id() or wid):
+        print("ERR:no-focus"); sys.exit(3)
+    return win_geom(win_id() or wid)
+
+
+def keep_window_size(wid):
+    """微信被拉满后搜索框收不到键盘。用窗口管理器收回普通尺寸，不点最大化按钮。"""
     px, py, w, h = win_geom(wid)
-    for _ in range(3):
-        x("xdotool", "windowactivate", "--sync", wid)
-        x("xdotool", "windowraise", wid)
-        x("xdotool", "windowfocus", "--sync", wid)
-        time.sleep(0.15)
-        # 点标题栏：第一下专门用来抢焦点，避免随后点搜索被当成“激活窗口”。
-        x("xdotool", "mousemove", str(px + max(w // 2, 400)), str(py + 12), "click", "1")
-        time.sleep(0.2)
-        if x("xdotool", "getactivewindow").stdout.strip() == str(wid):
-            return win_geom(wid)
-    print("ERR:no-focus"); sys.exit(3)
+    if w < 1200 and h < 820:
+        return
+    x("wmctrl", "-i", "-r", wid, "-b", "remove,maximized_vert,maximized_horz")
+    time.sleep(0.15)
+    x("wmctrl", "-i", "-r", wid, "-e", "0,135,65,1022,741")
+    time.sleep(0.25)
+
+
+def _grab(wid):
+    import uuid
+    path = f"/tmp/wx_grab_{uuid.uuid4().hex[:8]}.png"
+    x("scrot", "-o", path)
+    try:
+        from PIL import Image
+        im = Image.open(path).convert("RGB")
+    except Exception:
+        return None
+    px, py, w, h = win_geom(wid)
+    return im, px, py, w, h
+
+
+def search_field_point(wid):
+    """截图里侧栏那个浅灰圆角框，返回打进微信窗口用的相对坐标。
+    窗口外框和客户区有偏差，所以在截图上现找，不再写死。"""
+    got = _grab(wid)
+    if not got:
+        return None
+    im, px, py, w, h = got
+
+    def is_field(p):
+        r, g, b = p
+        return 240 <= r <= 252 and abs(r - g) < 6 and abs(g - b) < 6
+
+    bands = []
+    y_end = min(im.height, py + 110)
+    # 侧栏搜索框在左图标栏右边。标题栏也是浅色，所以从窗口内容顶再往下才开始找。
+    x_start = max(0, px + 50)
+    x_end = min(im.width, px + 340)
+    for sy in range(py + 8, y_end):
+        run = None
+        best = None
+        for sx in range(x_start, x_end):
+            if is_field(im.getpixel((sx, sy))):
+                if run is None:
+                    run = [sx, sx]
+                else:
+                    run[1] = sx
+            elif run:
+                if 70 < run[1] - run[0] < 280 and (best is None or run[1] - run[0] > best[1] - best[0]):
+                    best = (run[0], run[1])
+                run = None
+        if best:
+            bands.append((sy, best[0], best[1]))
+    if not bands:
+        return None
+    top_y = bands[0][0]
+    top = [b for b in bands if b[0] <= top_y + 28]
+    block = [top[0]]
+    for b in top[1:]:
+        if b[0] - block[-1][0] > 3:
+            break
+        block.append(b)
+    if len(block) < 8:
+        return None
+    x0 = sorted(b[1] for b in block)[len(block) // 2]
+    x1 = sorted(b[2] for b in block)[len(block) // 2]
+    # 浅色从标题栏连到搜索框底边。底边往上 28px 是输入区；再高就点到标题栏。
+    return (x0 + x1) // 2, block[-1][0] - 28
 
 
 def click_search(px, py):
-    # 侧栏顶部搜索框。不要 Ctrl+F：Linux 微信那是“搜索聊天记录”。
-    x("xdotool", "mousemove", str(px + 131), str(py + 43), "click", "1")
+    """按住 Ctrl 再单击。普通点击只打在外层窗口上，键盘仍留在输入框；
+    双击则会被微信当成标题栏双击，窗口跟着放大。
+    搜索框在窗口内容区 (174, 40)。截图找框会把标题栏算进去，点到框外面。"""
+    point = (px + 174, py + 40)
+    x("xdotool", "mousemove", str(point[0]), str(point[1]))
+    time.sleep(0.08)
+    x("xdotool", "keydown", "ctrl")
+    time.sleep(0.04)
+    x("xdotool", "click", "1")
+    time.sleep(0.04)
+    x("xdotool", "keyup", "ctrl")
     time.sleep(0.25)
+    return point
 
 
 def focused_text():
@@ -145,7 +225,8 @@ def search_panel_text(px, py):
     try:
         from PIL import Image
         im = Image.open(full)
-        im.crop((px + 16, py + 28, px + 268, py + 220)).save(crop)
+        # 搜索框在窗口内容顶下约 40px。从窗口顶裁会裁到标题栏，认不出探测字。
+        im.crop((px + 60, py + 20, px + 430, py + 250)).save(crop)
     except Exception:
         return ""
     r = x("tesseract", crop, "stdout", "-l", "chi_sim+eng", "--psm", "6")
@@ -163,13 +244,21 @@ def search_shows_query(px, py, name):
 
 
 def focus_search_box(px, py):
-    """点侧栏搜索并清空，随后用键盘输入查询词（不走剪贴板，避免贴进对话框）。"""
+    """点侧栏搜索并清空。先打一枚探测字，确认它进了搜索框而不是聊天输入框。"""
     click_search(px, py)
-    time.sleep(0.25)
+    time.sleep(0.15)
     key("ctrl+a")
     time.sleep(0.05)
     key("Delete")
     time.sleep(0.08)
+    x("xdotool", "type", "--clearmodifiers", "--delay", "20", "q")
+    time.sleep(0.45)
+    shown = search_panel_text(px, py)
+    key("BackSpace")
+    time.sleep(0.12)
+    if "q" not in (shown or "").lower():
+        abort_if_composer_polluted()
+        print("ERR:search-unfocused"); sys.exit(3)
     return True
 
 
@@ -178,10 +267,11 @@ def search_box_holds(name):
 
 
 def click_search_hit(px, py, dy, clicks=1):
-    # 侧栏搜索「联系人」第一条。108 是分组标题；再往下是「群聊」（同微信号的群）。
-    # 单击只出资料预览，双击才打开会话。
-    cmd = ["xdotool", "mousemove", str(px + 170), str(py + dy), "click", "--repeat", str(clicks), "--delay", "80", "1"]
-    x(*cmd)
+    # 侧栏搜索「联系人」第一条。单击只出资料预览，双击才打开会话。
+    # 同样必须打进微信窗口，屏幕坐标会被桌面吃掉。
+    # 行尾的 i 是资料按钮。点名字（约 150, 128），别点到行尾。
+    x("xdotool", "mousemove", str(px + 150), str(py + dy),
+      "click", "--repeat", str(clicks), "--delay", "80", "1")
     time.sleep(0.35)
 
 
@@ -374,7 +464,9 @@ def open_chat(wid, name, expect=""):
         print("ERR:search-unfocused"); sys.exit(3)
     before = header_text(px, py, w, h)
     if searched_by_wechat_id(name):
-        click_search_hit(px, py, 128, clicks=2)
+        # 结果浮层还开着时回车打开联系人第一条。点那一行会先关掉浮层，
+        # 第二下落到侧栏里的同一行，会话不切换。
+        key("Return")
         time.sleep(0.8)
         key("Escape")
         time.sleep(0.15)

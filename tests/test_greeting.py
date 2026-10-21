@@ -101,15 +101,36 @@ class TickSkip(Base):
 class Content(Base):
     def test_compose_greeting_persona_and_period(self):
         captured = {}
+        def _chat(system, msgs, **k):
+            captured.update(system=system, cfg=k.get("cfg") or {})
+            return "想你了～"
         with patch("core.personalization.resolve_persona",
                    return_value={"persona": {"persona": "P", "name": "N"}}), \
              patch("core.personalization.role_context", return_value="ROLE-CTX"), \
-             patch("core.llm.chat",
-                   side_effect=lambda system, msgs, **k: captured.update(system=system) or "想你了～"):
+             patch("core.llm.chat", side_effect=_chat):
             out = schedule._compute_greeting(self._task(_trigger_at=time.mktime(_struct("07:30"))))
         self.assertEqual(out, "想你了～")
         self.assertIn("ROLE-CTX", captured["system"])
         self.assertIn("陪", captured["system"])           # 陪伴框架(非提醒框架)
+        self.assertNotIn("陪 TA 待着", captured["system"])  # 不再给可照抄的句式范例
+        self.assertTrue(captured["cfg"].get("send_temperature"))
+
+    def test_recent_lines_are_forbidden_and_retried(self):
+        calls = []
+        def _chat(system, msgs, **k):
+            calls.append((system, msgs[-1]["content"]))
+            return "乖，夜里凉，我就在你身边。" if len(calls) == 1 else "窗还开着一条缝，风是凉的。"
+        fires = [{"task_id": 1, "chat": "wxid_her", "text": "乖，夜里凉，我就在你身边。", "ts": 1}]
+        with patch("core.personalization.resolve_persona",
+                   return_value={"persona": {"persona": "P", "name": "N"}}), \
+             patch("core.personalization.role_context", return_value="ROLE"), \
+             patch.object(schedule, "recent_fires", return_value=fires), \
+             patch("core.llm.chat", side_effect=_chat):
+            out = schedule._compute_greeting(self._task(_trigger_at=time.mktime(_struct("21:00"))))
+        self.assertEqual(out, "窗还开着一条缝，风是凉的。")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("夜里凉", calls[0][0])
+        self.assertIn("重复", calls[1][1])
 
     def test_compute_text_routes_greeting(self):
         with patch.object(schedule, "_compute_greeting", return_value="早安") as g:

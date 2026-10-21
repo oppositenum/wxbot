@@ -203,10 +203,27 @@ def _period(hour):
     return '深夜'
 
 
+def _recent_greeting_texts(t, limit=6):
+    """本任务最近发出的问候正文(新→旧)，只用来避免下一句复读。"""
+    chat = t.get('target_username')
+    tid = t.get('id')
+    out = []
+    for f in recent_fires(chat=chat or None, limit=40):
+        if tid is not None and f.get('task_id') != tid:
+            continue
+        text = (f.get('text') or '').strip()
+        if text and text not in out:
+            out.append(text)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _compute_greeting(t):
     """陪伴型问候：带人设、按当前时段自由发挥一句自然的关心/想念/分享；不带提醒框架、不报时。
 
     人设按会话聊天人设(resolve_persona)沿用；也可用任务里显式指定的 persona slug。
+    不给可照抄的句式范例，并把本任务最近发过的正文喂回去，避免整点复读同一句。
     """
     from core import distill, personalization
     moment = datetime.fromtimestamp(t.get('_trigger_at', time.time()), CHINA)
@@ -221,19 +238,38 @@ def _compute_greeting(t):
     if persona is None:
         persona = personalization.resolve_persona(target)['persona']
     role = personalization.role_context(target, persona)
+    prior = _recent_greeting_texts(t)
+    avoid = ''
+    if prior:
+        avoid = ('\n下面这些是你最近已经发给 TA 的问候，下一句必须换说法、换意象、换开头，'
+                 '不能复述、不能只改一两个字：\n' + '\n'.join('- ' + x for x in prior))
     system = (role +
-        '\n\n【任务】你此刻就像陪在 TA 身边的人，主动给 TA 发一句自然的问候/关心/想念，'
-        '或分享一件此刻想到的好玩小事。要有"就在 TA 身边"的陪伴感，随当前时段自由发挥：'
-        '清晨可以说早餐做好了等 TA 起来吃、上午道声早、午间提醒吃饭、傍晚问今天怎么样、'
-        '夜晚说陪 TA 待着、深夜道晚安陪 TA 入睡……口语 1~2 句，温柔自然、每次都不一样、不要报时、'
-        '不要翻旧账、不要自我介绍、不要出现"提醒/定时"这类字眼，也不要编造未真实发生的具体经历'
-        '（没去过的地方、没吃过的饭都不要说）。只输出这句话本身。')
-    data = dict(now_china=moment.strftime('%Y-%m-%d %H:%M'), period=period)
-    result = llm.chat(system, [{'role': 'user',
-        'content': '现在是' + period + '。请自然地发一句此刻的陪伴问候。' + json.dumps(data, ensure_ascii=False)}])
+        '\n\n【任务】你此刻就像陪在 TA 身边的人，主动发一句自然的问候、关心或想念，'
+        '也可以随口分享一个此刻的小念头。语气贴合当前时段，但不要用固定套话，'
+        '也不要把「陪着、晚安、吃饭、想你」当成每次都要出现的模板。'
+        '口语 1~2 句，温柔、具体、和上一句不一样。不要报时，不要翻旧账，不要自我介绍，'
+        '不要出现「提醒/定时」这类字眼，也不要编造未真实发生的具体经历'
+        '（没去过的地方、没吃过的饭都不要说）。只输出这句话本身。' + avoid)
+    data = dict(now_china=moment.strftime('%Y-%m-%d %H:%M'), period=period,
+                weekday=moment.strftime('%A'))
+    user = ('现在是' + period + '。请发一句此刻的陪伴问候，和你最近发过的任何一句都不同。'
+            + json.dumps(data, ensure_ascii=False))
+    cfg = dict(llm.load_cfg(), max_tokens=120, send_temperature=True)
+    if cfg.get('temperature') is None:
+        cfg['temperature'] = 0.95
+    result = llm.chat(system, [{'role': 'user', 'content': user}], cfg=cfg)
     if not isinstance(result, str) or not result.strip():
         raise ValueError('问候文案生成为空')
-    return result.strip()
+    text = result.strip()
+    if prior and text in prior:
+        retry = llm.chat(system, [
+            {'role': 'user', 'content': user},
+            {'role': 'assistant', 'content': text},
+            {'role': 'user', 'content': '这句和最近发过的重复了。换一个完全不同的开头和意象，只输出新的一句。'},
+        ], cfg=cfg)
+        if isinstance(retry, str) and retry.strip() and retry.strip() not in prior:
+            text = retry.strip()
+    return text
 
 
 def _in_quiet(quiet, tm):

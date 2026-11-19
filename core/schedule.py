@@ -195,6 +195,25 @@ def _compute_text(t):
 # ---------------- 陪伴型问候 ----------------
 _PERIODS = [(5, '深夜'), (8, '清晨'), (11, '上午'), (13, '中午'), (17, '下午'), (19, '傍晚'), (23, '夜晚')]
 
+# 每次触发轮换一个主题，逼模型换内容类型，避免总落回「想你了/在干嘛」或景物抒情套话。
+_GREET_THEMES = (
+    ("分享近况", "像微信随手发：说一件你此刻在做、刚停下来、或眼前正在发生的小事；以分享为主，不要盘问对方。"),
+    ("轻轻吐槽", "用半开玩笑的口吻吐槽一件日常小事（天气、拖延、键盘、外卖、犯困…），带一点自己的情绪。"),
+    ("突然想到", "抛出一个刚冒出来的念头、联想或想告诉 TA 的一句话，像想到就说，不要写成告白。"),
+    ("感官碎片", "抓一个此刻的声音/气味/触感/光影细节，用大白话说出来；禁止「我在想…是不是也…」句式。"),
+    ("心情一句", "直接说此刻的心情或状态，短、真、不矫情，不要用问句收尾。"),
+    ("好玩假设", "丢一个轻巧有趣的假设或脑洞，最多一个问号，且问号不能是查岗。"),
+    ("体贴陈述", "表达关心，但用陈述或分享，把「我这边…」说清楚；禁止查岗式提问。"),
+    ("时段口气", "贴合当前时段说一句真人会发的话（早起懵、午后钝、傍晚收工、夜里安静），像随口聊。"),
+)
+
+# 高频复读与查岗套话：命中则触发重试。
+_GREET_BANNED_RE = re.compile(
+    r"想你了|你在干嘛|在干嘛|干嘛呢|吃饭了吗|吃了吗|你还好吗|还好吗|你在忙吗|在忙吗|"
+    r"今天过得怎么样|过得怎么样|刚刚路过|想起你了|我就在你身边|陪你到|"
+    r"我在想.{0,30}是不是也"
+)
+
 
 def _period(hour):
     for h, name in _PERIODS:
@@ -203,12 +222,12 @@ def _period(hour):
     return '深夜'
 
 
-def _recent_greeting_texts(t, limit=6):
+def _recent_greeting_texts(t, limit=12):
     """本任务最近发出的问候正文(新→旧)，只用来避免下一句复读。"""
     chat = t.get('target_username')
     tid = t.get('id')
     out = []
-    for f in recent_fires(chat=chat or None, limit=40):
+    for f in recent_fires(chat=chat or None, limit=80):
         if tid is not None and f.get('task_id') != tid:
             continue
         text = (f.get('text') or '').strip()
@@ -219,11 +238,37 @@ def _recent_greeting_texts(t, limit=6):
     return out
 
 
+def _pick_greet_theme(t, prior):
+    """按已发条数轮换主题，让相邻几次内容类型拉开。"""
+    idx = len(prior) % len(_GREET_THEMES)
+    # 用任务 id 做稳定错位，多条问候任务不会总撞同一个主题序号。
+    try:
+        idx = (idx + int(t.get('id') or 0)) % len(_GREET_THEMES)
+    except (TypeError, ValueError):
+        pass
+    return _GREET_THEMES[idx]
+
+
+def _greeting_too_same(text, prior):
+    """完全重复、命中禁词，或与近期句式骨架过像，都算不合格。"""
+    text = (text or '').strip()
+    if not text:
+        return True
+    if text in prior:
+        return True
+    if _GREET_BANNED_RE.search(text):
+        return True
+    # 「我在想…」景物抒情骨架：近期已出现过就再换。
+    if '我在想' in text and any('我在想' in p for p in prior[:6]):
+        return True
+    return False
+
+
 def _compute_greeting(t):
-    """陪伴型问候：带人设、按当前时段自由发挥一句自然的关心/想念/分享；不带提醒框架、不报时。
+    """陪伴型问候：带人设、按主题轮换主动分享；不带提醒框架、不报时。
 
     人设按会话聊天人设(resolve_persona)沿用；也可用任务里显式指定的 persona slug。
-    不给可照抄的句式范例，并把本任务最近发过的正文喂回去，避免整点复读同一句。
+    每次强制一个主题，并把最近正文与禁词喂回去，避免查岗套话和景物复读。
     """
     from core import distill, personalization
     moment = datetime.fromtimestamp(t.get('_trigger_at', time.time()), CHINA)
@@ -239,35 +284,45 @@ def _compute_greeting(t):
         persona = personalization.resolve_persona(target)['persona']
     role = personalization.role_context(target, persona)
     prior = _recent_greeting_texts(t)
+    theme_name, theme_hint = _pick_greet_theme(t, prior)
     avoid = ''
     if prior:
-        avoid = ('\n下面这些是你最近已经发给 TA 的问候，下一句必须换说法、换意象、换开头，'
-                 '不能复述、不能只改一两个字：\n' + '\n'.join('- ' + x for x in prior))
+        avoid = ('\n下面这些是你最近已经发给 TA 的问候，下一句必须换主题、换开头、换信息点，'
+                 '不能复述、不能只改一两个字，也不能沿用同一句式骨架：\n'
+                 + '\n'.join('- ' + x for x in prior))
     system = (role +
-        '\n\n【任务】你此刻就像陪在 TA 身边的人，主动发一句自然的问候、关心或想念，'
-        '也可以随口分享一个此刻的小念头。语气贴合当前时段，但不要用固定套话，'
-        '也不要把「陪着、晚安、吃饭、想你」当成每次都要出现的模板。'
-        '口语 1~2 句，温柔、具体、和上一句不一样。不要报时，不要翻旧账，不要自我介绍，'
-        '不要出现「提醒/定时」这类字眼，也不要编造未真实发生的具体经历'
-        '（没去过的地方、没吃过的饭都不要说）。只输出这句话本身。' + avoid)
+        '\n\n【任务】你此刻像在和 TA 微信聊天，主动丢一句自然消息。'
+        f'本轮主题：{theme_name}——{theme_hint}'
+        '\n要求：'
+        '\n- 以主动分享为主，少提问；整句最多一个问号，且禁止查岗。'
+        '\n- 口语 1~2 句，像真人随手发出去的，具体、有信息量，不要空泛抒情。'
+        '\n- 严禁套话：想你了、在干嘛、干嘛呢、吃饭了吗、你还好吗、你在忙吗、'
+        '今天过得怎么样、刚刚路过想起你了、我就在你身边。'
+        '\n- 严禁固定句式「我在想……是不是也……」以及连续用窗外/光影/桌角/书页堆景物。'
+        '\n- 不要报时，不要翻旧账，不要自我介绍，不要出现「提醒/定时」。'
+        '\n- 不要编造未真实发生的具体经历（没去过的地方、没吃过的饭都不要说）。'
+        '\n- 只输出这句话本身。' + avoid)
     data = dict(now_china=moment.strftime('%Y-%m-%d %H:%M'), period=period,
-                weekday=moment.strftime('%A'))
-    user = ('现在是' + period + '。请发一句此刻的陪伴问候，和你最近发过的任何一句都不同。'
-            + json.dumps(data, ensure_ascii=False))
+                weekday=moment.strftime('%A'), theme=theme_name)
+    user = (f'现在是{period}。按主题「{theme_name}」发一句主动分享型消息，'
+            '和最近发过的任何一句都不同。' + json.dumps(data, ensure_ascii=False))
     cfg = dict(llm.load_cfg(), max_tokens=120, send_temperature=True)
     if cfg.get('temperature') is None:
-        cfg['temperature'] = 0.95
+        cfg['temperature'] = 1.0
     result = llm.chat(system, [{'role': 'user', 'content': user}], cfg=cfg)
     if not isinstance(result, str) or not result.strip():
         raise ValueError('问候文案生成为空')
     text = result.strip()
-    if prior and text in prior:
+    if _greeting_too_same(text, prior):
         retry = llm.chat(system, [
             {'role': 'user', 'content': user},
             {'role': 'assistant', 'content': text},
-            {'role': 'user', 'content': '这句和最近发过的重复了。换一个完全不同的开头和意象，只输出新的一句。'},
+            {'role': 'user', 'content': (
+                f'不合格：太像套话或和近期重复。请仍围绕主题「{theme_name}」重写，'
+                '换成完全不同的开头和信息点，禁止想你了/在干嘛/吃饭了吗/我在想…是不是也…，'
+                '只输出新的一句。')},
         ], cfg=cfg)
-        if isinstance(retry, str) and retry.strip() and retry.strip() not in prior:
+        if isinstance(retry, str) and retry.strip() and not _greeting_too_same(retry.strip(), prior):
             text = retry.strip()
     return text
 

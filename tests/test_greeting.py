@@ -102,35 +102,67 @@ class Content(Base):
     def test_compose_greeting_persona_and_period(self):
         captured = {}
         def _chat(system, msgs, **k):
-            captured.update(system=system, cfg=k.get("cfg") or {})
-            return "想你了～"
+            captured.update(system=system, user=msgs[-1]["content"], cfg=k.get("cfg") or {})
+            return "键盘敲久了，指尖有点发烫，先跟你吱一声。"
         with patch("core.personalization.resolve_persona",
                    return_value={"persona": {"persona": "P", "name": "N"}}), \
              patch("core.personalization.role_context", return_value="ROLE-CTX"), \
              patch("core.llm.chat", side_effect=_chat):
             out = schedule._compute_greeting(self._task(_trigger_at=time.mktime(_struct("07:30"))))
-        self.assertEqual(out, "想你了～")
+        self.assertEqual(out, "键盘敲久了，指尖有点发烫，先跟你吱一声。")
         self.assertIn("ROLE-CTX", captured["system"])
-        self.assertIn("陪", captured["system"])           # 陪伴框架(非提醒框架)
+        self.assertIn("本轮主题", captured["system"])
+        self.assertIn("主动分享", captured["system"])
+        self.assertIn("想你了", captured["system"])          # 禁词表在提示里
+        self.assertIn("我在想", captured["system"])
         self.assertNotIn("陪 TA 待着", captured["system"])  # 不再给可照抄的句式范例
+        self.assertIn("主题", captured["user"])
         self.assertTrue(captured["cfg"].get("send_temperature"))
+
+    def test_theme_rotates_with_prior_count(self):
+        a = schedule._pick_greet_theme(self._task(), [])
+        b = schedule._pick_greet_theme(self._task(), ["x"])
+        self.assertNotEqual(a[0], b[0])
+        self.assertEqual(len(schedule._GREET_THEMES), 8)
+
+    def test_banned_cliches_force_retry(self):
+        calls = []
+        def _chat(system, msgs, **k):
+            calls.append(msgs[-1]["content"])
+            return "想你了，你在干嘛？" if len(calls) == 1 else "刚泡了杯很烫的茶，舌头差点叛变。"
+        with patch("core.personalization.resolve_persona",
+                   return_value={"persona": {"persona": "P", "name": "N"}}), \
+             patch("core.personalization.role_context", return_value="ROLE"), \
+             patch.object(schedule, "recent_fires", return_value=[]), \
+             patch("core.llm.chat", side_effect=_chat):
+            out = schedule._compute_greeting(self._task(_trigger_at=time.mktime(_struct("21:00"))))
+        self.assertEqual(out, "刚泡了杯很烫的茶，舌头差点叛变。")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("不合格", calls[1])
 
     def test_recent_lines_are_forbidden_and_retried(self):
         calls = []
         def _chat(system, msgs, **k):
             calls.append((system, msgs[-1]["content"]))
-            return "乖，夜里凉，我就在你身边。" if len(calls) == 1 else "窗还开着一条缝，风是凉的。"
-        fires = [{"task_id": 1, "chat": "wxid_her", "text": "乖，夜里凉，我就在你身边。", "ts": 1}]
+            return "乖，夜里凉，窗缝里有点风。" if len(calls) == 1 else "耳机里这首歌忽然变吵，我把它按停了。"
+        fires = [{"task_id": 1, "chat": "wxid_her", "text": "乖，夜里凉，窗缝里有点风。", "ts": 1}]
         with patch("core.personalization.resolve_persona",
                    return_value={"persona": {"persona": "P", "name": "N"}}), \
              patch("core.personalization.role_context", return_value="ROLE"), \
              patch.object(schedule, "recent_fires", return_value=fires), \
              patch("core.llm.chat", side_effect=_chat):
             out = schedule._compute_greeting(self._task(_trigger_at=time.mktime(_struct("21:00"))))
-        self.assertEqual(out, "窗还开着一条缝，风是凉的。")
+        self.assertEqual(out, "耳机里这首歌忽然变吵，我把它按停了。")
         self.assertEqual(len(calls), 2)
-        self.assertIn("夜里凉", calls[0][0])
-        self.assertIn("重复", calls[1][1])
+        self.assertIn("窗缝", calls[0][0])
+        self.assertIn("不合格", calls[1][1])
+
+    def test_poetic_template_counts_as_same(self):
+        prior = ["窗外那层夜雾，我在想它是不是也正裹住了你窗台。"]
+        self.assertTrue(schedule._greeting_too_same(
+            "晨光洒进来，我在想那缕亮是不是也正落在你桌上。", prior))
+        self.assertFalse(schedule._greeting_too_same(
+            "刚把晾衣架卡住的袖子扯下来，胜利感莫名其妙。", prior))
 
     def test_compute_text_routes_greeting(self):
         with patch.object(schedule, "_compute_greeting", return_value="早安") as g:

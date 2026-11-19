@@ -61,6 +61,18 @@ def preflight(chat, session=None, kind='text'):
     return None
 
 
+def _searchable_alias(alias):
+    """真正可被搜索框命中的自定义微信号。
+
+    未设自定义微信号时，库里会留下 wxid_xxx 这种内部号，搜索框搜不到，
+    必须改用备注或昵称。wxid123456 这种用户自己设的微信号仍可搜。
+    """
+    a = (alias or "").strip()
+    if not a:
+        return False
+    return not a.startswith("wxid_")
+
+
 def search_key(chat_username, display_name):
     """把"要发给谁"解析成 (搜索词, 结果行显示名)。
 
@@ -87,9 +99,18 @@ def search_key(chat_username, display_name):
         return display_name, display_name
     if r:
         alias = (r["alias"] or "").strip()
-        locate = display_name or (r["remark"] or "").strip() or (r["nick_name"] or "").strip()
-        if alias and not alias.startswith("wxid_"):
+        remark = (r["remark"] or "").strip()
+        nick = (r["nick_name"] or "").strip()
+        locate = display_name or remark or nick
+        if _searchable_alias(alias):
             return alias, (locate or alias)         # 搜唯一微信号，按显示名定位行
+        # wxid_ 内部号搜不到：优先备注/昵称，避免 display 本身也是 wxid_ 时继续误搜
+        name = remark or nick or (
+            display_name if display_name and not display_name.startswith("wxid_") else "")
+        if name:
+            return name, name
+    if display_name and not str(display_name).startswith("wxid_"):
+        return display_name, display_name
     return display_name, display_name
 
 

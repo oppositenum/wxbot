@@ -135,6 +135,8 @@ class Legacy(Isolated):
         self.assertFalse(ns['searched_by_wechat_id']('group@chatroom'))
         self.assertFalse(ns['searched_by_wechat_id']('Limit'))
         self.assertFalse(ns['searched_by_wechat_id']('ABC'))
+        self.assertTrue(ns['searched_by_wechat_id']('wxid143779'))
+        self.assertFalse(ns['searched_by_wechat_id']('wxid_abc123'))
 
     def test_wrong_header_is_not_sent(self):
         self.execute.return_value = SimpleNamespace(returncode=3, stdout='ERR:wrong-chat\n')
@@ -156,6 +158,25 @@ class Legacy(Isolated):
         with self.contacts([('chat-A', '', 'same name', 'A')]):
             self.send()
         self.assertEqual(self.execute.call_args.args[3], 'same name')
+
+    def test_internal_wxid_alias_searches_nickname_instead(self):
+        # 未设自定义微信号时 alias 是 wxid_xxx，搜索框搜不到，改搜昵称/备注。
+        # wxid143779 这种用户自己设的微信号仍按微信号搜。
+        with self.contacts([('wxid_foo', 'wxid_foo', '', '某人')]):
+            self.assertEqual(sender.search_key('wxid_foo', '某人'), ('某人', '某人'))
+            self.assertEqual(sender.search_key('wxid_foo', ''), ('某人', '某人'))
+            # display 误传成内部号时，仍应落到库里的昵称
+            self.assertEqual(sender.search_key('wxid_foo', 'wxid_foo'), ('某人', '某人'))
+            r = sender.send_text('某人', 'body', chat_username='wxid_foo')
+        self.assertEqual(r['status'], 'submitted')
+        self.assertEqual(self.execute.call_args.args[3], '某人')
+        self.assertEqual(self.execute.call_args.args[5], '某人')
+        with self.contacts([('wxid_aumumj5e5a7f22', 'wxid143779', '', '飒')]):
+            self.assertEqual(sender.search_key('wxid_aumumj5e5a7f22', '飒'),
+                             ('wxid143779', '飒'))
+        self.assertFalse(sender._searchable_alias('wxid_abc123'))
+        self.assertTrue(sender._searchable_alias('wxid143779'))
+        self.assertTrue(sender._searchable_alias('pian1225'))
 
     def test_image_also_searches_by_wechat_id(self):
         image = Path(self.tmp.name) / 'image.png'; image.write_bytes(b'synthetic')

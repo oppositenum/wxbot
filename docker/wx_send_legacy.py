@@ -398,9 +398,12 @@ def _header_conflicts(got, expect):
 
 def searched_by_wechat_id(name):
     """可搜索的微信号：ASCII、无空格、至少 6 位。纯英文短名（Limit）是群名，走标题核对。
-    myuwhn 这种没有数字的微信号也要点联系人行，不能靠回车停在当前会话。"""
+    myuwhn 这种没有数字的微信号也要点联系人行，不能靠回车停在当前会话。
+    wxid_xxx 是内部号，搜索框搜不到，不能当微信号处理。"""
     s = (name or "").strip()
     if not s or " " in s or "@" in s or any(ord(c) >= 128 for c in s):
+        return False
+    if s.startswith("wxid_"):
         return False
     return len(s) >= 6
 

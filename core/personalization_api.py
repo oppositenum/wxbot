@@ -96,11 +96,16 @@ def prompt_preview(body):
     strategies = [dict(field=x['field'], value=x['value'], category='strategy') for x in p.selected_strategies(cid, str(body.get('query', ''))[:1000])]
     safe = [dict(field=x['field'], value=x['value'] if p.FIELDS[x['field']] else '[自由文本已脱敏]',
                  source=x['source'], locked=x.get('locked', False)) for x in chosen]
+    peers = p.shared_peers(cid) if p.get(cid).get('shared_sessions') else []
+    share_note = ('[会话共享开启；同人设已共享 ' + str(len(peers)) +
+                  ' 个其他会话；本预览不读取对方事实正文]') if p.get(cid).get('shared_sessions') else '[会话共享关闭；各会话隔离]'
     return dict(source=resolved['source'], error=resolved['error'], preference_count=len(safe), selected_strategies=strategies,
                 role_name=resolved['persona'].get('name', '角色'), selected_preferences=safe,
+                shared_sessions=bool(p.get(cid).get('shared_sessions')), shared_peer_count=len(peers),
                 context=[p.BEHAVIOR, '【本轮机器人角色】[角色正文已脱敏，实际角色见 role_name]',
                          '【当前相关交流偏好】' + '；'.join(p.LABELS[x['field']] + '：' + x['value'] for x in safe) if safe else '[本轮未选入偏好]',
                          '【可尝试策略，非确定偏好】' + '；'.join(x['value'] for x in strategies) if strategies else '[本轮未选入策略]',
+                         share_note,
                          '[仅当前作用域相关事实和近期对话；本预览未读取]', '[当前请求；本预览未发送]'],
                 model_calls=0, sends=0)
 

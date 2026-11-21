@@ -185,6 +185,56 @@ class Handlers(Base):
         out = ac._cmd_send('张三', self.ctx())
         self.assertIn('用法', out)
 
+    def test_summary_returns_model_text_for_one_chat(self):
+        people = [{'username': 'wx_baiyu', 'name': '白榆', 'nick_name': '白榆', 'remark': '', 'alias': ''}]
+        rows = [
+            dict(type=1, is_self=False, sender_name='白榆', content='哥哥想用那个', create_time=1, local_id=1),
+            dict(type=1, is_self=True, sender_name='我', content='现在过来。', create_time=2, local_id=2),
+        ]
+        with patch('core.contacts.list_contacts', return_value=people), \
+             patch('core.contacts.list_groups', return_value=[]), \
+             patch('core.messages.get_messages', return_value=rows) as got, \
+             patch('core.llm.chat', return_value='白榆在问一件具体的事，你回了现在过来。') as chat:
+            out = ac._cmd_summary('白榆', self.ctx())
+        got.assert_called_once_with('wx_baiyu', limit=40)
+        self.assertIn('白榆', chat.call_args.args[1][0]['content'])
+        self.assertIn('白榆在问', out)
+        self.assertTrue(out.startswith('「白榆」最近'))
+
+    def test_plain_summary_request_extracts_chat_name(self):
+        self.assertEqual(ac.summary_request('白榆最近说了什么'), '白榆')
+        self.assertEqual(ac.summary_request('白榆最近和你聊什么，总结一下给我'), '白榆')
+        self.assertEqual(ac.summary_request('@黎深 总结一下每天都是修罗场'), '每天都是修罗场')
+        self.assertEqual(ac.summary_request('你最近和我聊什么'), '')
+        self.assertEqual(ac.summary_request('今天吃了吗'), '')
+        self.assertEqual(ac.summary_request('/总结 白榆'), '')
+
+    def test_plain_summary_from_admin_uses_same_command(self):
+        rec = []
+        msg = dict(local_id=9, type=1, is_self=False, sender='wxid_admin',
+                   content='白榆最近和你聊什么，总结一下给我')
+        with patch('core.sender.send_text', side_effect=lambda disp, text, **kw: rec.append(text) or {'status': 'confirmed'}), \
+             patch('core.bot.send_name_for', lambda u: '管理员'), \
+             patch('core.send_ledger.stable_id', lambda *a: 'sid'), \
+             patch('core.contacts.list_contacts', return_value=[{'username':'wx_baiyu','name':'白榆','nick_name':'','remark':'','alias':''}]), \
+             patch('core.contacts.list_groups', return_value=[]), \
+             patch('core.messages.get_messages', return_value=[dict(type=1,is_self=False,sender_name='白榆',content='在吗',create_time=1,local_id=1)]), \
+             patch('core.llm.chat', return_value='在问一件事') as cmd:
+            handled = ac.dispatch('wxid_admin', msg, False, {'admins': ['wxid_admin']})
+        self.assertTrue(handled)
+        self.assertIn('白榆', cmd.call_args.args[1][0]['content'])
+        self.assertIn('在问一件事', rec[0])
+
+    def test_summary_rejects_ambiguous_name(self):
+        people = [{'username': 'wx1', 'name': '白榆甲', 'nick_name': '', 'remark': '', 'alias': ''},
+                  {'username': 'wx2', 'name': '白榆乙', 'nick_name': '', 'remark': '', 'alias': ''}]
+        with patch('core.contacts.list_contacts', return_value=people), \
+             patch('core.contacts.list_groups', return_value=[]), \
+             patch('core.llm.chat') as chat:
+            out = ac._cmd_summary('白榆', self.ctx())
+        chat.assert_not_called()
+        self.assertIn('匹配到多个', out)
+
     def test_help_lists_all(self):
         out = ac._cmd_help('', self.ctx())
         for name in ('/朋友圈', '/同步朋友圈', '/设置', '/发', '/帮助'):

@@ -42,6 +42,7 @@ K=recover_key(struct.unpack("<4I",sched))
 ok = out is not None and AES.new(K,AES.MODE_ECB).decrypt(inp)==out
 print("IMGKEY=%s VERIFIED=%s"%(K.hex(),ok),flush=True)
 if ok:
-    path = os.environ.get("WXBOT_IMGKEY_FILE", "/root/imgkey.txt")
+    # Default under /tmp: container WeChat runs as `wechat`, which cannot write /root.
+    path = os.environ.get("WXBOT_IMGKEY_FILE", "/tmp/wxbot_imgkey.txt")
     open(path, "w").write(K.hex())
 gdb.execute("delete"); gdb.execute("detach")

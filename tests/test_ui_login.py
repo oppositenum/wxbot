@@ -29,6 +29,19 @@ class UiLogin(unittest.TestCase):
         r = self.client.get("/api/status")
         self.assertEqual(r.status_code, 401)
 
+    def test_api_token_opens_send_and_push_only(self):
+        with patch.dict(os.environ, {"WXBOT_API_TOKEN": "local-token"}, clear=False):
+            denied = self.client.get("/api/status", headers={"X-Wxbot-Token": "local-token"})
+            self.assertEqual(denied.status_code, 401)
+            wrong = self.client.post("/api/send", headers={"X-Wxbot-Token": "nope"},
+                                     json={"to": "群", "type": "text", "content": "hi"})
+            self.assertEqual(wrong.status_code, 401)
+            ok = self.client.post("/api/send", headers={"X-Wxbot-Token": "local-token"},
+                                  json={"type": "text", "content": "hi"})
+            self.assertEqual(ok.status_code, 400)
+            push = self.client.get("/api/bot/push", headers={"X-Wxbot-Token": "local-token"})
+            self.assertEqual(push.status_code, 200)
+
     def test_wrong_password_rejected(self):
         r = self.client.post("/api/auth/login", json={"username": "test-user", "password": "wrong"})
         self.assertEqual(r.status_code, 401)

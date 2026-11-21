@@ -185,12 +185,13 @@ class Routes(Isolated):
         self.assertEqual(llm.chat_tools("sys", [], self.specs, blocked, self.cfg), "done")
         self.assertEqual(len(self.requests), 2)
 
-    def test_no_fallback_after_empty_agent(self):
+    def test_chat_does_not_call_agent_even_when_enabled(self):
         msg = {"type": 1, "content": "hello", "sender": None}
-        with patch.object(agent, "agent_config", return_value={"enabled": True, "tools": []}), \
-             patch.object(agent, "run", return_value=""), patch.object(bot, "_sender_name", return_value="friend"), \
-             patch.object(bot, "send_name_for", return_value="friend"), patch.object(llm, "chat", blocked):
-            self.assertEqual(bot._ai_reply({"persona": "sys"}, "wxid_friend", msg, [msg]), "")
+        with patch.object(agent, "agent_config", return_value={"enabled": True, "tools": ["web_search"]}), \
+             patch.object(agent, "run", blocked), patch.object(bot, "_sender_name", return_value="friend"), \
+             patch.object(bot, "send_name_for", return_value="friend"), \
+             patch.object(llm, "chat", return_value="hi"):
+            self.assertEqual(bot._ai_reply({"persona": "sys"}, "wxid_friend", msg, [msg]), "hi")
 
 
 class Media(Isolated):

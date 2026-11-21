@@ -71,7 +71,26 @@ def _ui_activity_request():
     return not path.startswith("/api/")
 
 
+_API_TOKEN_PATHS = frozenset({
+    "/api/send", "/api/send/status", "/api/upload",
+    "/api/bot/push", "/api/bot/push/test",
+})
+
+
+def _api_token_request():
+    """本机收发接口凭据。只放行消息 hook 和发送，不打开其余后台。"""
+    path = request.path or "/"
+    if path not in _API_TOKEN_PATHS and not path.startswith("/api/send/status"):
+        return False
+    import hmac
+    expected = os.environ.get("WXBOT_API_TOKEN", "")
+    supplied = request.headers.get("X-Wxbot-Token", "")
+    return bool(expected and supplied) and hmac.compare_digest(expected.encode(), supplied.encode())
+
+
 def _ui_logged_in():
+    if _api_token_request():
+        return True
     if session.get("ui_auth") is True:
         seen = session.get("ui_seen") or 0
         if time.time() - seen <= _ui_idle_seconds():

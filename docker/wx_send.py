@@ -8,6 +8,7 @@ import sys
 import time
 
 DISPLAY = ":0"
+MAIN_WINDOW_NAMES = ("微信", "WeChat", "Weixin")
 
 
 def x(*args, **kw):
@@ -16,9 +17,28 @@ def x(*args, **kw):
 
 
 def win_id():
-    r = x("xdotool", "search", "--name", "^微信$")
-    ids = [l for l in r.stdout.split() if l.strip()]
-    return ids[-1] if ids else None
+    ids = []
+    for title in MAIN_WINDOW_NAMES:
+        r = x("xdotool", "search", "--name", "^" + title + "$")
+        for wid in r.stdout.split():
+            if not wid.strip():
+                continue
+            name = x("xdotool", "getwindowname", wid).stdout.strip()
+            if name == title:
+                ids.append(wid)
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        return None
+    active = x("xdotool", "getactivewindow").stdout.strip()
+    if active in ids:
+        return active
+    best, best_area = ids[0], -1
+    for wid in ids:
+        _px, _py, w, h = win_geom(wid)
+        area = max(0, w) * max(0, h)
+        if area > best_area:
+            best, best_area = wid, area
+    return best
 
 
 def win_geom(wid):

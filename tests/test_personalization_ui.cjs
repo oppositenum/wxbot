@@ -37,8 +37,10 @@ vm.createContext(context);vm.runInContext(html.match(/<script>([\s\S]*?)<\/scrip
   settings={...settings,persona_id:'GONE'};ids['#contacts'].value='friend-A';await ids['#contacts'].onchange();
   assert.equal(ids['#persona'].value,'');assert.equal(ids['#personaMissing'].hidden,false);
   assert(!ids['#persona'].children.some(o=>String(o.textContent).includes('失效引用')));
-  ids['#persona'].value='P';await ids['#saveSettings'].onclick();
-  assert.equal(revision,1);assert.equal(settings.persona_id,'P');
+  ids['#persona'].value='P';ids['#sharedSessions'].checked=true;await ids['#saveSettings'].onclick();
+  assert.equal(revision,1);assert.equal(settings.persona_id,'P');assert.equal(settings.shared_sessions,true);
+  ids['#contacts'].value='friend-A';await ids['#contacts'].onchange();
+  assert.equal(ids['#sharedSessions'].checked,true);
   ids['#query'].value='请详细说';await ids['#preview'].onclick();assert(ids['#previewResult'].textContent.includes('redacted'));
   ids['#batchContacts'].selectedOptions=[{value:'friend-A'}];ids['#limit'].value='2';await ids['#scan'].onclick();
   assert.equal(calls.filter(c=>c.url.includes('/history/preview')).length,1);

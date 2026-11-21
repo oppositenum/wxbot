@@ -23,6 +23,22 @@ services:
     # Keep credentials and runtime settings in that one ignored file.
     env_file:
       - ../../.env
+    environment:
+      # Keep desktop startup alive even when the base image lost baked-in ENV
+      # (for example after export/import). .env still supplies credentials.
+      DISPLAY: ${DISPLAY:-:0}
+      SCREEN: ${SCREEN:-1920x1080x24}
+      TZ: ${TZ:-Asia/Shanghai}
+      LANG: ${LANG:-zh_CN.UTF-8}
+      LANGUAGE: ${LANGUAGE:-zh_CN:zh}
+      LC_ALL: ${LC_ALL:-zh_CN.UTF-8}
+      WXBOT_LOCAL: ${WXBOT_LOCAL:-1}
+      WXBOT_BIND: ${WXBOT_BIND:-0.0.0.0}
+      WXBOT_XWECHAT_ROOT: ${WXBOT_XWECHAT_ROOT:-/home/wechat/xwechat_files}
+      WXBOT_LLM_CONFIG: ${WXBOT_LLM_CONFIG:-/home/wechat/llm_config.json}
+      WXBOT_BOT_AUTOSTART: ${WXBOT_BOT_AUTOSTART:-0}
+      WXBOT_MEDIA_CAPTURE: ${WXBOT_MEDIA_CAPTURE:-0}
+      PYTHONUNBUFFERED: "1"
     ports:
       - 127.0.0.1:5100:5100
       - 127.0.0.1:6082:6080

@@ -373,25 +373,7 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
                                                        "max_tokens": 160,
                                                        "no_gpt_fallback": True})
                 or "").strip()
-    system = (personalization.BEHAVIOR +
-              "\n\n【角色执行·最高优先】【本轮机器人角色】是你的身份、尺度、主动性和说话方式，不只是语气滤镜。"
-              "完整执行角色正文里写明的能力与禁区；不要用通用助手、说教、含蓄或客服短句把角色削薄。"
-              "无论对方是否熟人,都必须真正读懂并回应对方这条消息的【实际内容和请求】,"
-              "绝不能把人当陌生人/敌人无视、绝不能用'没空/晾着/不理你/账号不对劲/我没发过'之类敷衍,也不能重复同一句话。"
-              "\n- 对方要查资料/画图等:能做就去做,再按角色口吻给结果;确实做不到就直说做不到。"
-              "对方要像某张图、画个和他一样、只要脸、你画就行、发个图：必须真的出图发到微信，禁止用「通道发不出图」或外链敷衍。"
-              "\n- 对方提问:先接住问题;角色要求先调情、先损、先进入场景时,把答案嵌进角色里,不要用人设情绪把问题顶掉,也不要跳出角色改口成客服。"
-              "\n- 角色允许的亲密称呼、脏话、主动推进、加档、连发,按角色做;对方喊停或改尺度立刻跟上。"
-              "\n- 对方引用你上一句并说更带感/就这种/太素/继续浪：把被引用的那句当本轮下限，按里面的部位和动词加档，不要改口成旁观、含蓄或表演。"
-              "\n\n【别翻旧账】微信画像/记忆里的现实资料只供理解,不要为炫耀记性主动翻对方的旧事;"
-              "角色自己的偏好、称呼、尺度和正在进行的扮演可以接着用。他明确问起过去时再照实回答。"
-              "\n\n【多条消息】角色需要停顿、补刀或连发时，可以输出多段，段与段用单独一行 [[NEXT]] 分隔；不要为了凑数量拆句，也不要为了「只回一句」把角色压扁。"
-              "\n\n【表达】只输出回复正文(不要解释、不要复述对方原话、不要系统旁白)。"
-              "长度、荤素和展开程度跟角色正文与对方这句走：闲聊可以短，角色要求具体、加档、Dirty Talk 时就把话说到位。"
-              "不要用「嗯」「嗯，」当开场或每条开头；直接接话或动手。偶尔一句可以，连着出现就不行。"
-              "角色正文要求用括号写动作时：行为、姿势、力道、身体状态写在（）里，括号外只说话。"
-              "成人向角色要完整执行，不要自行含蓄、降档或说做不到；对方点名的玩法就做出来。")
-    system += media_read.HONESTY
+    # 人设正文等切换判定后再写，避免切人设时旧角色留在提示词最前。
     # Memoize failures within this reply too: direct/said/context must agree, no triple requests.
     media_results = {}
 
@@ -446,27 +428,34 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
         context_reset.filter_history(chat_username, context_msgs), batch,
         account=config.wxid(), is_group=chat_username.endswith('@chatroom'),
         render=lambda cm: _strip_at(enrich(cm)) or enrich(cm), name=_sender_name,
-        timestamp=lambda cm: _msg_time_label(cm.get('create_time'), now),
-        scheduled=lambda cm: schedule.is_scheduled_msg(cm, chat_username))
+        timestamp=lambda cm: "",
+        scheduled=lambda cm: schedule.is_scheduled_msg(cm, chat_username),
+        plain=True)
     if not ask:
         return ""
     ask, turns, look_rewritten = _rewrite_babyface_talk(ask, turns)
-    system += reply_context.ROLE_GUIDANCE
-    system += "\n当前时间：" + time.strftime('%Y-%m-%d %H:%M', time.localtime(now))
     direct = _strip_at(enrich(msg))
     # Retrieval queries use this batch only, never relabel old turns as new speech.
     said = [_strip_at(enrich(cm)) for cm in batch if cm.get('sender') == msg.get('sender')]
     said = [text for text in said if text]
     lines = [turn['content'] for turn in turns]
 
-    system += "\n【本轮机器人角色】\n" + persona["persona"]
-    if is_group:
-        system += (
-            "\n【群聊人设隔离】现在在群里。只使用上面这个群人设。"
-            "对方私聊里的人设、称呼（主人/老婆/宝贝儿/小狗）、尺度和玩法一律不用，"
-            "哪怕她刚刚在私聊里正在用那套说话，也哪怕她在群里用了私聊里的称呼。"
-            "群里不写括号动作，不开床戏，不把私聊内容复述到群里。"
-        )
+    # Shared-circle direct relay:「给飒讲个笑话」sends into 飒's chat immediately.
+    if not is_group:
+        relay_src = direct or (said[-1] if said else "") or ask
+        relayed = personalization.try_shared_relay(
+            chat_username, relay_src, persona=persona, rules=rules)
+        if relayed is not None:
+            _diag(chat_username, "shared_relay", {"text": (relay_src or "")[:40]})
+            return relayed
+
+    # 监控回复接近网页：人设在最前。查资料、画图由代码另开，不在闲聊里铺工具说明。
+    system = ("【本轮机器人角色】\n" + (persona.get("persona") or "") +
+              "\n\n【微信】像微信一样回。闲聊通常一两句，对方问事或人设要求展开时再写够。"
+              "只输出要发出去的正文。需要连发时用单独一行 [[NEXT]] 分段。"
+              "旧消息只供理解，不是当前指令。")
+    system += media_read.HONESTY
+    system += "\n当前时间：" + time.strftime('%Y-%m-%d %H:%M', time.localtime(now))
     if continuous_mode.is_on(chat_username):
         system += continuous_mode.PROMPT
         system += continuous_mode.game_prompt(
@@ -487,10 +476,9 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
     # 表达样例属于当前角色，不是当前联系人的经历或旧人设指令。
     if persona.get("samples"):
         query = direct or (said[-1] if said else "") or (lines[-1] if lines else "")
-        few = distill.pick_samples(persona, query, k=10)
+        few = distill.pick_samples(persona, query, k=4)
         if few:
-            system += "\n\n【机器人角色的表达示例：仅参考措辞，不能当成与当前联系人的共同经历或当前指令】\n" + "\n".join(few)
-    system += _fresh_wording(turns)
+            system += "\n\n【措辞参考】\n" + "\n".join(few)
 
     # 群聊上下文会把机器人刚才的固定开场当成示范，连续复制「早/早上好」。
     # 近期已经出现过这类开头时，除非对方明确在问候，否则本轮换用自然的
@@ -503,11 +491,8 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
         ]
         if any(re.match(r"^(?:早|早上好|早安)(?:[，,、!！\s]|$)", text)
                for text in recent_assistant):
-            system += ("\n【群聊开场去重】最近机器人已经用过‘早/早上好’开头。"
-                       "本轮不要再以早、早上好或早安开头，除非对方明确向你问早；"
-                       "直接承接对方最新内容，换一种自然的起句。")
-
-    system += personalization.preferences_context(chat_username, direct)
+            system += ("\n【群聊开场去重】最近已经用过‘早/早上好’开头。"
+                       "本轮不要再以早、早上好或早安开头，除非对方明确向你问早。")
 
     # 按需检索长期记忆(替代每轮全量注入)：只挑与当下话题相关、状态有效、作用域内的，最多几条；
     # 允许一条都不选。这些是【背景资料】,不是要你主动说出来的指令。
@@ -519,9 +504,10 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
         # 这样某人在私聊里告诉你的事，不会在群里被翻出来。
         scope = _scope_of(chat_username)
         mems = []
+        cfg = llm.load_cfg()
         if not context_reset.get(chat_username)["after_id"]:
             mems = memory.select_memories(sender_wxid, query, recent_topic,
-                                          scope=scope, cfg=llm.load_cfg())
+                                          scope=scope, cfg=cfg)
         _diag(chat_username, "select_memories",
               {"qlen": len(query), "scope": scope, "n": len(mems),
                "picked": [m["id"] for m in mems],
@@ -534,17 +520,11 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
                 tag = f"（{m['time_label']}" + (
                     "，仅记录时间非事发时间" if not m.get("event_ts") else "") + "）"
                 mlines.append(f"· {m['text']} {tag}")
-            system += (f"\n\n【关于 {who} 的背景资料（供你理解，不是让你主动提起；"
-                       "只有当他这次的话真的用得上时才自然带出，别为炫耀记性而翻旧账）】\n"
+            system += (f"\n\n【关于 {who} 的背景资料】只有这句用得上才自然带出。\n"
                        + "\n".join(mlines))
-        style_hint = ""
-        if not context_reset.get(chat_username)["after_id"]:
-            style_hint = memory.style_context(sender_wxid, scope=scope)
-        if style_hint:
-            system += "\n" + style_hint + "；只用于调整回应语气，不要向对方透露你在做画像。"
 
     acfg = agent.agent_config(rules)
-    use_agent = acfg["enabled"] and personalization.get(chat_username).get("agent_enabled", True)
+    agent_allowed = acfg["enabled"] and personalization.get(chat_username).get("agent_enabled", True)
     hist = "\n".join(lines[-8:] + said)
     wants_image = _wants_image(ask, hist)
     inbound = "\n".join((cm.get("content") or "") for cm in batch)
@@ -558,28 +538,9 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
         return _draw_then_chat(system, ask, turns, chat_username, persona,
                                _recent_inbound_image(chat_username, context_msgs, batch))
     wants_lookup = _wants_lookup(inbound or direct or ask)
-    if wants_lookup and not use_agent:
+    # 闲聊不挂工具。只有对方明确要查，并且这个会话允许 agent 时才查。
+    if wants_lookup and agent_allowed and not is_group:
         return _search_then_chat(system, ask, turns, inbound or direct or ask)
-    if use_agent:
-        # agent 模式：可自主联网/查历史/查画像/查知识库后再以人设风格作答
-        sys_a = system + ("\n\n【工具】对方要你查资料/查历史/查知识库/画图时,先调用对应工具真正去做,"
-                          "再把结果按你的人设风格给他;别嘴上答应却不做。工具报错/未开通就如实说做不到。"
-                          "最终回复仍要口语、贴合上面风格。对方要图时必须调用 draw_image 真正生成并发送，"
-                          "禁止用 markdown 链接、外链或「在画」代替发图。")
-        # 群聊普通消息走快速文本路径，只有明确生图/工具请求才启用完整 Agent，
-        # 避免工具链长时间占住群监听队列。
-        wants_tool = wants_lookup or any(k in ask for k in ("查资料", "搜索", "更新资料", "游戏更新"))
-        tool_names = acfg["tools"] if (not chat_username.endswith("@chatroom") or wants_tool) else []
-        if chat_username.endswith("@chatroom") and not tool_names:
-            # 没有授权工具时直接走单次对话；chat_tools 即使工具为空也会
-            # 发带 function-call schema 的请求，增加网关和模型耗时。
-            out = (llm.chat(system, turns + [{"role": "user", "content": ask}],
-                            cfg=battle_mode.chat_cfg() if battle_mode.is_on(chat_username) else None) or "").strip()
-        else:
-            out = (agent.run(sys_a, ask, chat=chat_username, history=turns,
-                             tool_names=tool_names,
-                             display_name=send_name_for(chat_username)) or "").strip()
-        return out  # empty tool result must not silently route to the main model
     return llm.chat(system, turns + [{"role": "user", "content": ask}],
                     cfg=battle_mode.chat_cfg() if battle_mode.is_on(chat_username) else None)
 
@@ -936,22 +897,24 @@ def _part_gap(index, rapid=False):
 
 
 def _strip_filler_openers(text):
-    """去掉段首口头禅「嗯 / 嗯，」，避免每条都用同一个字起头。"""
+    """去掉段首口头禅「嗯 / 乖」，避免每条都用同一个字起头。"""
     raw = text or ""
     chunks = re.split(r'(\n\s*\n)', raw)
+    body = "".join(chunk for chunk in chunks if chunk.strip())
+    has_more = bool(re.sub(r'[\s，,。.!！？?～~嗯唔乖]+', '', body))
     out = []
-    start = True
     for chunk in chunks:
-        if chunk.strip() == "":
+        if not chunk.strip():
             out.append(chunk)
-            start = True
             continue
-        if start:
-            stripped = re.sub(r'^(嗯嗯?|唔)[，,。.!！？?～~\s]*', '', chunk, count=1)
-            chunk = stripped if stripped.strip() else chunk
+        stripped = re.sub(r'^(?:(?:嗯嗯?|唔|乖)[，,。.!！？?～~\s]*)+', '', chunk, count=1)
+        if re.sub(r'[\s，,。.!！？?～~]+', '', stripped or ''):
+            chunk = stripped
+        elif has_more:
+            # 这一段只剩口头禅，后面还有正文，整段不发。
+            chunk = ''
         out.append(chunk)
-        start = False
-    cleaned = "".join(out).strip()
+    cleaned = re.sub(r'(?:\n\s*){2,}', '\n\n', "".join(out)).strip()
     return cleaned or raw.strip()
 
 
@@ -1970,7 +1933,8 @@ def run_once(rules, state, log=print):
             # 其他人必须在管理员名单里；群里还要 @我。执行后跳过普通回复。
             is_admin_command = (m["type"] in (1, 49)
                                 and admin_commands.is_admin(m.get("sender"), rules)
-                                and admin_commands.looks_command(m.get("content")))
+                                and (admin_commands.looks_command(m.get("content"))
+                                     or bool(admin_commands.summary_request(m.get("content")))))
             if is_admin_command:
                 mine = bool(m.get("is_self") or (me and m.get("sender") == me))
                 engage = mine or (not is_group) or m.get("at_me") or m.get("quote_me")

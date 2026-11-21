@@ -98,18 +98,37 @@ class LegacySearchAdapter:
                 if err == 'ERR:no-focus':
                     return ledger.view(ledger.update(jid, 'not_sent', 'legacy_no_focus'))
                 if err == 'ERR:search-unfocused':
+                    self._leave_search_ui()
                     return ledger.view(ledger.update(jid, 'not_sent', 'legacy_search_unfocused'))
                 if err == 'ERR:chat-not-opened':
+                    self._leave_search_ui()
                     return ledger.view(ledger.update(jid, 'not_sent', 'legacy_chat_not_opened'))
                 if err == 'ERR:wrong-chat':
+                    self._leave_search_ui()
                     return ledger.view(ledger.update(jid, 'not_sent', 'legacy_wrong_chat'))
                 return ledger.view(ledger.update(jid, 'uncertain', 'legacy_ui_result_unknown'))
         except Exception as exc:
             status = 'uncertain' if initiated else 'not_sent'
             reason = 'legacy_exception_' + type(exc).__name__
+            # Timeouts often leave the sidebar search open; clear it so the next
+            # send does not start mid-query.
+            if initiated or 'Timeout' in type(exc).__name__:
+                self._leave_search_ui()
             try:
                 return ledger.view(ledger.update(jid, status, reason))
             except Exception:
                 return dict(ok=False, status=status, reason=reason, job_id=jid, retryable=False)
         finally:
             docker_wx.release_priority()
+
+    @staticmethod
+    def _leave_search_ui():
+        try:
+            docker_wx._exec(
+                'bash', '-lc',
+                "DISPLAY=:0 xdotool search --name '^微信$' | tail -1 | "
+                "xargs -r -I{} sh -c 'xdotool windowactivate --sync {}; "
+                "xdotool key Escape Escape Escape'",
+                timeout=8)
+        except Exception:
+            pass

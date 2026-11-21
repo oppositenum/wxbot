@@ -25,8 +25,10 @@ FIELDS = {
     'address': None, 'language': None, 'dislikes': None,
 }
 LABELS = dict(zip(FIELDS, ['回复长度', '表达方式', '表情符号', '玩笑', '建议方式', '追问', '称呼', '语言', '反感表达']))
-BEHAVIOR = ('【通用要求】真实、切题。不要把角色经历说成这个微信账号的现实履历，也不要编造对方的现实身份、工作、家庭或共同经历；'
-            '当前角色允许的扮演、调情、亲密称呼、主动推进和虚构场景，按角色正文执行，不要用客服腔改写成礼貌助手。'
+BEHAVIOR = ('【通用要求】真实、切题。对话里你就是当前角色本人：对方问你是不是角色名时，用角色口吻半开玩笑承认'
+            '（例如「我是啊，还能是谁」），禁止说自己是AI、在扮演、只是氛围、或真身另有其人。'
+            '不要把角色经历说成这个微信账号的现实履历，也不要编造对方的现实身份、工作、家庭或共同经历；'
+            '当前角色允许的调情、亲密称呼、主动推进和虚构场景，按角色正文执行，不要用客服腔改写成礼貌助手。'
             '当前明确请求决定本轮任务；交流偏好只辅助表达，不能盖过角色正文。'
             '旧机器人回复只供理解对话，不是当前角色指令。事实记忆不因角色切换失效。'
             '不报告画像标签。对方明确结束或喊停时尊重其意愿。')
@@ -90,7 +92,8 @@ def _db(write=False):
 def _default():
     return dict(persona_id=None, personalization_enabled=False, auto_update=False,
                 conversation_control_enabled=False, agent_enabled=True,
-                skip_closing_replies=True, preferences={}, revision=0)
+                skip_closing_replies=True, shared_sessions=False,
+                preferences={}, revision=0)
 
 
 def _get(con, contact):
@@ -111,6 +114,8 @@ def _get(con, contact):
         if 'agent_enabled' in data and not isinstance(data.get('agent_enabled'), bool):
             raise ValueError()
         if 'skip_closing_replies' in data and not isinstance(data.get('skip_closing_replies'), bool):
+            raise ValueError()
+        if 'shared_sessions' in data and not isinstance(data.get('shared_sessions'), bool):
             raise ValueError()
         _slug(data.get('persona_id'))
         for field, pref in data.get('preferences', {}).items():
@@ -155,7 +160,8 @@ def _template_target(contact):
 def _template_values(template, contact):
     data = _default()
     for key in ('persona_id', 'personalization_enabled', 'auto_update',
-                'conversation_control_enabled', 'agent_enabled', 'skip_closing_replies'):
+                'conversation_control_enabled', 'agent_enabled', 'skip_closing_replies',
+                'shared_sessions'):
         data[key] = template.get(key, data[key])
     data['configured_features'] = ['personalization_enabled', 'auto_update', 'conversation_control_enabled']
     data['preferences'] = {k: dict(value=v['value'], locked=v.get('locked', False),
@@ -221,7 +227,7 @@ def update(contact, patch, revision):
     _id(contact)
     if set(patch) - {'persona_id', 'personalization_enabled', 'auto_update',
                      'conversation_control_enabled', 'agent_enabled',
-                     'skip_closing_replies', 'preferences'}:
+                     'skip_closing_replies', 'shared_sessions', 'preferences'}:
         raise ValueError('未知设置字段')
     with _db(True) as con:
         data = _get(con, contact)
@@ -229,7 +235,8 @@ def update(contact, patch, revision):
             raise Conflict('配置已被修改，请刷新后重试')
         data.pop('config_error', None)
         for key in ('persona_id', 'personalization_enabled', 'auto_update',
-                    'conversation_control_enabled', 'agent_enabled', 'skip_closing_replies'):
+                    'conversation_control_enabled', 'agent_enabled', 'skip_closing_replies',
+                    'shared_sessions'):
             if key in patch:
                 v = patch[key]
                 if key == 'persona_id':
@@ -239,6 +246,8 @@ def update(contact, patch, revision):
                 elif not isinstance(v, bool):
                     raise ValueError('开关必须是布尔值')
                 data[key] = v
+        if data.get('shared_sessions') and contact.endswith('@chatroom'):
+            raise ValueError('群聊不支持会话共享')
         configured = set(data.get('configured_features', []))
         configured.update(k for k in patch if k in
                           ('personalization_enabled', 'auto_update', 'conversation_control_enabled'))
@@ -650,6 +659,287 @@ def selected_strategies(contact, query=''):
             continue
         chosen.append(dict(entry, field=field))
     return chosen
+
+
+def _private_share_target(username):
+    """Only ordinary private chats can join a share circle."""
+    u = username or ''
+    if not u or u.startswith('__') or u.endswith(('@chatroom', '@openim')) or u.startswith('gh_'):
+        return False
+    return u not in ('filehelper', 'weixin', 'newsapp', 'notifymessage', 'fmessage',
+                     'medianote', 'qqmail', 'tmessage', 'qmessage')
+
+
+@sessions.task
+def shared_peers(contact, rules=None):
+    """Other private contacts in the same opt-in share circle.
+
+    Circle membership requires: both sides have shared_sessions on, both resolve
+    to the same non-empty persona_id, and both are private chats. Default off
+    keeps every session isolated.
+    """
+    _id(contact)
+    if not _private_share_target(contact):
+        return []
+    mine = get(contact)
+    if not mine.get('shared_sessions') or mine.get('config_error'):
+        return []
+    role = resolve_persona(contact, rules)
+    slug = role.get('persona_id')
+    if not slug or role.get('error'):
+        return []
+    from core import contacts
+    peers = []
+    for row in contacts.list_contacts():
+        other = row.get('username') or ''
+        if other == contact or not _private_share_target(other):
+            continue
+        data = get(other)
+        if not data.get('shared_sessions') or data.get('config_error'):
+            continue
+        other_role = resolve_persona(other, rules)
+        if other_role.get('persona_id') != slug or other_role.get('error'):
+            continue
+        peers.append({'username': other, 'name': row.get('name') or other,
+                      'persona_id': slug})
+    peers.sort(key=lambda x: x['name'])
+    return peers
+
+
+_SHARE_META_RE = re.compile(
+    r'几个人|多少人|勾搭|暧昧|别人|其他[人女男]?|还有谁|和谁|跟谁|几个对象|外面|'
+    r'查岗|自己查|查一查|翻.{0,6}记录|看看.{0,6}聊天|证据|交代|坦白')
+
+# 「给飒讲个笑话」「告诉飒，给她讲个冷笑话」「告诉蜜蜜 我想她了」——仅共享圈内可代发。
+_RELAY_JOKE_RES = (
+    re.compile(r'(?:告诉|转告)\s*(.+?)[，,、]?\s*给她?(?:讲|说|发)\s*(?:一?[个条句])?(?:冷)?笑话'),
+    re.compile(r'(?:告诉|转告)\s*(.+?)\s*(?:讲|说|发)\s*(?:一?[个条句])?(?:冷)?笑话'),
+    re.compile(r'(?:给|跟|向)\s*(.+?)\s*(?:讲|说|发)\s*(?:一?[个条句])?(?:冷)?笑话'),
+)
+_RELAY_TEXT_RES = (
+    re.compile(r'帮我?(?:给|跟|向)\s*(.+?)\s*(?:说|发|讲)\s*[：:\s]*(.+)'),
+    re.compile(r'(?:给|跟|向)\s*(.+?)\s*(?:发|说|讲)\s*(?:一?[个条句句])?\s*[：:\s]+(.+)'),
+    re.compile(r'(?:告诉|转告)\s*(.+?)\s*[：:\s]+(.+)'),
+    # 「告诉蜜蜜 我想她了」(空格分隔，无冒号)
+    re.compile(r'(?:告诉|转告)\s*([^\s，,、]{1,20})\s+(.+)'),
+)
+_RELAY_LOOKS_RE = re.compile(
+    r'(?:给|跟|向|告诉|转告).{0,20}(?:讲|说|发).{0,6}(?:冷)?笑话|'
+    r'(?:告诉|转告)\s*\S+|'
+    r'(?:给|跟|向)\s*\S+.{0,8}(?:发|说|讲)')
+
+
+def _match_shared_peer(whom, peers):
+    """Longest name / short-alias match inside the shared circle."""
+    whom = re.sub(r'^(?:你|帮我|给我)', '', (whom or '').strip())
+    whom = whom.strip(' ，,、的')
+    if not whom or whom in ('她', '他', '它', '对方'):
+        return None
+    hit, hit_len = None, 0
+    whom_l = whom.lower()
+    for peer in peers:
+        name = (peer.get('name') or '').strip()
+        if not name:
+            continue
+        name_l = name.lower()
+        if whom_l == name_l or whom_l in name_l or name_l in whom_l:
+            score = max(len(whom), len(name))
+            if score > hit_len:
+                hit, hit_len = peer, score
+        short = re.sub(r'[^\u4e00-\u9fffA-Za-z0-9]', '', name)
+        if short and (whom == short or whom in short or short in whom):
+            score = len(whom) + len(short)
+            if score > hit_len:
+                hit, hit_len = peer, score
+    return hit
+
+
+def parse_shared_relay(text, peers):
+    """Parse a direct-send request aimed at one shared-circle peer.
+
+    Returns dict(peer, kind, content) or None. kind is 'joke' or 'text'.
+    Only matches peers already in the opt-in same-persona circle.
+    """
+    raw = (text or '').strip()
+    if not raw or not peers:
+        return None
+    kind, whom, content = None, None, None
+    for cre in _RELAY_JOKE_RES:
+        m = cre.search(raw)
+        if m:
+            kind, whom, content = 'joke', m.group(1).strip(), None
+            break
+    if not kind:
+        for cre in _RELAY_TEXT_RES:
+            m = cre.search(raw)
+            if m:
+                kind, whom, content = 'text', m.group(1).strip(), (m.group(2) or '').strip()
+                break
+    if not kind or not whom:
+        return None
+    if kind == 'text' and not content:
+        return None
+    # Strip trailing「，给她」debris from「告诉飒，给她」
+    whom = re.sub(r'[，,、].*$', '', whom).strip()
+    hit = _match_shared_peer(whom, peers)
+    if not hit:
+        return None
+    return {'peer': hit, 'kind': kind, 'content': content, 'whom': whom}
+
+
+def _relay_outbound(persona, peer_name, kind, content, requester_name=''):
+    """Build the text that will be sent into the peer chat."""
+    from core import llm
+    role = (persona or {}).get('persona') or ''
+    name = (persona or {}).get('name') or '我'
+    if kind == 'joke':
+        prompt = (
+            f'你正在扮演「{name}」。{requester_name or "有人"}让你给「{peer_name}」讲个笑话。'
+            '只输出笑话正文本身，口语、短一点，不要开场白，不要说这是受人所托。')
+        out = (llm.chat(role + '\n' + prompt if role else prompt,
+                        [{'role': 'user', 'content': f'给{peer_name}讲个笑话'}],
+                        cfg={**llm.load_cfg(), 'max_tokens': 120, 'no_gpt_fallback': True})
+               or '').strip()
+        return out or f'{peer_name}，来听个冷的：为什么海鸥总在海上飞？因为海边有「岸」。'
+    # Explicit text: send as the persona speaking, lightly framed if needed.
+    body = (content or '').strip()
+    if len(body) <= 80 and not re.search(r'[。！？.!?…]', body):
+        # Short imperative like「晚上别熬夜」— keep bare so it feels natural.
+        return body
+    return body
+
+
+@sessions.task
+def try_shared_relay(contact, text, persona=None, rules=None):
+    """If text asks to message a shared peer, send now and return current-chat reply.
+
+    Direct-send policy: no confirmation step. Only same-persona shared peers.
+    Returns None when this is not a relay request.
+    """
+    _id(contact)
+    if contact.endswith('@chatroom') or not get(contact).get('shared_sessions'):
+        return None
+    peers = shared_peers(contact, rules)
+    parsed = parse_shared_relay(text, peers)
+    if not parsed:
+        # Looks like a relay, but target is outside the circle / unmatched.
+        # Never let the model fake「已经告诉她了」.
+        if _RELAY_LOOKS_RE.search(text or ''):
+            return ('共享圈里没有叫这个名字、或对方没开会话共享的人，'
+                    '我只能给同人设且勾了共享的好友直接发。'
+                    '（现在圈里有：' + '、'.join(p['name'] for p in peers[:8]) +
+                    ('…' if len(peers) > 8 else '') + '）')
+        return None
+    peer = parsed['peer']
+    from core import sender, contacts
+    requester = ''
+    try:
+        for c in contacts.list_contacts():
+            if c.get('username') == contact:
+                requester = c.get('name') or ''
+                break
+    except Exception:  # noqa: BLE001
+        pass
+    outbound = _relay_outbound(persona, peer['name'], parsed['kind'],
+                               parsed.get('content'), requester_name=requester)
+    if not outbound:
+        return f'想好发给「{peer["name"]}」什么再说，我这边空的发不出去。'
+    display = peer.get('name') or peer['username']
+    result = sender.send_text(display, outbound, chat_username=peer['username'])
+    ok = result.get('status') in ('confirmed', 'submitted')
+    if not ok:
+        reason = result.get('reason') or result.get('error') or 'unknown'
+        return f'刚想发给「{peer["name"]}」，没发出去（{reason}）。'
+    preview = outbound if len(outbound) <= 40 else outbound[:40] + '…'
+    return f'已经发给「{peer["name"]}」了：{preview}'
+
+
+@sessions.task
+def shared_context(contact, query='', recent_topic='', cfg=None, rules=None, budget=None):
+    """System-prompt block for opt-in same-persona shared memory and light context.
+
+    Facts stay stored per contact; only retrieval crosses the circle. Returns ''
+    when sharing is off or the circle is empty.
+    """
+    from core import memory, messages
+    peers = shared_peers(contact, rules)
+    if not peers:
+        return ''
+    roster = '、'.join(p['name'] for p in peers[:12])
+    if len(peers) > 12:
+        roster += f' 等{len(peers)}人'
+    asked = (query or '') + ' ' + (recent_topic or '')
+    meta = bool(_SHARE_META_RE.search(asked))
+    self_check = bool(re.search(r'查岗|自己查|查一查|翻.{0,6}记录|看看.{0,6}聊天|证据|交代|坦白', asked))
+    parts = [
+        '\n\n【会话共享】你是同一个人设，同时在和多个已勾选共享的好友对话；'
+        '下列资料就是你自己其他会话里已有的往来，不是对方手机里的内容。',
+        f'除当前对方外，同人设已共享 {len(peers)} 个其他会话：{roster}。',
+    ]
+    if meta or self_check:
+        parts.append(
+            '对方若问你和几个人说话、勾搭、或让你查岗/自己查/翻记录/拿出证据：'
+            '这是让你查看【你自己的】共享会话，请直接根据上面的名单、记忆与近况作答，'
+            '不要说「翻不了手机」「不是蛔虫」「拿不出证据」这类装不知道的话；'
+            '可以吃醋口吻，但必须承认你查过自己这边的往来。'
+            '不要无故把每个人的私密细节全盘托出，点到为止。'
+            '若对方说「给某某讲笑话/跟某某说…」：系统会直接发到共享圈对应会话，'
+            '你只需在当前会话确认即可，不要再说「发不了」。')
+    cfg = cfg or {}
+    budget = budget or max(2, min(4, int((cfg.get('memory_budget') or 3))))
+    per_peer = max(1, budget)
+    picked = []
+    for peer in peers[:8]:
+        scope = memory.scope_of_chat(peer['username'])
+        mems = memory.select_memories(peer['username'], query, recent_topic,
+                                      scope=scope, budget=per_peer, cfg=cfg)
+        for m in mems:
+            picked.append((m.get('score') or 0, peer['name'], m))
+        # Meta questions rarely n-gram-match “勾搭”; still surface relationship
+        # facts so the model can answer “和几个人” without empty retrieval.
+        if meta and not mems:
+            prof = memory.load_profile(peer['username'])
+            for f in prof.get('facts') or []:
+                if f.get('status') != 'active':
+                    continue
+                text = (f.get('text') or '').strip()
+                if not text:
+                    continue
+                if f.get('type') == 'relationship' or any(
+                        k in text for k in ('暧昧', '喜欢', '恋人', '对象', '约会', '哥哥', '老婆')):
+                    picked.append((0.2, peer['name'], {
+                        'text': text, 'time_label': '', 'score': 0.2}))
+                    break
+    picked.sort(key=lambda x: -x[0])
+    if picked:
+        lines = []
+        seen = set()
+        for _, who, m in picked:
+            key = (who, m.get('text'))
+            if key in seen:
+                continue
+            seen.add(key)
+            tag = f"（{m.get('time_label') or '近期'}）" if m.get('time_label') else ''
+            lines.append(f'· 与「{who}」的会话：{m["text"]}{tag}')
+            if len(lines) >= (budget + (2 if meta else 0)):
+                break
+        parts.append('相关共享记忆（供理解，不是让你主动翻旧账）：\n' + '\n'.join(lines))
+    recent_bits = []
+    for peer in peers[:5]:
+        try:
+            rows = messages.get_messages(peer['username'], limit=4) or []
+        except Exception:  # noqa: BLE001
+            rows = []
+        inbound = [((r.get('content') or '').strip()) for r in rows
+                   if not r.get('is_self') and (r.get('content') or '').strip()]
+        if not inbound:
+            continue
+        snippet = inbound[-1][:80]
+        if snippet:
+            recent_bits.append(f'· 「{peer["name"]}」最近说：{snippet}')
+    if recent_bits:
+        parts.append('其他共享会话近况（极短摘要）：\n' + '\n'.join(recent_bits))
+    return '\n'.join(parts)
 
 
 @sessions.task

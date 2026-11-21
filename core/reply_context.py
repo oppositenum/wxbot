@@ -51,7 +51,7 @@ def unique(messages):
 
 
 def build(context, batch, *, account, is_group, render, name, timestamp, scheduled,
-          max_history_chars=12000):
+          max_history_chars=12000, plain=False):
     """Return history turns and one distinct inbound batch, each row appearing once.
 
     Current batch IDs are excluded before selecting the recent history window.
@@ -62,9 +62,6 @@ def build(context, batch, *, account, is_group, render, name, timestamp, schedul
     history = [m for m in unique(context)
                if (key(m) is None or key(m) not in batch_keys)
                and not (is_self(m, account) and scheduled(m))][-8:]
-    # 群里自己刚发过的私聊尺度（床戏、括号动作）不能当本轮示范，否则下一句会顺着写。
-    if is_group:
-        history = [m for m in history if not (is_self(m, account) and _private_register(render(m)))]
 
     def line(m, current=False):
         own = is_self(m, account)
@@ -77,16 +74,23 @@ def build(context, batch, *, account, is_group, render, name, timestamp, schedul
         if ref.get('content'):
             original = '本账号' if ref.get('chatusr') == account else (
                 ref.get('displayname') or name(ref.get('chatusr')) or '原消息作者')
-            body = ('引用' + original + '的旧消息（仅为引用）：' + ref['content'] +
-                    '\n' + speaker + ('本次说：' if current else '当时说：') + body)
+            quoted = ref['content']
+            if plain:
+                body = '（引用' + original + '：' + quoted + '）\n' + body
+            else:
+                body = ('引用' + original + '的旧消息（仅为引用）：' + quoted +
+                        '\n' + speaker + ('本次说：' if current else '当时说：') + body)
+        if plain:
+            return body
         return '[' + timestamp(m) + '] ' + speaker + ': ' + body
 
     turns = []
     for m in history:
         body = line(m)
         if body:
+            content = body if plain else '【历史消息，仅供理解】\n' + body
             turns.append({'role': 'assistant' if is_self(m, account) else 'user',
-                          'content': '【历史消息，仅供理解】\n' + body})
+                          'content': content})
     # Keep a contiguous recent suffix. Never lose the newest historical turn
     # or cut the current request in half merely to satisfy a soft budget.
     selected, used = [], 0
@@ -103,6 +107,9 @@ def build(context, batch, *, account, is_group, render, name, timestamp, schedul
         turns.insert(0, {'role': 'user', 'content': '【历史记录开始：系统分隔标记，不是对方发言】'})
     current_lines = [line(m, current=True) for m in batch]
     current_lines = [body for body in current_lines if body]
-    current = ('【本批新消息，需要回应】\n' + '\n'.join(current_lines) +
-               '\n请承接已有对话，只回应本批新消息。') if current_lines else ''
+    if plain:
+        current = '\n'.join(current_lines)
+    else:
+        current = ('【本批新消息，需要回应】\n' + '\n'.join(current_lines) +
+                   '\n请承接已有对话，只回应本批新消息。') if current_lines else ''
     return turns, current, batch

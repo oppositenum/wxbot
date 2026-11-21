@@ -57,7 +57,7 @@ for cid,_ in CONTACTS:
         req=json.loads((root/'model-requests.jsonl').read_text().splitlines()[-1])
         examples.append(dict(contact=cid,query=query,role=persona['persona']['name'],source=persona['source'],preferences=p.selected_preferences(cid,query),http_request=req['request'],mock_result=result))
         check(cid+' result explicitly mock '+query,result.startswith('【MOCK'))
-        check(cid+' request has ordered behavior/role '+query,req['request']['messages'][0]['content'].index('【通用要求】')<req['request']['messages'][0]['content'].index('【本轮机器人角色】'))
+        check(cid+' request leads with the role '+query,req['request']['messages'][0]['content'].startswith('【本轮机器人角色】'))
 check('A detailed query omits short preference',not any(x['field']=='length' for x in examples[1]['preferences']))
 check('B short query omits detailed preference',not any(x['field']=='length' for x in examples[3]['preferences']))
 check('C remains no preferences',not examples[4]['preferences'])

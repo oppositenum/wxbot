@@ -2,6 +2,8 @@
 
 后台地址默认为 `http://127.0.0.1:5100`。接口支持向好友或群发送文字、图片。
 
+本机调用带请求头 `X-Wxbot-Token: $WXBOT_API_TOKEN`，不必先登录网页。这个凭据只放行 `/api/send`、`/api/send/status`、`/api/upload`、`/api/bot/push` 和 `/api/bot/push/test`。其余后台接口仍要网页登录。未设置 `WXBOT_API_TOKEN` 时，这个请求头无效。
+
 ## 发送文字或图片
 
 `POST /api/send` 接收 JSON：

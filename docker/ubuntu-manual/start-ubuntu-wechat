@@ -4,6 +4,11 @@
 # cleanup so a host reboot or container restart does not exit on a stale :0.
 set -euo pipefail
 umask 077
+# Sending scripts look for the Chinese main window title「微信」. Keep the
+# desktop locale Chinese even when the base image lost baked-in ENV.
+export LANG="${LANG:-zh_CN.UTF-8}"
+export LANGUAGE="${LANGUAGE:-zh_CN:zh}"
+export LC_ALL="${LC_ALL:-zh_CN.UTF-8}"
 mkdir -p "$HOME/.local/state/ubuntu-wechat" "$HOME/Desktop"
 LOG_DIR="$HOME/.local/state/ubuntu-wechat"
 export XDG_RUNTIME_DIR="/tmp/runtime-$(id -u)"

@@ -65,6 +65,33 @@ def looks_command(content):
     return command_text(content).startswith('/')
 
 
+# 管理员用口语问某个会话最近在聊什么。必须同时有总结意图和会话名字。
+_SUMMARY_INTENT = ('总结', '聊聊', '聊了什么', '聊什么', '在聊', '说了什么', '说什么', '聊的什么')
+
+
+def summary_request(content):
+    """从管理员口语里取出要总结的会话名。不是这种请求就返回空。"""
+    text = command_text(content)
+    if not text or text.startswith('/'):
+        return ''
+    if not any(mark in text for mark in _SUMMARY_INTENT):
+        return ''
+    patterns = (
+        r'(?:帮我|给我|跟我)?总结一下\s*(.+?)\s*(?:最近)?(?:和你|跟你|与你)?(?:聊了什么|聊什么|说了什么|说什么|在聊什么|的聊天|的情况)?$',
+        r'(.+?)\s*最近\s*(?:和你|跟你|与你)?\s*(?:聊了什么|聊什么|说了什么|说什么|在聊什么)',
+        r'(?:最近)?(?:和|跟|与)\s*(.+?)\s*(?:聊了什么|聊什么|说了什么|说什么|在聊什么)',
+        r'总结一下\s*(.+)$',
+    )
+    for pattern in patterns:
+        found = re.search(pattern, text)
+        if not found:
+            continue
+        name = re.sub(r'^(帮我|给我|跟我|最近)', '', found.group(1).strip()).strip(' ，,。！？?')
+        if name and name not in ('你', '我', '他', '她'):
+            return name[:40]
+    return ''
+
+
 # ---------- 各命令处理器 ----------
 
 def _cmd_moment(args, ctx):
@@ -272,6 +299,45 @@ def _cmd_help(args, ctx):
     return '可用命令：\n' + _help_text()
 
 
+def _cmd_summary(args, ctx):
+    """/总结 <群或联系人>：把该会话最近的聊天总结后回给管理员。"""
+    import time
+    from core import llm, messages
+    target = (args or '').strip()
+    if not target:
+        return '⚠️ 用法：/总结 <群名或联系人>  例如 /总结 白榆'
+    chat, info = _resolve_chat(target)
+    if not chat:
+        if info == 'none':
+            return f'⚠️ 未找到会话「{target}」'
+        return f'⚠️「{target}」匹配到多个（{info[6:]}），请用更精确的名字'
+    rows = messages.get_messages(chat, limit=40) or []
+    lines = []
+    now = time.time()
+    for m in rows:
+        if m.get('type') not in (1, 49):
+            continue
+        body = (m.get('content') or '').strip()
+        if not body:
+            continue
+        who = '我' if m.get('is_self') else (m.get('sender_name') or '对方')
+        age = _ago(m.get('create_time') or now)
+        lines.append(f'{age} {who}: {body[:180]}')
+    if not lines:
+        return f'「{info}」最近没有可总结的文字消息。'
+    transcript = '\n'.join(lines[-30:])
+    prompt = (f'下面是微信会话「{info}」最近的消息，时间从旧到新。'
+              '用几句口语总结：谁在说、主要在聊什么、有没有没说完的事。'
+              '只根据这些消息，不要补设定，不要评价。')
+    try:
+        text = (llm.chat(prompt, [{'role': 'user', 'content': transcript}]) or '').strip()
+    except Exception as exc:  # noqa: BLE001
+        return '⚠️ 总结失败：' + (str(exc) or type(exc).__name__)[:80]
+    if not text:
+        return f'⚠️「{info}」这次没有总结出来。'
+    return f'「{info}」最近：\n{text}'
+
+
 # ---------- 注册表与分发 ----------
 
 COMMANDS = {
@@ -286,6 +352,7 @@ COMMANDS = {
     '开启持续模式': (_cmd_continuous_on, '/开启持续模式 [会话]  不用@也逐条接话，玩接龙用（默认当前会话，1小时无人说话自动关）'),
     '关闭持续模式': (_cmd_continuous_off, '/关闭持续模式 [会话]  恢复@我才回（默认当前会话）'),
     '帮助': (_cmd_help, '/帮助  查看全部命令'),
+    '总结': (_cmd_summary, '/总结 <群名或联系人>  把该会话最近的聊天总结后回给管理员'),
 }
 
 
@@ -322,6 +389,9 @@ def dispatch(chat, m, is_group, rules, log=print):
     调用前应已确认发送者是管理员（见 is_admin）。这里只负责解析 `/命令`、执行、发回执。
     """
     text = command_text(m.get('content'))
+    asked = summary_request(text)
+    if asked:
+        text = '/总结 ' + asked
     if not text.startswith('/'):
         return False
     body = text[1:].strip()

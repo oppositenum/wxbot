@@ -16,6 +16,10 @@ import sys
 import time
 
 DISPLAY = ":0"
+# Chinese UI title is required for normal operation. After a locale-less
+# container recreate WeChat may briefly open as WeChat/Weixin; accept those
+# exact main-window titles so sending does not die with ERR:no-window.
+MAIN_WINDOW_NAMES = ("微信", "WeChat", "Weixin")
 
 
 def x(*args, **kw):
@@ -23,10 +27,41 @@ def x(*args, **kw):
                   capture_output=True, text=True, **kw)
 
 
+def main_window_ids():
+    """Return candidate main-window IDs, Chinese title first.
+
+    xdotool name search is case-insensitive, so ^WeChat$ can also hit the
+    lowercase Qt helper titled wechat. Always verify the exact title.
+    After a WeChat relaunch there may be more than one「微信」frame; callers
+    should prefer the active or largest one via win_id().
+    """
+    ids = []
+    for title in MAIN_WINDOW_NAMES:
+        r = x("xdotool", "search", "--name", "^" + title + "$")
+        for wid in r.stdout.split():
+            if not wid.strip():
+                continue
+            name = x("xdotool", "getwindowname", wid).stdout.strip()
+            if name == title:
+                ids.append(wid)
+    return list(dict.fromkeys(ids))
+
+
 def win_id():
-    r = x("xdotool", "search", "--name", "^微信$")
-    ids = [l for l in r.stdout.split() if l.strip()]
-    return ids[-1] if ids else None
+    ids = main_window_ids()
+    if not ids:
+        return None
+    active = x("xdotool", "getactivewindow").stdout.strip()
+    if active in ids:
+        return active
+    # Prefer the largest mapped frame; tiny/helper shells are the wrong target.
+    best, best_area = ids[0], -1
+    for wid in ids:
+        _px, _py, w, h = win_geom(wid)
+        area = max(0, w) * max(0, h)
+        if area > best_area:
+            best, best_area = wid, area
+    return best
 
 
 def detached_chat_id(expect):
@@ -35,9 +70,7 @@ def detached_chat_id(expect):
         return None
     r = x("xdotool", "search", "--name", "^" + expect + "$")
     ids = [l for l in r.stdout.split() if l.strip()]
-    main = set()
-    wr = x("xdotool", "search", "--name", "^微信$")
-    main.update(l for l in wr.stdout.split() if l.strip())
+    main = set(main_window_ids())
     for i in reversed(ids):
         name = x("xdotool", "getwindowname", i).stdout.strip()
         if i not in main and name == expect:
@@ -91,17 +124,48 @@ def close_overlays():
             x("xdotool", "windowclose", oid)
 
 
+def leave_search(wid=None):
+    """Abort leftover sidebar search so the next send does not start mid-query."""
+    wid = str(wid or win_id() or "")
+    if not wid:
+        return
+    try:
+        keep_window_size(wid)
+        x("xdotool", "windowactivate", "--sync", wid)
+        x("xdotool", "windowfocus", "--sync", wid)
+        for _ in range(3):
+            key("Escape")
+            time.sleep(0.12)
+    except Exception:
+        pass
+
+
 def ensure_focused(wid):
     """windowactivate 在 XFCE 里经常只点亮窗口、键盘焦点还在别处。
     不点标题栏，也不双击：双击会被微信当成标题栏双击，窗口跟着放大。"""
+    wid = str(wid)
+    leave_search(wid)
     keep_window_size(wid)
     x("xdotool", "windowactivate", "--sync", wid)
     x("xdotool", "windowraise", wid)
     x("xdotool", "windowfocus", "--sync", wid)
     time.sleep(0.2)
-    if x("xdotool", "getactivewindow").stdout.strip() != str(win_id() or wid):
+    active = x("xdotool", "getactivewindow").stdout.strip()
+    # Compare against the window we just focused. A second「微信」frame can
+    # make a fresh win_id() disagree even when focus succeeded.
+    if active != wid:
+        # One retry: click inside the client area (not the title bar).
+        px, py, w, h = win_geom(wid)
+        if w > 0 and h > 0:
+            x("xdotool", "mousemove", str(px + max(80, w // 3)), str(py + max(80, h // 3)), "click", "1")
+            x("xdotool", "windowactivate", "--sync", wid)
+            x("xdotool", "windowfocus", "--sync", wid)
+            time.sleep(0.2)
+            active = x("xdotool", "getactivewindow").stdout.strip()
+    if active != wid:
+        leave_search(wid)
         print("ERR:no-focus"); sys.exit(3)
-    return win_geom(win_id() or wid)
+    return win_geom(wid)
 
 
 def keep_window_size(wid):
@@ -233,12 +297,23 @@ def search_panel_text(px, py):
     return "".join((r.stdout or "").split())
 
 
-def search_shows_query(px, py, name):
+def search_shows_query(px, py, name, held=""):
     q = "".join((name or "").split())
     if not q:
         return False
+    held_l = "".join((held or focused_text() or "").split()).lower()
+    q_l = q.lower()
+    if q_l and (q_l in held_l or held_l in q_l):
+        return True
     got = search_panel_text(px, py)
-    if q.lower() in got.lower():
+    got_l = (got or "").lower()
+    if q_l in got_l:
+        return True
+    # Lossy Chinese OCR: enough shared characters, or a live search-result chrome.
+    overlap = sum(1 for c in q if c in (got or ""))
+    if overlap >= max(2, (len(q) + 1) // 2):
+        return True
+    if any(mark in (got or "") for mark in ("联系人", "搜索网络", "网络查找", "微信号")):
         return True
     return header_matches(got, name)
 
@@ -254,9 +329,15 @@ def focus_search_box(px, py):
     x("xdotool", "type", "--clearmodifiers", "--delay", "20", "q")
     time.sleep(0.45)
     shown = search_panel_text(px, py)
+    held = focused_text()
     key("BackSpace")
     time.sleep(0.12)
-    if "q" not in (shown or "").lower():
+    shown_l = (shown or "").lower()
+    held_l = (held or "").lower()
+    # OCR often misses the tiny probe letter. A live search panel that already
+    # lists「联系人」after typing is enough proof the sidebar search is focused.
+    search_ui = ("联系人" in (shown or "")) or ("contact" in shown_l)
+    if ("q" not in shown_l) and ("q" not in held_l) and not search_ui:
         abort_if_composer_polluted()
         print("ERR:search-unfocused"); sys.exit(3)
     return True
@@ -385,13 +466,22 @@ def _header_one(got, expect):
 def _header_conflicts(got, expect):
     """读出了另一套汉字名。表情读丢可以放过，汉字对不上不能发。"""
     import difflib
-    hb, _lb, _mb = _title_parts(expect)
+    hb, lb, _mb = _title_parts(expect)
     reads = [part for part in (got or "").splitlines() if part.strip()] or [got or ""]
     for raw in reads:
-        ha, _la, _ma = _title_parts(raw)
+        ha, la, _ma = _title_parts(raw)
         if not ha:
             continue
-        if not hb or difflib.SequenceMatcher(None, ha, hb).ratio() < 0.5:
+        if not hb:
+            # Expectation was emoji / latin only (e.g. 🐮🐮🌱besos). OCR often
+            # invents a stray Chinese glyph such as「这」; that alone is not the
+            # wrong chat. Only conflict when the expected latin tail is gone.
+            if lb and lb in (la or ""):
+                continue
+            if lb and la and lb not in la:
+                return True
+            continue
+        if difflib.SequenceMatcher(None, ha, hb).ratio() < 0.5:
             return True
     return False
 
@@ -460,10 +550,19 @@ def open_chat(wid, name, expect=""):
         return px, py, w, h
     _opened_by_alias = ""
     focus_search_box(px, py)
-    x("xdotool", "type", "--clearmodifiers", "--delay", "25", name)
-    time.sleep(0.9)          # 等搜索结果
-    if not search_shows_query(px, py, name):
+    # 中文群名逐字打不进搜索框。粘贴后核对剪贴板，避免把别的内容搜出去。
+    set_clip_text(name)
+    time.sleep(0.1)
+    if clipget() != name:
+        leave_search()
+        print("ERR:search-unfocused"); sys.exit(3)
+    key("ctrl+v")
+    time.sleep(0.3)
+    held_after_type = focused_text()
+    time.sleep(0.7)          # 等搜索结果
+    if not search_shows_query(px, py, name, held=held_after_type):
         abort_if_composer_polluted()
+        leave_search()
         print("ERR:search-unfocused"); sys.exit(3)
     before = header_text(px, py, w, h)
     if searched_by_wechat_id(name):

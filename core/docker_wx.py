@@ -130,15 +130,17 @@ def _capture_img_key_locked(log=lambda m: None, trigger=True):
     pid = (r.stdout or "").strip()
     if not pid:
         return False, "微信未运行"
+    imgkey_file = os.environ.get("WXBOT_IMGKEY_FILE", "/tmp/wxbot_imgkey.txt")
     _exec("bash", "-lc", "pkill -9 gdb 2>/dev/null; "
-          "rm -f /tmp/cap_ready \"${WXBOT_IMGKEY_FILE:-/root/imgkey.txt}\"")
-    # 后台起 gdb 捕获脚本
+          f"rm -f /tmp/cap_ready {imgkey_file!r}")
+    # 后台起 gdb 捕获脚本（默认写 /tmp，wechat 用户可写）
     if LOCAL:
         subprocess.Popen(["bash", "-lc",
+                          f"export WXBOT_IMGKEY_FILE={imgkey_file!r}; "
                           f"gdb -p {pid} -batch -x /usr/local/bin/capture_imgkey.py "
                           f"> /tmp/capk.log 2>&1"])
     else:
-        _docker("exec", "-d", CONTAINER, "bash", "-lc",
+        _docker("exec", "-d", "-e", f"WXBOT_IMGKEY_FILE={imgkey_file}", CONTAINER, "bash", "-lc",
                 f"gdb -p {pid} -batch -x /usr/local/bin/capture_imgkey.py > /tmp/capk.log 2>&1")
     for _ in range(20):                       # 等 gdb 就绪
         if _exec("bash", "-lc", "[ -f /tmp/cap_ready ] && echo r").stdout.strip():
@@ -152,7 +154,7 @@ def _capture_img_key_locked(log=lambda m: None, trigger=True):
                 _exec("bash", "-lc", "DISPLAY=:0 xdotool mousemove 800 400; "
                       "for j in 1 2 3 4; do DISPLAY=:0 xdotool click 4; sleep 0.15; done")
     for _ in range(20):                       # 等抓取结果
-        out = _exec("bash", "-lc", "cat \"${WXBOT_IMGKEY_FILE:-/root/imgkey.txt}\" "
+        out = _exec("bash", "-lc", f"cat {imgkey_file!r} "
                     "2>/dev/null").stdout.strip()
         if out:
             keys_path = config.keys_json()

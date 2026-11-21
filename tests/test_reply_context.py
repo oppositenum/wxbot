@@ -90,13 +90,13 @@ class Builder(unittest.TestCase):
         old=msg(1,'服务器编号碰巧等于另条本地编号',True);old['server_id']=20
         self.assertEqual(len(build([old]+batch,batch)[0]),2)
 
-    def test_group_drops_private_register_self_reply_but_keeps_normal_chat(self):
+    def test_group_keeps_recent_self_reply_like_private_chat(self):
         dirty = msg(1, '操，宝贝儿你这小逼今天这么欠操', True)
         normal = msg(2, '海阔天空', True)
         incoming = msg(3, '不需要吗', sender='wife')
         history, current, _ = build([dirty, normal, incoming], [incoming], group=True)
         blob = '\n'.join(m['content'] for m in history) + current
-        self.assertNotIn('小逼', blob)
+        self.assertIn('小逼', blob)
         self.assertIn('海阔天空', blob)
         self.assertIn('不需要吗', current)
         private_history, _, _ = build([dirty], [incoming], group=False)
@@ -127,13 +127,16 @@ class Integration(Isolated):
         self.assertEqual([m['role'] for m in turns],['user','assistant','user'])
         self.assertIn('本账号已给出的答案',turns[1]['content'])
         self.assertNotIn('早先的问题',turns[-1]['content'])
+        self.assertNotIn('仅供理解', turns[1]['content'])
+        self.assertNotIn('本批新消息', turns[-1]['content'])
         self.assertEqual(str(turns).count('本次的新问题'),1)
-        self.assertIn('不要重复自己的上一段回复',system)
+        self.assertIn('【本轮机器人角色】', system)
+        self.assertNotIn('角色执行·最高优先', system)
 
-    def test_tool_reply_keeps_same_roles_through_agent(self):
-        with patch.object(agent,'agent_config',return_value={'enabled':True,'tools':[]}), \
-             patch('core.read_access.issue',return_value=object()), patch('core.tools.specs_for',return_value=[]), \
-             patch.object(llm,'chat_tools',return_value='response') as chat:
+    def test_chat_stays_on_plain_model_when_agent_enabled(self):
+        with patch.object(agent,'agent_config',return_value={'enabled':True,'tools':['web_search']}), \
+             patch.object(llm,'chat_tools',forbidden), patch.object(agent,'run',forbidden), \
+             patch.object(llm,'chat',return_value='response') as chat:
             bot._ai_reply({'persona':'test'},'chat-A',self.rows[-1],self.rows,batch_msgs=[self.rows[-1]])
         turns=chat.call_args.args[1]
         self.assertEqual([m['role'] for m in turns],['user','assistant','user'])

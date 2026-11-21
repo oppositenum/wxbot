@@ -92,6 +92,90 @@ def summary_request(content):
     return ''
 
 
+_SEND_VERBS = r'(?:发|说|告诉|转告|讲)'
+
+
+def _plain_name(text):
+    """去掉表情和英文尾巴，只留汉字。蜜蜜🌱besos 用来对「告诉蜜蜜」。"""
+    return ''.join(ch for ch in (text or '') if '\u4e00' <= ch <= '\u9fff')
+
+
+def _known_names():
+    """通讯录和群里能用来对上「告诉蜜蜜…」的名字，长的优先。"""
+    from core import contacts
+    names = []
+    for row in list(contacts.list_contacts()) + list(contacts.list_groups()):
+        for key in ('remark', 'name', 'nick_name', 'alias'):
+            value = (row.get(key) or '').strip()
+            if len(value) >= 2:
+                names.append(value)
+    names.sort(key=len, reverse=True)
+    return names
+
+
+def send_request(content, names=None):
+    """从管理员口语里取出代发目标。不是代发就返回空。
+
+    names 是通讯录里的显示名。有它时，「告诉蜜蜜早点睡觉」能对上「蜜蜜🌱besos」。
+    """
+    text = command_text(content)
+    if not text or text.startswith('/') or summary_request(text):
+        return ''
+    # 人设回复里的「告诉你」「发给你」不是代发。只认开头就是指令的短句。
+    if len(text) > 80 or not re.match(
+            r'^(?:帮我|给我|跟我)?(?:把|将)?(?:这张|刚才的?)?(?:图|图片|照片)?\s*(?:告诉|转告|发给|给|跟|向)',
+            text):
+        return ''
+    if names is None:
+        try:
+            names = _known_names()
+        except Exception:
+            names = []
+    glued = re.match(r'(?:帮我|给我|跟我)?(?:告诉|转告)\s*(.+)', text)
+    if glued:
+        blob = glued.group(1).strip()
+        for name in names or []:
+            plain = _plain_name(name)
+            if len(plain) < 2 or not blob.startswith(plain):
+                continue
+            if len(blob) == len(plain):
+                continue
+            body = blob[len(plain):].strip().strip('：:，,')
+            if body and plain not in ('你', '我', '他', '她'):
+                return name + '\n' + body
+    image_only = re.match(
+        r'(?:帮我|给我|跟我)?(?:把|将)?(?:这张|刚才的?)?(?:图|图片|照片)\s*(?:发给|给)\s*(.+)$', text)
+    if not image_only:
+        image_only = re.match(r'(?:帮我|给我|跟我)?发给\s*(.+)$', text)
+    if image_only:
+        who = image_only.group(1).strip().strip(' ，,。！？')
+        who = re.sub(r'(这张|刚才的)?(图|图片|照片)$', '', who).strip(' ，,。')
+        matched = ''
+        for name in names or []:
+            plain = _plain_name(name)
+            if len(plain) >= 2 and (who == plain or who.startswith(plain) or plain.startswith(who)):
+                matched = name
+                break
+        who = matched or who
+        if who and who not in ('你', '我', '他', '她'):
+            return who + '\n'
+    patterns = (
+        rf'(?:帮我|给我|跟我)?(?:告诉|转告)\s*(.+?)\s*[：:，,\s]\s*(.+)',
+        rf'(?:帮我|给我|跟我)?(?:给|跟|向)\s*(.+?)\s*{_SEND_VERBS}\s*(?:一?[句条个])?\s*(?:消息|信息)?\s*[：:，,\s]?\s*(.+)',
+        rf'(?:帮我|给我|跟我)?{_SEND_VERBS}\s*(?:一?[句条个])?\s*(?:消息|信息)?\s*给\s*(.+?)\s*[：:，,\s]\s*(.+)',
+    )
+    for pattern in patterns:
+        found = re.search(pattern, text)
+        if not found:
+            continue
+        who = found.group(1).strip().strip(' ，,。')
+        body = found.group(2).strip()
+        who = re.sub(r'^(帮我|给我|跟我)', '', who).strip()
+        if who and body and who not in ('你', '我', '他', '她') and len(who) <= 40:
+            return who + '\n' + body
+    return ''
+
+
 # ---------- 各命令处理器 ----------
 
 def _cmd_moment(args, ctx):
@@ -187,27 +271,63 @@ def _cmd_set(args, ctx):
     return f"✅ 已{'开启' if on else '关闭'}{name}"
 
 
+def _recent_image(chat, before_id, within=600):
+    """管理员这条指令之前、十分钟内的最近一张图。"""
+    import time
+    from core import messages
+    now = time.time()
+    rows = messages.get_messages(chat, limit=20) or []
+    for m in reversed(rows):
+        if (m.get('local_id') or 0) >= (before_id or 0):
+            continue
+        if m.get('type') != 3:
+            continue
+        if now - (m.get('create_time') or now) > within:
+            continue
+        return m
+    return None
+
+
+def _save_relay_image(chat, message):
+    import os
+    from core import imgdec
+    data, mime = imgdec.get_msg_image(chat, message.get('local_id'))
+    if not data:
+        return None, mime or '找不到这张图'
+    ext = '.png' if 'png' in (mime or '') else '.jpg'
+    folder = os.path.join(os.environ.get('TMPDIR', '/tmp'), 'wxbot-relay')
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, f"{message.get('local_id')}{ext}")
+    with open(path, 'wb') as f:
+        f.write(data)
+    return path, None
+
+
 def _cmd_send(args, ctx):
-    """/发 <联系人> <内容>：代发一条文字消息给某位联系人。"""
-    from core import contacts, sendq
+    """/发 <联系人或群> <内容>：代发文字。内容为空时转发最近一张图。"""
+    from core import sendq
     parts = (args or '').split(None, 1)
-    if len(parts) < 2 or not parts[1].strip():
-        return '⚠️ 用法：/发 <联系人> <内容>'
-    who, content = parts[0], parts[1].strip()
-    people = contacts.list_contacts()
-    exact = [c for c in people if who in (c.get('remark'), c.get('name'),
-                                          c.get('nick_name'), c.get('alias'), c.get('username'))]
-    matches = exact or [c for c in people
-                        if any(who in (c.get(k) or '') for k in ('remark', 'name', 'nick_name', 'alias'))]
-    if not matches:
-        return f'⚠️ 未找到联系人「{who}」'
-    if len(matches) > 1:
-        names = '、'.join((c.get('name') or c.get('username')) for c in matches[:5])
-        return f'⚠️ 「{who}」匹配到多个联系人（{names}…），请用更精确的名字'
-    t = matches[0]
-    display = t.get('name') or t.get('username')
-    sendq.enqueue('text', display, chat=t['username'], content=content)
-    return f"✅ 已发送给 {display}：{content[:40]}"
+    if not parts or not parts[0].strip():
+        return '⚠️ 用法：/发 <联系人或群> <内容>'
+    who = parts[0].strip()
+    content = parts[1].strip() if len(parts) > 1 else ''
+    chat, info = _resolve_chat(who)
+    if not chat:
+        if info == 'none':
+            return f'⚠️ 未找到会话「{who}」'
+        return f'⚠️「{who}」匹配到多个（{info[6:]}），请用更精确的名字'
+    if content:
+        sendq.enqueue('text', info, chat=chat, content=content)
+        return f"✅ 已发送给 {info}：{content[:40]}"
+    source = ctx.get('chat')
+    image = _recent_image(source, (ctx.get('m') or {}).get('local_id'))
+    if not image:
+        return '⚠️ 没有找到刚才的图片。先发一张图，再说发给谁。'
+    path, err = _save_relay_image(source, image)
+    if not path:
+        return '⚠️ 这张图还发不了：' + (err or '未解密')
+    sendq.enqueue('image', info, chat=chat, path=path)
+    return f"✅ 已把刚才的图片发给 {info}"
 
 
 def _resolve_chat(name):
@@ -229,8 +349,11 @@ def _resolve_chat(name):
             hits[c.get('username')] = c.get('remark') or c.get('name') or c.get('username')
     if not hits:
         return None, 'none'
-    if len(hits) > 1:
-        return None, 'multi:' + '、'.join(list(hits.values())[:5])
+    # 「蜜蜜」会同时命中「蜜蜜」和「蜜蜜🌱besos」。一个名字包含另一个时算同一个会话。
+    values = list(hits.values())
+    if len(hits) > 1 and not all(
+            any(a != b and (a in b or b in a) for b in values) for a in values):
+        return None, 'multi:' + '、'.join(values[:5])
     u = next(iter(hits))
     return u, hits[u]
 
@@ -346,7 +469,7 @@ COMMANDS = {
     '同步朋友圈': (_cmd_sync, '/同步朋友圈  立即同步朋友圈'),
     '朋友圈状态': (_cmd_status, '/朋友圈状态  查看同步与自动化状态'),
     '设置': (_cmd_set, '/设置 <项> <开|关>  项：自动评论/自动发布/聊天反思/配图/网络观点/同步'),
-    '发': (_cmd_send, '/发 <联系人> <内容>  代发一条消息给联系人'),
+    '发': (_cmd_send, '/发 <联系人或群> <内容>  代发一条消息'),
     '开启战斗模式': (_cmd_battle_on, '/开启战斗模式 [会话]  对该会话逐条自动回击、据理力争（默认当前会话）'),
     '关闭战斗模式': (_cmd_battle_off, '/关闭战斗模式 [会话]  收兵，停止自动回击（默认当前会话）'),
     '开启持续模式': (_cmd_continuous_on, '/开启持续模式 [会话]  不用@也逐条接话，玩接龙用（默认当前会话，1小时无人说话自动关）'),
@@ -392,6 +515,11 @@ def dispatch(chat, m, is_group, rules, log=print):
     asked = summary_request(text)
     if asked:
         text = '/总结 ' + asked
+    else:
+        relay = send_request(text, _known_names())
+        if relay:
+            who, body = relay.split('\n', 1)
+            text = '/发 ' + who + (' ' + body if body else '')
     if not text.startswith('/'):
         return False
     body = text[1:].strip()

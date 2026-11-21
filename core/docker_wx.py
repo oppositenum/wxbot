@@ -119,6 +119,26 @@ def capture_img_key(log=lambda m: None, trigger=True):
         return _capture_img_key_locked(log, trigger)
 
 
+def _newest_image_dat():
+    """当前账号本地最新的图片 .dat。没有就返回空。"""
+    import glob
+    root = config.db_storage_dir()
+    if not root:
+        return ""
+    base = os.path.dirname(root)
+    newest = ("", 0)
+    for path in glob.glob(base + "/**/*.dat", recursive=True):
+        if "/Img/" not in path and "/Bubble/" not in path:
+            continue
+        try:
+            mtime = os.stat(path).st_mtime
+        except OSError:
+            continue
+        if mtime >= newest[1]:
+            newest = (path, mtime)
+    return newest[0]
+
+
 def _capture_img_key_locked(log=lambda m: None, trigger=True):
     """注入微信抓账号级图片 AES 密钥(存 keys.json 的 _img_key)。切号后可重跑。
     需在抓取期间触发图片显示(冷缓存时打开会话即可)。返回 (ok, key_hex_or_msg)。"""
@@ -131,22 +151,26 @@ def _capture_img_key_locked(log=lambda m: None, trigger=True):
     if not pid:
         return False, "微信未运行"
     imgkey_file = os.environ.get("WXBOT_IMGKEY_FILE", "/tmp/wxbot_imgkey.txt")
+    dat = _newest_image_dat() if trigger else ""
+    if dat:
+        log(f"读取本地图片触发解密: {os.path.basename(dat)}")
     _exec("bash", "-lc", "pkill -9 gdb 2>/dev/null; "
           f"rm -f /tmp/cap_ready {imgkey_file!r}")
     # 后台起 gdb 捕获脚本（默认写 /tmp，wechat 用户可写）
+    env = f"export WXBOT_IMGKEY_FILE={imgkey_file!r}; export WXBOT_IMGKEY_DAT={dat!r}; "
     if LOCAL:
         subprocess.Popen(["bash", "-lc",
-                          f"export WXBOT_IMGKEY_FILE={imgkey_file!r}; "
-                          f"gdb -p {pid} -batch -x /usr/local/bin/capture_imgkey.py "
+                          env + f"gdb -p {pid} -batch -x /usr/local/bin/capture_imgkey.py "
                           f"> /tmp/capk.log 2>&1"])
     else:
-        _docker("exec", "-d", "-e", f"WXBOT_IMGKEY_FILE={imgkey_file}", CONTAINER, "bash", "-lc",
+        _docker("exec", "-d", "-e", f"WXBOT_IMGKEY_FILE={imgkey_file}",
+                "-e", f"WXBOT_IMGKEY_DAT={dat}", CONTAINER, "bash", "-lc",
                 f"gdb -p {pid} -batch -x /usr/local/bin/capture_imgkey.py > /tmp/capk.log 2>&1")
     for _ in range(20):                       # 等 gdb 就绪
         if _exec("bash", "-lc", "[ -f /tmp/cap_ready ] && echo r").stdout.strip():
             break
         _t.sleep(1)
-    if trigger:                               # 触发图片 .dat 读取(滚动若干会话)
+    if trigger and not os.environ.get("WXBOT_IMGKEY_DAT"):
         with UI_LOCK:
             for y in (160, 232, 300, 370, 440):
                 _exec("bash", "-lc", f"DISPLAY=:0 xdotool mousemove 340 {y} click 1")

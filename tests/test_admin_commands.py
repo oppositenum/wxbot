@@ -157,6 +157,7 @@ class Handlers(Base):
     def test_send_unique_contact(self):
         people = [{'username': 'wx1', 'name': '张三', 'nick_name': '', 'remark': '', 'alias': ''}]
         with patch('core.contacts.list_contacts', return_value=people), \
+             patch('core.contacts.list_groups', return_value=[]), \
              patch('core.sendq.enqueue', return_value=('job1', 0)) as en:
             out = ac._cmd_send('张三 在吗', self.ctx())
         en.assert_called_once()
@@ -169,6 +170,7 @@ class Handlers(Base):
         people = [{'username': 'wx1', 'name': '张三', 'nick_name': '', 'remark': '', 'alias': ''},
                   {'username': 'wx2', 'name': '张四', 'nick_name': '', 'remark': '', 'alias': ''}]
         with patch('core.contacts.list_contacts', return_value=people), \
+             patch('core.contacts.list_groups', return_value=[]), \
              patch('core.sendq.enqueue') as en:
             out = ac._cmd_send('张 在吗', self.ctx())
         en.assert_not_called()
@@ -176,13 +178,33 @@ class Handlers(Base):
 
     def test_send_not_found(self):
         with patch('core.contacts.list_contacts', return_value=[]), \
+             patch('core.contacts.list_groups', return_value=[]), \
              patch('core.sendq.enqueue') as en:
             out = ac._cmd_send('李四 在吗', self.ctx())
         en.assert_not_called()
-        self.assertIn('未找到联系人', out)
+        self.assertIn('未找到会话', out)
+
+    def test_send_forwards_recent_image_when_no_text(self):
+        people = [{'username': 'wx_mimi', 'name': '蜜蜜🌱besos', 'nick_name': '', 'remark': '', 'alias': ''}]
+        image = dict(type=3, local_id=4, create_time=1_000)
+        with patch('core.contacts.list_contacts', return_value=people), \
+             patch('core.contacts.list_groups', return_value=[]), \
+             patch('core.messages.get_messages', return_value=[image]) as rows, \
+             patch('core.imgdec.get_msg_image', return_value=(b'\xff\xd8ok', 'image/jpeg')) as decoded, \
+             patch('core.sendq.enqueue', return_value=('job2', 0)) as en, \
+             patch('time.time', return_value=1_100):
+            ctx = self.ctx(chat='wxid_admin', content='发给蜜蜜')
+            ctx['m']['local_id'] = 8
+            out = ac._cmd_send('蜜蜜🌱besos', ctx)
+        rows.assert_called_once_with('wxid_admin', limit=20)
+        decoded.assert_called_once_with('wxid_admin', 4)
+        self.assertEqual(en.call_args.args[0], 'image')
+        self.assertEqual(en.call_args.kwargs['chat'], 'wx_mimi')
+        self.assertTrue(en.call_args.kwargs['path'].endswith('.jpg'))
+        self.assertIn('已把刚才的图片发给', out)
 
     def test_send_usage(self):
-        out = ac._cmd_send('张三', self.ctx())
+        out = ac._cmd_send('', self.ctx())
         self.assertIn('用法', out)
 
     def test_summary_returns_model_text_for_one_chat(self):
@@ -208,6 +230,15 @@ class Handlers(Base):
         self.assertEqual(ac.summary_request('你最近和我聊什么'), '')
         self.assertEqual(ac.summary_request('今天吃了吗'), '')
         self.assertEqual(ac.summary_request('/总结 白榆'), '')
+        self.assertEqual(ac.send_request('告诉白榆，今晚早点睡').split('\n', 1), ['白榆', '今晚早点睡'])
+        self.assertEqual(
+            ac.send_request('告诉蜜蜜早点睡觉', ['蜜蜜🌱besos']).split('\n', 1),
+            ['蜜蜜🌱besos', '早点睡觉'])
+        self.assertEqual(ac.send_request('给每天都是修罗场发一句在的').split('\n', 1), ['每天都是修罗场', '在的'])
+        self.assertEqual(ac.send_request('白榆最近和你聊什么'), '')
+        self.assertEqual(ac.send_request('发给蜜蜜', ['蜜蜜🌱besos']).split('\n', 1), ['蜜蜜🌱besos', ''])
+        self.assertEqual(ac.send_request('把这张图发给蜜蜜', ['蜜蜜🌱besos']).split('\n', 1)[0], '蜜蜜🌱besos')
+        self.assertEqual(ac.send_request('今天吃了吗'), '')
 
     def test_plain_summary_from_admin_uses_same_command(self):
         rec = []
@@ -248,6 +279,8 @@ class Dispatch(Base):
             patch('core.sender.send_text', side_effect=lambda disp, text, **kw: rec.append(text) or {'status': 'confirmed'}),
             patch('core.bot.send_name_for', lambda u: '管理员'),
             patch('core.send_ledger.stable_id', lambda *a: 'sid'),
+            patch('core.contacts.list_contacts', return_value=[]),
+            patch('core.contacts.list_groups', return_value=[]),
         ]
 
     def _msg(self, content):
@@ -339,6 +372,8 @@ class RunOnceIntegration(Base):
             patch.object(bot, '_proactive_worker', lambda *a, **k: None),
             patch.object(bot, 'send_name_for', lambda u: 'Limit'),
             patch('core.sender.send_text', lambda *a, **k: {'status': 'confirmed'}),
+            patch('core.contacts.list_contacts', return_value=[]),
+            patch('core.contacts.list_groups', return_value=[]),
         ]
         for p in patches:
             p.start(); self.addCleanup(p.stop)
@@ -371,6 +406,8 @@ class RunOnceIntegration(Base):
             patch.object(bot, '_proactive_worker', lambda *a, **k: None),
             patch.object(bot, 'send_name_for', lambda u: 'Other'),
             patch('core.sender.send_text', lambda *a, **k: {'status': 'confirmed'}),
+            patch('core.contacts.list_contacts', return_value=[]),
+            patch('core.contacts.list_groups', return_value=[]),
         ]
         for p in patches:
             p.start(); self.addCleanup(p.stop)

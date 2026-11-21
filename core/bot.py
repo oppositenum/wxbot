@@ -1931,10 +1931,14 @@ def run_once(rules, state, log=print):
                 _do_push(m, chat, push_cfg, log)
             # 管理员命令：本账号自己发的 /命令，任意会话、不必 @，一律执行。
             # 其他人必须在管理员名单里；群里还要 @我。执行后跳过普通回复。
+            # 自己发出的人设长回复里会出现「告诉你」。口语代发只认别人发来的短指令。
+            mine = bool(m.get("is_self") or (me and m.get("sender") == me))
             is_admin_command = (m["type"] in (1, 49)
                                 and admin_commands.is_admin(m.get("sender"), rules)
                                 and (admin_commands.looks_command(m.get("content"))
-                                     or bool(admin_commands.summary_request(m.get("content")))))
+                                     or ((not mine)
+                                         and (bool(admin_commands.summary_request(m.get("content")))
+                                              or bool(admin_commands.send_request(m.get("content")))))))
             if is_admin_command:
                 mine = bool(m.get("is_self") or (me and m.get("sender") == me))
                 engage = mine or (not is_group) or m.get("at_me") or m.get("quote_me")

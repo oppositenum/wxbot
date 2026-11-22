@@ -91,9 +91,19 @@ def win_geom(wid):
 
 
 def set_clip_text(s):
-    p = sp.Popen(["xclip", "-selection", "clipboard"], stdin=sp.PIPE, stdout=sp.DEVNULL, stderr=sp.DEVNULL,
-                 env={"DISPLAY": DISPLAY, "PATH": "/usr/bin:/bin"})
-    p.communicate(s.encode("utf-8"))
+    """按 UTF-8 文本写入。剪贴板若正被一张图占着，不声明类型时粘贴出来的不是这段字。"""
+    last = None
+    for _ in range(3):
+        p = sp.Popen(
+            ["xclip", "-selection", "clipboard", "-t", "UTF8_STRING"],
+            stdin=sp.PIPE, stdout=sp.DEVNULL, stderr=sp.DEVNULL,
+            env={"DISPLAY": DISPLAY, "PATH": "/usr/bin:/bin"})
+        p.communicate(s.encode("utf-8"))
+        time.sleep(0.05)
+        last = clipget()
+        if last == s:
+            return
+    return last
 
 
 def set_clip_image(path):
@@ -279,22 +289,61 @@ def abort_if_composer_polluted():
     key("Escape")
 
 
-def search_panel_text(px, py):
-    """侧栏搜索结果区 OCR。用来确认查询词进了搜索，而不是对话框。"""
+def search_panel_image(px, py):
+    """侧栏搜索浮层。群结果可能排在联系人、聊天记录下面，裁得比探测用的区域高。"""
     import uuid
+    from PIL import Image
     tag = uuid.uuid4().hex[:10]
     full = f"/tmp/wx_search_{tag}_full.png"
     crop = f"/tmp/wx_search_{tag}_crop.png"
     x("scrot", "-o", full)
+    im = Image.open(full)
+    box = (px + 60, py + 20, px + 430, py + 620)
+    im.crop(box).save(crop)
+    return im, box, crop
+
+
+def search_panel_text(px, py):
+    """侧栏搜索结果区 OCR。用来确认查询词进了搜索，而不是对话框。"""
     try:
-        from PIL import Image
-        im = Image.open(full)
-        # 搜索框在窗口内容顶下约 40px。从窗口顶裁会裁到标题栏，认不出探测字。
-        im.crop((px + 60, py + 20, px + 430, py + 250)).save(crop)
+        _im, _box, crop = search_panel_image(px, py)
     except Exception:
         return ""
     r = x("tesseract", crop, "stdout", "-l", "chi_sim+eng", "--psm", "6")
     return "".join((r.stdout or "").split())
+
+
+def _group_row_y(im, box, crop_path):
+    """在搜索浮层里找「群聊」分区标题，返回该分区第一条的屏幕 y。
+
+    回车打开的是当前高亮行。群名和网络文章标题相近时，高亮经常落在
+    「搜索网络结果」上，会话不会切换。群行在「群聊」标题下面约 36px。
+    认不出「群聊」两个字就返回空，调用方改走回车，避免点到联系人。
+    """
+    r = x("tesseract", crop_path, "stdout", "-l", "chi_sim", "--psm", "4", "tsv")
+    # 同一行的字分开输出。「群聊」常被读成「群 聊」，整词相等会对不上。
+    rows = {}
+    for line in (r.stdout or "").splitlines()[1:]:
+        parts = line.split("\t")
+        if len(parts) < 12 or not parts[11].strip():
+            continue
+        try:
+            top = int(parts[7])
+            conf = float(parts[10])
+        except ValueError:
+            continue
+        if conf < 0:
+            continue
+        rows.setdefault(top // 8 * 8, []).append((int(parts[6]), parts[11].strip()))
+    label_top = None
+    for top, words in rows.items():
+        text = "".join(w for _x, w in sorted(words))
+        if "群" in text and "聊" in text and "群聊" in text.replace(" ", ""):
+            if label_top is None or top < label_top:
+                label_top = top
+    if label_top is None:
+        return None
+    return box[1] + label_top + 36
 
 
 def search_shows_query(px, py, name, held=""):
@@ -552,10 +601,14 @@ def open_chat(wid, name, expect=""):
     focus_search_box(px, py)
     # 中文群名逐字打不进搜索框。粘贴后核对剪贴板，避免把别的内容搜出去。
     set_clip_text(name)
-    time.sleep(0.1)
     if clipget() != name:
         leave_search()
         print("ERR:search-unfocused"); sys.exit(3)
+    # 焦点刚落到搜索框时，xdotool 可能已经打下残留字母。先清掉再粘贴。
+    key("ctrl+a")
+    time.sleep(0.05)
+    key("Delete")
+    time.sleep(0.05)
     key("ctrl+v")
     time.sleep(0.3)
     held_after_type = focused_text()
@@ -580,9 +633,20 @@ def open_chat(wid, name, expect=""):
             print("ERR:wrong-chat"); sys.exit(3)
         _opened_by_alias = name
         return px, py, w, h
-    # 群名/备注/文件传输助手：联系人第一条已经高亮时回车打开的是这一行。
-    key("Return")
-    time.sleep(1.0)
+    # 群名：先双击「群聊」分区的第一条。回车会打开高亮行，
+    # 群名和网络文章标题相近时，高亮经常是「搜索网络结果」，会话不切换。
+    group_y = None
+    try:
+        panel, box, crop = search_panel_image(px, py)
+        group_y = _group_row_y(panel, box, crop)
+    except Exception:
+        group_y = None
+    if group_y:
+        click_search_hit(px, group_y - py, clicks=2)
+        time.sleep(0.8)
+    else:
+        key("Return")
+        time.sleep(1.0)
     # Do not click the search box again to test whether navigation succeeded:
     # that click steals focus and can reopen a search/preview layer. Escape is
     # keyboard-only cleanup; the title check below is the send safety gate.

@@ -92,7 +92,8 @@ class LegacySearchAdapter:
                     return ledger.view(ledger.update(jid, 'uncertain', 'account_changed_after_initiation'))
                 if result.returncode == 0 and 'OK' in result.stdout.splitlines():
                     return ledger.view(ledger.update(jid, 'submitted', 'legacy_ui_submitted'))
-                err = result.stdout.strip()
+                err = result.stdout.strip().splitlines()
+                err = err[-1].strip() if err else ''
                 if err == 'ERR:no-window':
                     return ledger.view(ledger.update(jid, 'not_sent', 'legacy_no_window'))
                 if err == 'ERR:no-focus':

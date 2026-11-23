@@ -38,6 +38,10 @@ services:
       WXBOT_LLM_CONFIG: ${WXBOT_LLM_CONFIG:-/home/wechat/llm_config.json}
       WXBOT_BOT_AUTOSTART: ${WXBOT_BOT_AUTOSTART:-0}
       WXBOT_MEDIA_CAPTURE: ${WXBOT_MEDIA_CAPTURE:-0}
+      # 本容器会话 cookie。第二个微信容器启动时必须改成别的名字（例如 wxbot_second）。
+      WXBOT_SESSION_COOKIE: ${WXBOT_SESSION_COOKIE:-wxbot_primary}
+      # 可选：指向本容器自己的 secret 文件。空则继续用 .env 里的 WXBOT_SECRET。
+      WXBOT_SECRET_FILE: ${WXBOT_SECRET_FILE:-}
       PYTHONUNBUFFERED: "1"
     ports:
       - 127.0.0.1:5100:5100

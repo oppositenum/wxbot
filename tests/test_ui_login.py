@@ -11,9 +11,12 @@ class UiLogin(unittest.TestCase):
             "WXBOT_UI_USER": "test-user",
             "WXBOT_UI_PASSWORD": "test-password",
             "WXBOT_SECRET": "test-secret",
+            "WXBOT_SESSION_COOKIE": "wxbot_test_a",
+            "WXBOT_SECRET_FILE": "",
         }, clear=False)
         self.env.start()
         import server
+        server.configure_session(server.app)
         server.app.config["TESTING"] = True
         self.client = server.app.test_client()
 
@@ -105,6 +108,34 @@ class UiLogin(unittest.TestCase):
                 self.assertEqual(sess['ui_seen'], seen)
             with patch('server.time.time', return_value=seen + 31):
                 self.assertEqual(self.client.get('/api/auth/status').status_code, 401)
+
+    def test_other_process_cookie_and_secret_are_rejected(self):
+        import server
+        from flask.sessions import SecureCookieSessionInterface
+
+        other = server.Flask("other-process")
+        other.secret_key = "other-secret"
+        other.config["SESSION_COOKIE_NAME"] = "wxbot_test_b"
+        serializer = SecureCookieSessionInterface().get_signing_serializer(other)
+        stolen = serializer.dumps({"ui_auth": True, "ui_seen": 2**31})
+        # Replay B's signed value under A's cookie name. A different secret must not accept it.
+        self.client.set_cookie("wxbot_test_a", stolen)
+        self.assertEqual(self.client.get("/api/status").status_code, 401)
+
+    def test_missing_cookie_name_refuses_auth_app(self):
+        import server
+        with patch.dict(os.environ, {"WXBOT_UI_AUTH": "1", "WXBOT_SESSION_COOKIE": ""}, clear=False):
+            with self.assertRaises(RuntimeError):
+                server.configure_session(server.app)
+        server.configure_session(server.app)
+
+    def test_legacy_session_cookie_is_cleared(self):
+        self.client.set_cookie("session", "stale")
+        response = self.client.get("/api/status")
+        cleared = [v for k, v in response.headers.items(lower=False) if k == "Set-Cookie" and v.startswith("session=")]
+        self.assertTrue(cleared)
+        self.assertIn("Max-Age=0", cleared[0])
+        self.assertIn("Path=/", cleared[0])
 
 
 if __name__ == "__main__":

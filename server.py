@@ -19,12 +19,54 @@ from core import decrypt, contacts, messages, avatars, docker_wx, sender
 from core import bot as botmod
 from tools import wxbot_config
 
+# Auth-off tests boot without a real secret. Never use this when login is on.
+_AUTH_OFF_SECRET = "wxbot-auth-off"
+_LEGACY_SESSION_COOKIE = "session"
+
+
+def _ui_auth_enabled():
+    return os.environ.get("WXBOT_UI_AUTH", "1") != "0"
+
+
+def _session_cookie_name():
+    name = (os.environ.get("WXBOT_SESSION_COOKIE") or "").strip()
+    if _ui_auth_enabled() and (not name or name == _LEGACY_SESSION_COOKIE):
+        raise RuntimeError(
+            "WXBOT_SESSION_COOKIE must be a unique name other than 'session' when WXBOT_UI_AUTH is on"
+        )
+    return name or _LEGACY_SESSION_COOKIE
+
+
+def _session_secret():
+    path = (os.environ.get("WXBOT_SECRET_FILE") or "").strip()
+    if path:
+        try:
+            secret = open(path, "r", encoding="utf-8").read().strip()
+        except OSError as exc:
+            raise RuntimeError(f"WXBOT_SECRET_FILE is missing or unreadable: {path}") from exc
+        if not secret:
+            raise RuntimeError(f"WXBOT_SECRET_FILE is empty: {path}")
+        return secret
+    secret = os.environ.get("WXBOT_SECRET") or ""
+    if secret:
+        return secret
+    if _ui_auth_enabled():
+        raise RuntimeError("WXBOT_SECRET_FILE or WXBOT_SECRET is required when WXBOT_UI_AUTH is on")
+    return _AUTH_OFF_SECRET
+
+
+def configure_session(app):
+    """Bind this process's cookie name and secret. Called at import and by tests."""
+    app.secret_key = _session_secret()
+    app.config["SESSION_COOKIE_NAME"] = _session_cookie_name()
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+    app.config["SESSION_REFRESH_EACH_REQUEST"] = False
+    app.config["PERMANENT_SESSION_LIFETIME"] = int(os.environ.get("WXBOT_UI_IDLE") or 600)
+
+
 app = Flask(__name__, static_folder=None)
-app.secret_key = os.environ.get("WXBOT_SECRET") or os.environ.get("WXBOT_ADMIN_READ_TOKEN") or os.urandom(32)
-app.config["SESSION_COOKIE_HTTPONLY"] = True
-app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-app.config["SESSION_REFRESH_EACH_REQUEST"] = False
-app.config["PERMANENT_SESSION_LIFETIME"] = int(os.environ.get("WXBOT_UI_IDLE") or 600)
+configure_session(app)
 from core.personalization_api import bp as personalization_bp
 app.register_blueprint(personalization_bp)
 
@@ -37,10 +79,6 @@ def personalization_page():
 from core import account_session as sessions
 
 _UI_PUBLIC = frozenset({"/login", "/api/auth/login", "/api/auth/logout"})
-
-
-def _ui_auth_enabled():
-    return os.environ.get("WXBOT_UI_AUTH", "1") != "0"
 
 
 def _ui_credentials():
@@ -165,6 +203,17 @@ def require_ui_login():
     if path.startswith("/api/"):
         return jsonify({"error": "需要登录"}), 401
     return redirect("/login")
+
+
+@app.after_request
+def clear_legacy_session_cookie(response):
+    # Old builds shared the cookie name "session" across processes on one host.
+    if _ui_auth_enabled() and _LEGACY_SESSION_COOKIE in request.cookies:
+        response.set_cookie(
+            _LEGACY_SESSION_COOKIE, "", max_age=0, path="/", httponly=True, samesite="Lax",
+        )
+    return response
+
 
 def _config_access():
     """Allow same-origin local UI or the configured admin token (Docker bridge requests

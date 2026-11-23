@@ -24,7 +24,8 @@ PROBE_TIMEOUT = 2
 POOL_SIZE = 5
 REGISTRY = Path(os.environ.get(
     "WXBOT_CONSOLE_REGISTRY", str(Path.home() / ".wxbot" / "console" / "registry.json")))
-# Exclusive lock lives on the registry path itself (not a sibling .lock file).
+# Lock a stable sibling. os.replace swaps the registry inode, so LOCK_EX on
+# registry.json itself does not cover the next writer.
 NAME_RE = re.compile(r"^wxbot[a-zA-Z0-9_.-]*$")
 WEB_CONTAINER_PORT = "5100"
 VNC_CONTAINER_PORT = "6080"
@@ -61,11 +62,14 @@ def _write_unlocked(value):
     os.replace(tmp, REGISTRY)
 
 
+def lock_path():
+    return Path(str(REGISTRY) + ".lock")
+
+
 def locked(modify):
-    """fcntl exclusive lock around one read-modify-write of the registry file."""
+    """Hold LOCK_EX on registry.json.lock across read, temp write, and replace."""
     REGISTRY.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_RDWR | os.O_CREAT
-    fd = os.open(REGISTRY, flags, 0o600)
+    fd = os.open(lock_path(), os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         current = _read_unlocked()
@@ -126,6 +130,51 @@ def published_ports(name):
     return parse_port_lines(proc.stdout)
 
 
+def _bind_ends(text):
+    """Split a docker bind 'source:dest' without treating ':' inside the source as dest.
+
+    Dest paths we care about are absolute and contain no extra ':'.
+    """
+    if ":/" not in text:
+        return text, ""
+    src, dest = text.rsplit(":", 1)
+    if not dest.startswith("/"):
+        src, dest = text.split(":", 1)
+    return src, dest
+
+
+def volume_name_from_source(src):
+    """Volume name is the leaf, or the segment before a docker `_data` mountpoint."""
+    parts = [part for part in src.split("/") if part]
+    if not parts:
+        return ""
+    if parts[-1] == "_data" and len(parts) >= 2:
+        return parts[-2]
+    return parts[-1]
+
+
+def volume_from_binds(binds):
+    """Prefer the mount at /home/wechat. Never treat a directory named wxbot as the volume."""
+    if not isinstance(binds, list):
+        return ""
+    parsed = []
+    for bind in binds:
+        src, dest = _bind_ends(str(bind))
+        name = volume_name_from_source(src)
+        if name:
+            parsed.append((dest, name))
+    for dest, name in parsed:
+        if dest == "/home/wechat":
+            return name
+    homes = [name for _dest, name in parsed if name.endswith("-home")]
+    if homes:
+        return max(homes, key=len)
+    named = [name for _dest, name in parsed if name.startswith("wxbot-")]
+    if named:
+        return max(named, key=len)
+    return ""
+
+
 def inspect_meta(name):
     fmt = "{{json .HostConfig.Binds}}\t{{.Config.Hostname}}"
     proc = docker_run(["inspect", "--format", fmt, name])
@@ -138,21 +187,7 @@ def inspect_meta(name):
             binds = json.loads(raw_binds) if raw_binds and raw_binds != "<no value>" else []
         except ValueError:
             binds = []
-        if isinstance(binds, list):
-            for bind in binds:
-                text = str(bind)
-                src = text.split(":", 1)[0]
-                parts = [part for part in src.split("/") if part and part != "_data"]
-                base = ""
-                for part in reversed(parts):
-                    if part.endswith("-home") or part.startswith("wxbot"):
-                        base = part
-                        break
-                if not base and parts:
-                    base = parts[-1]
-                if base:
-                    volume = base
-                    break
+        volume = volume_from_binds(binds)
     return volume, hostname
 
 

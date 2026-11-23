@@ -64,13 +64,33 @@ def desktop_url(profile):
             "?autoconnect=true&resize=scale&view_only=false&path=websockify")
 
 
+def _host_agent_post(op, container):
+    """Ask the host helper. None means it is unreachable."""
+    import json as _json
+    import urllib.request
+    from core.multi_account import HOST_AGENT_URL, _host_agent_token
+    token = _host_agent_token()
+    if not token:
+        return None
+    body = _json.dumps({"token": token, "op": op, "container": container}).encode("utf-8")
+    req = urllib.request.Request(
+        HOST_AGENT_URL.rstrip("/") + "/docker", data=body,
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return _json.loads(resp.read() or b"{}")
+    except Exception:
+        return None
+
+
 def probe(profile):
     """Only inspect the named container and process. Neither implies login."""
     result = dict(profile, desktop_url=desktop_url(profile), container_running=False,
                   wechat_running=False, login_state="unknown", error=None)
+    container = profile["container"]
     try:
         inspected = subprocess.run(
-            ["docker", "inspect", "--format", "{{.State.Running}}", profile["container"]],
+            ["docker", "inspect", "--format", "{{.State.Running}}", container],
             capture_output=True, text=True, timeout=4)
         if inspected.returncode:
             result["error"] = "未找到容器，或 Docker 暂不可用"
@@ -78,15 +98,26 @@ def probe(profile):
         result["container_running"] = inspected.stdout.strip() == "true"
         if result["container_running"]:
             process = subprocess.run(
-                ["docker", "exec", profile["container"], "pgrep", "-f", "/opt/wechat/wechat"],
+                ["docker", "exec", container, "pgrep", "-f", "/opt/wechat/wechat"],
                 capture_output=True, text=True, timeout=4)
             if process.returncode not in (0, 1):
                 result["error"] = "暂时无法检查微信进程"
             result["wechat_running"] = process.returncode == 0 and bool(process.stdout.strip())
     except FileNotFoundError:
-        # Running inside the container: no docker CLI here. The embedded desktop
-        # below is the source of truth, so don't raise a false alarm.
-        result["error"] = None
+        # No docker CLI inside the container. Ask the host agent instead of
+        # reporting a dead desktop (the page shows 「桌面未运行」 when error is empty).
+        agent = _host_agent_post("inspect", container)
+        if not agent or not agent.get("ok"):
+            result["error"] = "宿主状态服务不可用"
+            return result
+        result["container_running"] = bool(agent.get("running"))
+        if not result["container_running"]:
+            return result
+        wechat = _host_agent_post("wechat", container)
+        if not wechat or not wechat.get("ok"):
+            result["error"] = "宿主状态服务不可用"
+            return result
+        result["wechat_running"] = bool(wechat.get("running"))
     except (OSError, subprocess.TimeoutExpired):
         result["error"] = "连接 Docker 超时或失败"
     return result

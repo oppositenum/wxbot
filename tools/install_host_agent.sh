@@ -40,7 +40,6 @@ if [[ -f .env ]]; then
     printf '\nWXBOT_HOST_AGENT_TOKEN=%s\n' "$TOKEN" >> .env
   fi
   grep -q '^WXBOT_HOST_AGENT_URL=' .env || printf 'WXBOT_HOST_AGENT_URL=http://host.docker.internal:5199\n' >> .env
-  grep -q '^WXBOT_SELF_CONTAINER=' .env || printf 'WXBOT_SELF_CONTAINER=wxbot\n' >> .env
   rm -f .env.bak
   echo "[host-agent] wrote WXBOT_HOST_AGENT_TOKEN into .env"
 else

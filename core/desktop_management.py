@@ -1,66 +1,66 @@
 """Manual desktop management; does not import account readers or send workers."""
 from pathlib import Path
-import json
 import os
 import subprocess
+from urllib.parse import urlsplit
 
 from flask import Blueprint, Flask, has_request_context, jsonify, request, send_from_directory
 
 
-# Fallback used only when the multi-account registry can't be read. Points at the
-# real primary container/port (not the retired Debian "wxbot" container).
+# This process is one WeChat. The page never lists other accounts.
 DEFAULT_PROFILES = {
     "primary": {"id": "primary", "name": "当前微信号", "container": "wxbot-ubuntu-manual",
-                "port": 6082, "system": "Ubuntu 24.04 · XFCE", "home": "/home/wechat"},
+                "system": "Ubuntu 24.04 · XFCE", "home": "/home/wechat"},
 }
 STATIC = Path(__file__).resolve().parents[1] / "static"
 
 
-def _load_profiles():
-    """Instances come from the multi-account registry so this page always matches
-    the accounts manager (adds new WeChats automatically, drops retired ones)."""
-    try:
-        import config
-        reg = Path(config.WORK_DIR) / "multi_accounts.json"
-        accounts = json.loads(reg.read_text("utf-8")).get("accounts", [])
-    except Exception:
-        accounts = []
-    profiles = {}
-    for a in accounts:
-        if a.get("enabled") is False:
-            continue
-        pid = str(a.get("id") or "")
-        if not pid:
-            continue
-        profiles[pid] = {
-            "id": pid,
-            "name": a.get("label") or pid,
-            "container": a.get("container") or f"wxbot-{pid}",
-            "port": a.get("vnc_port") or 6082,
-            "system": "Ubuntu 24.04 · XFCE",
-            "home": "/home/wechat",
-        }
-    return profiles or dict(DEFAULT_PROFILES)
+def own_profile():
+    profile = dict(DEFAULT_PROFILES["primary"])
+    raw = os.environ.get("WXBOT_NOVNC_PORT", "").strip()
+    if raw:
+        try:
+            port = int(raw)
+        except ValueError:
+            port = 0
+        if 0 < port <= 65535:
+            profile["port"] = port
+    return profile
 
 
-def _default_instance(profiles):
-    return next(iter(profiles), "primary")
+def _page_hostname():
+    """Hostname from the request Host, including bracketed IPv6. Never rsplit."""
+    if not has_request_context():
+        return None
+    host = request.host or ""
+    if host != host.strip() or "/" in host or "@" in host or "\\" in host:
+        return None
+    name = urlsplit("//" + host).hostname
+    if not name or name == "0.0.0.0":
+        return None
+    if any(c in name for c in " /?#@"):
+        return None
+    return name
 
 
 def desktop_url(profile):
     public_url = os.environ.get("WXBOT_PUBLIC_NOVNC_URL", "").strip()
     if public_url:
         return public_url
-    # When the management API is reached through a reverse proxy, keep the
-    # browser on that same public origin. The proxy must route /vnc/ to 6082
-    # and pass WebSocket Upgrade/Connection headers.
-    if has_request_context():
-        host = request.host
-        host_name = host.rsplit(":", 1)[0].strip("[]")
-        if host_name not in {"localhost", "127.0.0.1", "::1"}:
-            scheme = request.headers.get("X-Forwarded-Proto", request.scheme).split(",", 1)[0].strip()
-            return f"{scheme}://{host}/vnc/vnc.html?autoconnect=true&resize=scale&view_only=false&path=vnc/websockify"
-    return (f"http://localhost:{profile['port']}/vnc.html"
+    raw = os.environ.get("WXBOT_NOVNC_PORT", "").strip()
+    if not raw:
+        return ""
+    try:
+        port = int(raw)
+    except ValueError:
+        return ""
+    if port <= 0 or port > 65535:
+        return ""
+    name = _page_hostname()
+    if not name:
+        return ""
+    bracket = f"[{name}]" if ":" in name else name
+    return (f"http://{bracket}:{port}/vnc.html"
             "?autoconnect=true&resize=scale&view_only=false&path=websockify")
 
 
@@ -78,7 +78,7 @@ def probe(profile):
         result["container_running"] = inspected.stdout.strip() == "true"
         if result["container_running"]:
             process = subprocess.run(
-                ["docker", "exec", profile["container"], "pgrep", "-x", "wechat"],
+                ["docker", "exec", profile["container"], "pgrep", "-f", "/opt/wechat/wechat"],
                 capture_output=True, text=True, timeout=4)
             if process.returncode not in (0, 1):
                 result["error"] = "暂时无法检查微信进程"
@@ -102,14 +102,14 @@ def desktop_page():
 
 @bp.get("/api/desktop/instances")
 def instances():
-    profiles = _load_profiles()
-    return jsonify(default_instance=_default_instance(profiles), mode="manual_desktop",
-                   instances=[dict(p, desktop_url=desktop_url(p)) for p in profiles.values()])
+    profile = own_profile()
+    row = dict(profile, desktop_url=desktop_url(profile))
+    return jsonify(default_instance=profile["id"], mode="manual_desktop", instances=[row])
 
 
 def selected_profile():
-    profiles = _load_profiles()
-    return profiles.get(request.args.get("instance") or _default_instance(profiles))
+    # One container, one desktop. A client instance= must not switch profiles.
+    return own_profile()
 
 
 @bp.get("/api/desktop/status")

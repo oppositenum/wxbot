@@ -25,7 +25,6 @@ header{padding:14px 22px;background:white;border-bottom:1px solid #dde4df;displa
 <body>
 <header>
   <h1>微信桌面</h1>
-  <label>当前实例 <select id="instance" aria-label="选择微信实例" disabled></select></label>
   <span class="muted" id="system"></span>
   <div class="actions"><button id="refresh">刷新状态</button><button id="reconnect">重新连接桌面</button><a class="action primary" id="open" target="_blank" rel="noopener">独立窗口打开</a></div>
 </header>
@@ -34,16 +33,16 @@ header{padding:14px 22px;background:white;border-bottom:1px solid #dde4df;displa
 </div>
 <main id="surface"><div id="empty">正在加载微信桌面…</div></main>
 <footer><strong>手动控制 · 自动回复已关闭</strong>　可直接在上方微信中聊天和发送图片。<br>
-  <span id="files"></span><span class="tip"> 后台联系人、消息同步和自动发送尚未接入；切换实例只切换所查看的桌面。</span>
+  <span id="files"></span><span class="tip"> 后台联系人、消息同步和自动发送尚未接入。</span>
 </footer>
 <script>
 const $=id=>document.getElementById(id);
-let profiles=[],selected=null,generation=0,busy=false;
+let selected=null,generation=0,busy=false;
 async function refreshStatus(){
   if(!selected||busy)return;
-  busy=true;const id=selected.id,version=generation;
+  busy=true;const version=generation;
   try{
-    const response=await fetch('/api/desktop/status?instance='+encodeURIComponent(id),{cache:'no-store'});
+    const response=await fetch('/api/desktop/status',{cache:'no-store'});
     if(!response.ok)throw new Error('后台状态读取失败');
     const state=await response.json();
     if(version!==generation)return;
@@ -55,27 +54,33 @@ async function refreshStatus(){
   finally{busy=false;}
 }
 function connect(){
+  if(!selected.desktop_url){
+    $('surface').replaceChildren();
+    const empty=document.createElement('div');empty.id='empty';empty.textContent='未配置本容器的 VNC 端口';
+    $('surface').append(empty);
+    $('open').removeAttribute('href');
+    return;
+  }
   const frame=document.createElement('iframe');frame.title=selected.name+'远程桌面';frame.src=selected.desktop_url;frame.allow='fullscreen';
   $('surface').replaceChildren(frame);
+  $('open').href=selected.desktop_url;
 }
-function select(id){
-  selected=profiles.find(p=>p.id===id)||profiles[0];generation++;
-  $('instance').value=selected.id;$('system').textContent=selected.system;
-  $('open').href=selected.desktop_url;$('error').textContent='';$('running').textContent='正在读取实例状态…';
-  $('files').textContent=selected.id==='ubuntu'?'测试图片：Home → Pictures → pelican-original.png。':'';
-  try{sessionStorage.setItem('wxbot.desktop.instance',selected.id);}catch(e){}
+function show(profile){
+  selected=profile;generation++;
+  $('system').textContent=selected.system||'';
+  $('open').removeAttribute('href');$('error').textContent='';$('running').textContent='正在读取实例状态…';
+  $('files').textContent='';
   connect();refreshStatus();
 }
-$('instance').onchange=()=>select($('instance').value);
 $('refresh').onclick=refreshStatus;
 $('reconnect').onclick=()=>{if(selected)connect();};
 (async()=>{
   try{
     const response=await fetch('/api/desktop/instances',{cache:'no-store'});if(!response.ok)throw new Error('实例列表读取失败');
-    const data=await response.json();profiles=data.instances;
-    for(const p of profiles){const option=document.createElement('option');option.value=p.id;option.textContent=p.name;$('instance').append(option);}
-    let id=data.default_instance;try{id=sessionStorage.getItem('wxbot.desktop.instance')||id;}catch(e){}
-    $('instance').disabled=false;select(id);
+    const data=await response.json();
+    const profile=(data.instances||[])[0];
+    if(!profile)throw new Error('未配置本容器的 VNC 端口');
+    show(profile);
   }catch(error){$('running').textContent='后台连接失败';$('empty').textContent=error.message;}
 })();
 setInterval(()=>{if(!document.hidden)refreshStatus();},10000);

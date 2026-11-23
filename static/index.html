@@ -215,12 +215,12 @@ document.addEventListener("DOMContentLoaded",()=>{
 function fmtTime(ts){ if(!ts) return ""; const d=new Date(ts*1000); return d.toLocaleString("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}); }
 function avatarURL(u){ return "/api/avatar?username="+encodeURIComponent(u); }
 
-let NOVNC="http://localhost:6080/vnc.html";
+let NOVNC="";
 let imgReady=false;
 async function loadStatus(){
   try{
     const s = await (await fetch("/api/status")).json();
-    NOVNC = s.novnc_url || NOVNC;
+    NOVNC = s.novnc_url || "";
     imgReady = !!s.img_ready;
     $("#loginState").innerHTML = `<span class="dot ${s.logged_in?'ok':(s.container_running?'warn':'bad')}"></span>`
       + (s.logged_in ? ("小号已登录 "+(s.logged_in_wxid||"")) : (s.container_running?"容器在跑·未登录":"容器未运行"));
@@ -478,7 +478,7 @@ document.querySelectorAll(".tabs div").forEach(d=>d.onclick=()=>{
   d.classList.add("active"); tab=d.dataset.tab; loadTab(tab);
 });
 $("#filter").oninput=render;
-$("#loginBtn").onclick=()=>{ window.open(NOVNC,"_blank"); toast("在打开的 noVNC 里用小号扫码"); };
+$("#loginBtn").onclick=()=>{ if(!NOVNC){ toast("未配置本容器的 VNC 端口"); return; } window.open(NOVNC,"_blank"); toast("在打开的 noVNC 里用小号扫码"); };
 $("#keyBtn").onclick=async()=>{ toast("刷新密钥中…"); const r=await(await fetch("/api/keys/refresh",{method:"POST"})).json(); await loadStatus(); toast(r.ok?"密钥已刷新+解密":"刷新失败"); };
 $("#imgKeyBtn").onclick=async()=>{ if(!confirm("注入微信抓取本账号图片密钥(约20-30秒,会短暂驱动微信界面)。切换账号后需要重抓。继续?"))return; toast("抓取图片密钥中(勿动微信)…"); try{const r=await(await fetch("/api/keys/capture_img",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({force:true})})).json(); toast(r.ok?("图片密钥已抓取: "+r.key):("失败: "+r.key)); await loadStatus();}catch(e){toast("失败:"+e);} };
 $("#syncBtn").onclick=async()=>{ toast("同步中…"); await fetch("/api/sync",{method:"POST"}); await loadStatus(); if(current) loadMessages(); toast("同步完成"); };

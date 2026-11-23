@@ -7,6 +7,7 @@ import json
 import os
 import threading
 import time
+from urllib.parse import urlsplit
 
 from flask import Flask, jsonify, request, send_file, send_from_directory, Response, session, redirect
 import io
@@ -528,6 +529,40 @@ def poller():
         time.sleep(0.3)
 
 
+def _page_hostname():
+    """Hostname from the request Host, including bracketed IPv6. Never rsplit."""
+    host = request.host or ""
+    if host != host.strip() or "/" in host or "@" in host or "\\" in host:
+        return None
+    name = urlsplit("//" + host).hostname
+    if not name or name == "0.0.0.0":
+        return None
+    if any(c in name for c in " /?#@"):
+        return None
+    return name
+
+
+def _novnc_url():
+    """This container's published noVNC only. Unset port is empty, not 6080."""
+    override = os.environ.get("WXBOT_NOVNC_URL", "").strip()
+    if override:
+        return override
+    raw = os.environ.get("WXBOT_NOVNC_PORT", "").strip()
+    if not raw:
+        return ""
+    try:
+        port = int(raw)
+    except ValueError:
+        return ""
+    if port <= 0 or port > 65535:
+        return ""
+    name = _page_hostname()
+    if not name:
+        return ""
+    bracket = f"[{name}]" if ":" in name else name
+    return f"http://{bracket}:{port}/vnc.html?autoconnect=true&resize=scale"
+
+
 # ---------------- API ----------------
 @app.get("/api/status")
 def api_status():
@@ -561,7 +596,7 @@ def api_status():
         "wechat_running": docker_wx.wechat_running(),
         "logged_in": docker_wx.logged_in(),
         "logged_in_wxid": docker_wx.container_wxid(),
-        "novnc_url": os.environ.get("WXBOT_NOVNC_URL", "http://localhost:6080/vnc.html"),
+        "novnc_url": _novnc_url(),
         "keys_ready": keys_ready,
         "core_keys": core_keys,
         "decrypted_ready": decrypted_ready,
@@ -627,7 +662,7 @@ def api_login():
     running = docker_wx.container_running()
     return jsonify({
         "ok": running,
-        "novnc_url": os.environ.get("WXBOT_NOVNC_URL", "http://localhost:6080/vnc.html"),
+        "novnc_url": _novnc_url(),
         "logged_in": docker_wx.logged_in(),
         "msg": ("打开 noVNC 用小号扫码登录" if running else "容器未运行，请先启动容器"),
     })

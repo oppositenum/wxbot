@@ -45,6 +45,27 @@ class IdentityGate(unittest.TestCase):
                         native.run("xdotool", "mousemove", "10", "20", "click", "1")
         run.assert_called_once()
 
+    def test_wmctrl_close_blocked_when_mismatch(self):
+        native = Native()
+        with patch.dict(os.environ, {"WXBOT_EXPECTED_WXID": "wxid_expected"}, clear=False):
+            with patch.object(docker_wx, "logged_in", return_value=True), \
+                    patch.object(docker_wx, "container_wxid", return_value="wxid_other"), \
+                    patch("core.moments_native.subprocess.run") as run:
+                with self.assertRaises(docker_wx.IdentityMismatch):
+                    native.run("wmctrl", "-ic", "0x1")
+        run.assert_not_called()
+
+    def test_wmctrl_close_allowed_when_expected_unset(self):
+        native = Native()
+        env = {k: v for k, v in os.environ.items() if k != "WXBOT_EXPECTED_WXID"}
+        with patch.dict(os.environ, env, clear=True):
+            with patch("core.moments_native.subprocess.run") as run:
+                run.return_value.returncode = 0
+                run.return_value.stdout = b""
+                native.run("wmctrl", "-ic", "0x1")
+                native.run("wmctrl", "-lp")
+        self.assertEqual(run.call_count, 2)
+
     def test_native_ui_blocks_send_once(self):
         ui = NativeUI()
         with patch.dict(os.environ, {"WXBOT_EXPECTED_WXID": "wxid_expected"}, clear=False):

@@ -34,6 +34,26 @@ class NativeError(m.Unavailable):
     pass
 
 
+def _wmctrl_mutates(parts):
+    """True when wmctrl would close, activate, or move a window. -lp/-l/-lG/-x stay read-only."""
+    short = {'c', 'R', 'a', 'r', 'e', 'b', 't', 'N'}
+    long = {'close', 'activate', 'move', 'resize', 'raise', 'iconify'}
+    for part in parts:
+        if not str(part).startswith('-') or part == '-':
+            continue
+        body = part[1:]
+        if body.startswith('-'):
+            name = body[1:].split('=', 1)[0].lower()
+            if name in long or name in ('close-window', 'activate-window'):
+                return True
+            continue
+        # -i only selects the id format; the action flag is what changes the window.
+        flags = body[1:] if body[:1] == 'i' else body
+        if any(ch in short for ch in flags):
+            return True
+    return False
+
+
 class Native:
     def __init__(self):
         self.env = dict(os.environ, DISPLAY=os.environ.get('DISPLAY', ':0'))
@@ -61,6 +81,9 @@ class Native:
             if any(part in writes for part in args[1:]):
                 from core import docker_wx
                 docker_wx.require_identity_match()
+        elif args and args[0] == 'wmctrl' and _wmctrl_mutates(args[1:]):
+            from core import docker_wx
+            docker_wx.require_identity_match()
         r = subprocess.run(list(args), env=self.env, capture_output=True, timeout=timeout)
         if r.returncode:
             raise NativeError('微信界面命令未完成')

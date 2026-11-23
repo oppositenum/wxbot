@@ -17,10 +17,10 @@
 
 容器内的账号页只说明这是本容器，并链到同一主机名上的 `http://{主机名}:5090/`。没有添加账号、批量启停，也不再要求管理 Token。
 
-`POST /api/accounts/<id>/stop`、`/restart` 和批量 stop/restart：目标容器名（请求里的账号 id）必须等于本进程的 `WXBOT_SELF_CONTAINER`。否则 403。`WXBOT_LOCAL=1` 不能放行。`WXBOT_SELF_CONTAINER` 未设置时同样 403，不会猜成 `wxbot`。只读的账号列表仍可查看。容器不会调用 `multi_account.create()` 把控制台注册表抄进自己的 `work/`。
+`POST /api/accounts/<id>/stop`、`/restart` 和批量 stop/restart：先按 `<id>` 找到注册表行，再比较该行的 `container` 与本进程的 `WXBOT_SELF_CONTAINER`。`action()` 停的是 `container`，不是 id。对不上、行不存在，或环境变量未设置，都是 403，不会猜成 `wxbot`。`WXBOT_LOCAL=1` 不能放行。批量只要有一行不是本容器就整批 403。只读的账号列表仍可查看。容器不会调用 `multi_account.create()` 把控制台注册表抄进自己的 `work/`。
 
 ## API（容器内，仅本容器）
 
 - `GET /api/accounts`：本容器可见的账号列表。
-- `POST /api/accounts/<id>/stop|restart`：仅当 `<id>` 等于 `WXBOT_SELF_CONTAINER`。
-- `POST /api/accounts/batch`：`{"action":"stop"|"restart"}` 只要包含别的容器就 403。
+- `POST /api/accounts/<id>/stop|restart`：仅当该行 `container` 等于 `WXBOT_SELF_CONTAINER`。
+- `POST /api/accounts/batch`：`{"action":"stop"|"restart"}` 只要有一行 `container` 不是本容器就 403。

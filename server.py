@@ -733,28 +733,32 @@ def api_accounts_create():
     try: return jsonify(ok=True, account=multi_account.create(body['label'], body.get('id')))
     except (ValueError, KeyError) as exc: return jsonify(error=str(exc)),400
 
-def _account_target_container(account_id):
-    """Container name the existing action path already uses: the account id."""
-    return (account_id or "").strip()
+def _registry_row(account_id):
+    from core.multi_account import _read
+    return next((a for a in _read().get('accounts', []) if isinstance(a, dict) and a.get('id') == account_id), None)
 
 
-def _own_container_stop(account_id, operation):
-    """Stop/restart only this process's container. Unset self name refuses; never guess."""
-    if operation not in ("stop", "restart"):
-        return None
-    self_name = os.environ.get("WXBOT_SELF_CONTAINER", "").strip()
-    target = _account_target_container(account_id)
-    if not self_name or target != self_name:
-        return jsonify(error="只能操作本容器"), 403
-    return None
+def _self_container_name():
+    return os.environ.get("WXBOT_SELF_CONTAINER", "").strip()
+
+
+def _stop_targets_self(accounts):
+    """True only when every row's container is this process. Missing row or unset self is false."""
+    self_name = _self_container_name()
+    if not self_name:
+        return False
+    for account in accounts:
+        container = (account or {}).get("container") if isinstance(account, dict) else None
+        if not container or container != self_name:
+            return False
+    return bool(accounts)
 
 
 @app.post('/api/accounts/<account_id>/<operation>')
 def api_accounts_action(account_id, operation):
     from core import multi_account
-    denied = _own_container_stop(account_id, operation)
-    if denied:
-        return denied
+    if operation in ("stop", "restart") and not _stop_targets_self([_registry_row(account_id)]):
+        return jsonify(error="只能操作本容器"), 403
     try: return jsonify(multi_account.action(account_id, operation))
     except (ValueError, KeyError) as exc: return jsonify(error=str(exc)),400
 
@@ -765,9 +769,8 @@ def api_accounts_batch():
     if action not in ('start','stop','restart'): return jsonify(error='不支持的批量操作'),400
     accounts = multi_account.list_accounts()
     if action in ("stop", "restart"):
-        self_name = os.environ.get("WXBOT_SELF_CONTAINER", "").strip()
-        targets = [_account_target_container(a.get("id")) for a in accounts]
-        if not self_name or any(target != self_name for target in targets):
+        rows = [_registry_row(a.get("id")) for a in accounts]
+        if not _stop_targets_self(rows):
             return jsonify(error="只能操作本容器"), 403
     return jsonify(results=[multi_account.action(a['id'], action) for a in accounts])
 

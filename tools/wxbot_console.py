@@ -1,13 +1,6 @@
 #!/usr/bin/env python3
 """Host-side registry for already-running WeChat containers.
 
-Listens on 127.0.0.1:5090 (WXBOT_CONSOLE_PORT). It records containers the
-operator adopts and opens each container's own admin and noVNC. Stop and
-restart exist only when docker inspect Config.Env WXBOT_SELF_CONTAINER equals
-the container name, and the body supplies that row's expected_wxid. It never
-calls multi_account.create and does not write any container's
-work/multi_accounts.json.
-
 Run:  python3 tools/wxbot_console.py
 Registry:  ~/.wxbot/console/registry.json
 """
@@ -197,11 +190,7 @@ def inspect_meta(name):
 
 
 def inspect_self_container(name):
-    """WXBOT_SELF_CONTAINER from Config.Env. Missing or unset stays empty. Never guess.
-
-    The format stays attached to --format so a name-scanning docker stub still
-    sees the container as the only bare argument.
-    """
+    # --format= keeps the template off the bare-argument scan used by the docker stub.
     proc = docker_run(["inspect", "--format={{json .Config.Env}}", name])
     if proc.returncode != 0:
         return ""
@@ -209,7 +198,6 @@ def inspect_self_container(name):
 
 
 def self_container_from_env(raw_env):
-    """WXBOT_SELF_CONTAINER from docker inspect Config.Env. Unset stays empty."""
     try:
         env = json.loads(raw_env) if raw_env and raw_env not in ("<no value>", "null") else []
     except ValueError:
@@ -414,10 +402,6 @@ def adopt(container, label, expected_wxid):
 
 
 def account_control(account_id, operation, confirm_wxid):
-    """Stop or restart only the container whose inspect self name is its own name.
-
-    confirm_wxid must equal the registry expected_wxid. Mismatch does not call docker.
-    """
     if operation not in ("stop", "restart"):
         return 400, {"ok": False, "reason": "unsupported_operation"}
     account_id = (account_id or "").strip()
@@ -457,7 +441,6 @@ def _link(url, text):
 
 
 def render_page(host_header):
-    """Chinese cards. Stop/restart only when inspect self name equals the container name."""
     try:
         registry = read_registry()
         error = ""

@@ -14,9 +14,6 @@ BASE_VNC = int(os.environ.get('WXBOT_MULTI_VNC_BASE', '6082'))
 HOST_AGENT_URL = os.environ.get('WXBOT_HOST_AGENT_URL', 'http://host.docker.internal:5199')
 HOST_AGENT_TOKEN_FILE = Path(os.environ.get(
     'WXBOT_HOST_AGENT_TOKEN_FILE', str(Path(config.WORK_DIR) / 'host_agent.token')))
-# The container that hosts this management UI must never be stopped/restarted
-# from within itself, or the UI (and this call) dies mid-request.
-SELF_CONTAINER = os.environ.get('WXBOT_SELF_CONTAINER', 'wxbot-ubuntu-manual')
 
 
 def _host_agent_token():
@@ -97,8 +94,6 @@ def action(account_id, operation):
     if not account: raise KeyError('账号不存在')
     if operation not in ('start','stop','restart'): raise ValueError('不支持的操作')
     container = account['container']
-    if container == SELF_CONTAINER and operation in ('stop', 'restart'):
-        return {'ok': False, 'reason': '主容器（管理后台所在）不能在此停止或重启', 'account': account}
     if not shutil.which('docker'):
         agent = _host_agent(operation, container)
         if agent is None:

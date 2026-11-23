@@ -25,7 +25,7 @@ NAME_RE = re.compile(r"^wxbot(-[a-z0-9][a-z0-9-]*)?$")
 OPS = {"start", "stop", "restart", "inspect", "wechat"}
 LOOPBACK = {"127.0.0.1", "::1"}
 PEER_CACHE_TTL = 5.0
-_peer_cache = {"at": 0.0, "ips": frozenset()}
+_peer_cache = {"at": None, "owners": {}}
 _peer_lock = threading.Lock()
 
 
@@ -57,11 +57,19 @@ def loopback_peer(peer):
     return host in LOOPBACK
 
 
-def _parse_container_ips(raw):
-    """Pull container IPAddress values out of `docker network inspect` JSON.
+def _normalize_peer(peer):
+    host = str(peer or "").strip().lower()
+    if host.startswith("::ffff:"):
+        return host[7:]
+    return host
+
+
+def _parse_container_owners(raw):
+    """Map container IPAddress values to Names from `docker network inspect`.
 
     The gateway is a network field, not a container endpoint, so it is ignored.
-    A non-list payload is a failed inspect and must not allow anyone.
+    A non-list payload is a failed inspect and must not allow anyone. An address
+    that appears on two different containers is ambiguous and is dropped.
     """
     try:
         networks = json.loads(raw)
@@ -69,7 +77,7 @@ def _parse_container_ips(raw):
         return None
     if not isinstance(networks, list):
         return None
-    ips = set()
+    found = {}
     for net in networks:
         containers = (net or {}).get("Containers") or {}
         if not isinstance(containers, dict):
@@ -77,19 +85,22 @@ def _parse_container_ips(raw):
         for info in containers.values():
             if not isinstance(info, dict):
                 continue
+            name = str(info.get("Name") or "").strip()
+            if not name:
+                continue
             for key in ("IPv4Address", "IPv6Address"):
                 ip = str(info.get(key) or "").split("/", 1)[0].strip().lower()
                 if ip:
-                    ips.add(ip)
-    return ips
+                    found.setdefault(ip, set()).add(name)
+    return {ip: next(iter(names)) for ip, names in found.items() if len(names) == 1}
 
 
-def container_peer_ips(now=None):
-    """Container IPs from `docker network inspect`, not the gateway. Cached briefly."""
+def container_owners(now=None):
+    """IP to container name from `docker network inspect`. Cached a few seconds."""
     moment = time.monotonic() if now is None else now
     with _peer_lock:
-        if moment - _peer_cache["at"] < PEER_CACHE_TTL:
-            return set(_peer_cache["ips"])
+        if _peer_cache["at"] is not None and moment - _peer_cache["at"] < PEER_CACHE_TTL:
+            return dict(_peer_cache["owners"])
     try:
         ids = subprocess.check_output(
             ["docker", "network", "ls", "-q"],
@@ -99,31 +110,38 @@ def container_peer_ips(now=None):
             stderr=subprocess.DEVNULL, text=True, timeout=5) if ids else "[]"
     except Exception:
         raw = None
-    ips = _parse_container_ips(raw) if raw is not None else None
-    if ips is None:
+    owners = _parse_container_owners(raw) if raw is not None else None
+    if owners is None:
         # Inspect failed: do not allow random peers. Keep a previous cache if any.
         with _peer_lock:
-            return set(_peer_cache["ips"])
+            return dict(_peer_cache["owners"])
     with _peer_lock:
         _peer_cache["at"] = moment
-        _peer_cache["ips"] = frozenset(ips)
-    return ips
+        _peer_cache["owners"] = dict(owners)
+    return dict(owners)
+
+
+def container_peer_ips(now=None):
+    return set(container_owners(now))
 
 
 def peer_allowed(peer):
     if loopback_peer(peer):
         return True
-    host = str(peer or "").strip().lower()
-    if host.startswith("::ffff:"):
-        host = host[7:]
-    return host in container_peer_ips()
+    return _normalize_peer(peer) in container_peer_ips()
 
 
 def authorize(peer, presented, container):
-    """Local token is loopback-only. Container token may only touch bound names."""
+    """Local token: loopback for any container, or a container peer for itself.
+
+    The optional container token may only touch names bound in the environment.
+    """
     presented = str(presented or "")
-    if loopback_peer(peer) and TOKEN and secrets.compare_digest(presented, TOKEN):
-        return True
+    if TOKEN and secrets.compare_digest(presented, TOKEN):
+        if loopback_peer(peer):
+            return True
+        own = container_owners().get(_normalize_peer(peer))
+        return bool(own) and container == own
     if not CONTAINER_TOKEN or not secrets.compare_digest(presented, CONTAINER_TOKEN):
         return False
     names = container_names()

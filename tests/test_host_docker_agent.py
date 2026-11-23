@@ -38,11 +38,13 @@ class _FakeHandler(agent.Handler):
         pass
 
 
-def _post(peer, payload, peers=None, docker=None):
+def _post(peer, payload, peers=None, owners=None, docker=None):
     body = json.dumps(payload).encode("utf-8")
     handler = _FakeHandler(peer, body)
-    peers = set() if peers is None else peers
-    with mock.patch.object(agent, "container_peer_ips", return_value=peers), \
+    owners = {} if owners is None else owners
+    peers = set(owners) if peers is None else peers
+    with mock.patch.object(agent, "container_peer_ips", return_value=set(peers)), \
+            mock.patch.object(agent, "container_owners", return_value=dict(owners)), \
             mock.patch.object(agent.subprocess, "run", side_effect=docker or (lambda *a, **k: None)):
         handler.do_POST()
     raw = handler.wfile.getvalue()
@@ -78,6 +80,24 @@ class HostAgentPeerTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertTrue(payload["ok"])
         self.assertEqual(calls[0][:2], ["docker", "inspect"])
+
+    def test_bridge_peer_local_token_only_own_container(self):
+        def docker(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, "running\n", "")
+
+        owners = {"172.18.0.5": "wxbot-second"}
+        code, payload = _post("172.18.0.5", {
+            "token": "local-token", "op": "inspect", "container": "wxbot-second",
+        }, owners=owners, docker=docker)
+        self.assertEqual(code, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["container"], "wxbot-second")
+
+        code, payload = _post("172.18.0.5", {
+            "token": "local-token", "op": "inspect", "container": "wxbot-ubuntu-manual",
+        }, owners=owners, docker=docker)
+        self.assertEqual(code, 403)
+        self.assertEqual(payload["reason"], "forbidden")
 
     def test_bridge_peer_local_token_rejected(self):
         code, payload = _post("172.18.0.2", {

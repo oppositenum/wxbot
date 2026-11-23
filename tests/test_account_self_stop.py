@@ -105,6 +105,31 @@ class OwnContainerStopTests(unittest.TestCase):
             self.assertNotIn("stop", call.args[0])
             self.assertNotIn("restart", call.args[0])
 
+    def test_empty_registry_legacy_row_stops_primary_container(self):
+        env = {
+            "WXBOT_LOCAL": "1",
+            "WXBOT_SELF_CONTAINER": "wxbot-ubuntu-manual",
+            "WXBOT_MULTI_INCLUDE_LEGACY": "1",
+        }
+        stopped = []
+
+        def run(args, **kwargs):
+            stopped.append(list(args))
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with patch.dict(os.environ, env, clear=False), \
+                patch("core.multi_account.shutil.which", return_value="/usr/bin/docker"), \
+                patch("core.multi_account.subprocess.run", side_effect=run):
+            response = self.client.post(
+                "/api/accounts/batch",
+                json={"action": "stop"},
+                base_url="http://127.0.0.1:5100",
+            )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertIn(["docker", "stop", "wxbot-ubuntu-manual"], stopped)
+        self.assertFalse(any(cmd[1] == "stop" and cmd[-1] != "wxbot-ubuntu-manual" for cmd in stopped))
+        self.assertFalse(self.registry.exists())
+
     def test_missing_row_is_403(self):
         env = {"WXBOT_LOCAL": "1", "WXBOT_SELF_CONTAINER": "wxbot-ubuntu-manual"}
         with patch("core.multi_account.subprocess.run") as run:

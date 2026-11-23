@@ -17,7 +17,7 @@
 
 容器内的账号页只说明这是本容器，并链到同一主机名上的 `http://{主机名}:5090/`。没有添加账号、批量启停，也不再要求管理 Token。
 
-`POST /api/accounts/<id>/stop`、`/restart` 和批量 stop/restart：先按 `<id>` 找到注册表行，再比较该行的 `container` 与本进程的 `WXBOT_SELF_CONTAINER`。`action()` 停的是 `container`，不是 id。对不上、行不存在，或环境变量未设置，都是 403，不会猜成 `wxbot`。`WXBOT_LOCAL=1` 不能放行。批量只要有一行不是本容器就整批 403。只读的账号列表仍可查看。容器不会调用 `multi_account.create()` 把控制台注册表抄进自己的 `work/`。
+`POST /api/accounts/<id>/stop`、`/restart` 和批量 stop/restart：比较的是列表里那一行的 `container`，和 `action()` 会停的是同一个对象。注册表文件为空且仍包含默认 legacy 行时，这一行是 `{id: primary, container: wxbot-ubuntu-manual}`，不会写回文件。对不上、行不存在，或 `WXBOT_SELF_CONTAINER` 未设置，都是 403，不会猜成 `wxbot`。`WXBOT_LOCAL=1` 不能放行。批量只要有一行不是本容器就整批 403。只读的账号列表仍可查看。容器不会调用 `multi_account.create()` 把控制台注册表抄进自己的 `work/`。
 
 ## API（容器内，仅本容器）
 

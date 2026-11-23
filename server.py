@@ -733,17 +733,11 @@ def api_accounts_create():
     try: return jsonify(ok=True, account=multi_account.create(body['label'], body.get('id')))
     except (ValueError, KeyError) as exc: return jsonify(error=str(exc)),400
 
-def _registry_row(account_id):
-    from core.multi_account import _read
-    return next((a for a in _read().get('accounts', []) if isinstance(a, dict) and a.get('id') == account_id), None)
-
-
 def _self_container_name():
     return os.environ.get("WXBOT_SELF_CONTAINER", "").strip()
 
 
 def _stop_targets_self(accounts):
-    """True only when every row's container is this process. Missing row or unset self is false."""
     self_name = _self_container_name()
     if not self_name:
         return False
@@ -757,7 +751,8 @@ def _stop_targets_self(accounts):
 @app.post('/api/accounts/<account_id>/<operation>')
 def api_accounts_action(account_id, operation):
     from core import multi_account
-    if operation in ("stop", "restart") and not _stop_targets_self([_registry_row(account_id)]):
+    row = next((a for a in multi_account.account_rows() if a.get("id") == account_id), None)
+    if operation in ("stop", "restart") and not _stop_targets_self([row]):
         return jsonify(error="只能操作本容器"), 403
     try: return jsonify(multi_account.action(account_id, operation))
     except (ValueError, KeyError) as exc: return jsonify(error=str(exc)),400
@@ -767,11 +762,9 @@ def api_accounts_batch():
     from core import multi_account
     action=request.get_json(silent=True).get('action') if request.get_json(silent=True) else ''
     if action not in ('start','stop','restart'): return jsonify(error='不支持的批量操作'),400
-    accounts = multi_account.list_accounts()
-    if action in ("stop", "restart"):
-        rows = [_registry_row(a.get("id")) for a in accounts]
-        if not _stop_targets_self(rows):
-            return jsonify(error="只能操作本容器"), 403
+    accounts = multi_account.account_rows()
+    if action in ("stop", "restart") and not _stop_targets_self(accounts):
+        return jsonify(error="只能操作本容器"), 403
     return jsonify(results=[multi_account.action(a['id'], action) for a in accounts])
 
 

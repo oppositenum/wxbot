@@ -65,16 +65,30 @@ def _status(container):
     except Exception: state = 'stopped'
     return {'container': state, 'running': state == 'running', 'online': False}
 
+def _stored_accounts():
+    return [a for a in _read().get('accounts', []) if isinstance(a, dict)]
+
+
+def _legacy_account():
+    if os.environ.get('WXBOT_MULTI_INCLUDE_LEGACY', '1') != '1':
+        return None
+    return {'id':'primary','label':'当前微信号','container':'wxbot-ubuntu-manual',
+            'image':IMAGE,'web_port':5100,'vnc_port':6082,
+            'volume':'wxbot-ubuntu-manual-home','enabled':True,'legacy':True}
+
+
+def account_rows():
+    """Rows list and action share. Empty file plus include-legacy yields the primary row, unsaved."""
+    accounts = _stored_accounts()
+    if accounts:
+        return accounts
+    legacy = _legacy_account()
+    return [legacy] if legacy else []
+
+
 def list_accounts():
-    accounts = [a for a in _read().get('accounts', []) if isinstance(a, dict)]
-    if not accounts and (os.environ.get('WXBOT_MULTI_INCLUDE_LEGACY', '1') == '1'):
-        # Present the existing single-account deployment as the primary instance
-        # until the operator explicitly registers additional accounts.
-        accounts = [{'id':'primary','label':'当前微信号','container':'wxbot-ubuntu-manual',
-                     'image':IMAGE,'web_port':5100,'vnc_port':6082,
-                     'volume':'wxbot-ubuntu-manual-home','enabled':True,'legacy':True}]
     result=[]
-    for a in accounts:
+    for a in account_rows():
         status = {'container':'managed_externally','running':True,'online':False} if a.get('legacy') else _status(a.get('container'))
         result.append({**a, 'status': status})
     return result
@@ -90,7 +104,7 @@ def create(label, account_id=None):
     accounts.append(account); _write(data); return account
 
 def action(account_id, operation):
-    account = next((a for a in _read().get('accounts', []) if a.get('id') == account_id), None)
+    account = next((a for a in account_rows() if a.get('id') == account_id), None)
     if not account: raise KeyError('账号不存在')
     if operation not in ('start','stop','restart'): raise ValueError('不支持的操作')
     container = account['container']

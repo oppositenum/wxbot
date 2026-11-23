@@ -41,6 +41,8 @@ class IdentityGate(unittest.TestCase):
                     run.return_value.returncode = 0
                     run.return_value.stdout = b""
                     native.run("xdotool", "getwindowgeometry", "--shell", "1")
+                    with self.assertRaises(docker_wx.IdentityMismatch):
+                        native.run("xdotool", "mousemove", "10", "20", "click", "1")
         run.assert_called_once()
 
     def test_native_ui_blocks_send_once(self):

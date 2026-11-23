@@ -54,10 +54,11 @@ class Native:
         return True, ''
 
     def run(self, *args, timeout=6):
-        if args and args[0] == 'xdotool' and len(args) > 1:
-            verb = args[1]
-            read_only = verb in ('getwindowname', 'getwindowgeometry', 'search', 'getactivewindow', 'getwindowpid')
-            if not read_only:
+        # xdotool chains verbs: "mousemove x y click 1" writes even though the first word is not click.
+        if args and args[0] == 'xdotool':
+            writes = {'click', 'key', 'type', 'windowactivate', 'windowfocus',
+                      'mousedown', 'mouseup', 'keydown', 'keyup', 'mousemove'}
+            if any(part in writes for part in args[1:]):
                 from core import docker_wx
                 docker_wx.require_identity_match()
         r = subprocess.run(list(args), env=self.env, capture_output=True, timeout=timeout)

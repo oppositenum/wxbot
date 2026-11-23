@@ -127,6 +127,10 @@ class NativeUI:
         return os.path.isfile(self.binary) and os.access(self.binary, os.X_OK)
 
     def call(self, action, **args):
+        writing = {'click', 'key', 'scroll', 'stage', 'send_once', 'discard_stage',
+                   'copy_field', 'read_input', 'restore'}
+        if action in writing:
+            docker_wx.require_identity_match()
         command=['python3','-c',HELPER]
         if not docker_wx.LOCAL:command=['docker','exec','-i',docker_wx.CONTAINER]+command
         r=subprocess.run(command,input=json.dumps(dict(action=action,**args)),capture_output=True,text=True,timeout=12)

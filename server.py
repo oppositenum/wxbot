@@ -3,6 +3,7 @@
 启动： python3 server.py
 访问： http://localhost:5100
 """
+import hmac
 import json
 import os
 import threading
@@ -78,7 +79,17 @@ def personalization_page():
 
 from core import account_session as sessions
 
-_UI_PUBLIC = frozenset({"/login", "/api/auth/login", "/api/auth/logout"})
+_UI_PUBLIC = frozenset({"/login", "/api/auth/login", "/api/auth/logout", "/api/probe"})
+
+
+def _identity_conflict(exc):
+    info = getattr(exc, "info", {}) or {}
+    return jsonify({
+        "error": "identity_mismatch",
+        "code": "identity_mismatch",
+        "inferred_wxid": info.get("inferred_wxid", ""),
+        "expected_wxid": info.get("expected_wxid", ""),
+    }), 409
 
 
 def _ui_credentials():
@@ -165,6 +176,37 @@ def api_auth_login():
         return jsonify({"ok": False, "error": "账号或密码不对"}), 401
     _touch_ui_session()
     return jsonify({"ok": True})
+
+
+@app.get("/api/identity")
+def api_identity():
+    """Report the account match without refusing. Login required like other UI routes."""
+    try:
+        return jsonify(docker_wx.require_identity_match())
+    except docker_wx.IdentityMismatch as exc:
+        return jsonify(exc.info)
+
+
+@app.get("/api/probe")
+def api_probe():
+    """Token probe for operators. No session cookie. 404 when the token is unset."""
+    expected = os.environ.get("WXBOT_PROBE_TOKEN") or ""
+    if not expected:
+        return jsonify({"error": "not_found"}), 404
+    supplied = request.headers.get("X-Wxbot-Probe-Token", "")
+    if not supplied or not hmac.compare_digest(expected.encode(), supplied.encode()):
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        info = docker_wx.require_identity_match()
+    except docker_wx.IdentityMismatch as exc:
+        info = exc.info
+    return jsonify({
+        "logged_in": info["logged_in"],
+        "inferred_wxid": info["inferred_wxid"],
+        "expected_wxid": info["expected_wxid"],
+        "match": info["match"],
+        "wechat_running": docker_wx.wechat_running(),
+    })
 
 
 @app.get("/api/auth/status")
@@ -1140,6 +1182,10 @@ def api_bot_push_set():
 @sessions.task
 def api_bot_push_test():
     """用当前(或请求体传入的)推送目标发一条测试消息,验证配置连通。"""
+    try:
+        docker_wx.require_identity_match()
+    except docker_wx.IdentityMismatch as exc:
+        return _identity_conflict(exc)
     body = request.get_json(force=True, silent=True) or {}
     rules = botmod.load_rules()
     p = dict(rules.get("push") or {})
@@ -1385,6 +1431,10 @@ def api_schedule_nl():
 @sessions.task
 def api_greet():
     """网页"打招呼"：按该会话最近上下文,用人设生成一句问候并发送。"""
+    try:
+        docker_wx.require_identity_match()
+    except docker_wx.IdentityMismatch as exc:
+        return _identity_conflict(exc)
     b = request.get_json(force=True, silent=True) or {}
     chat = b.get("chat")
     if not chat:
@@ -1423,6 +1473,10 @@ def api_schedule_update(tid):
 def api_schedule_run(tid):
     """立即手动触发一次(测试用)。"""
     from core import schedule
+    try:
+        docker_wx.require_identity_match()
+    except docker_wx.IdentityMismatch as exc:
+        return _identity_conflict(exc)
     for t in schedule.load_tasks():
         if t.get("id") == tid:
             threading.Thread(target=schedule.fire, args=(t,),
@@ -1720,6 +1774,10 @@ def api_msgvideothumb():
 def api_send():
     """Create a durable send job; receipt uncertainty never triggers automatic resend."""
     from core import sendq
+    try:
+        docker_wx.require_identity_match()
+    except docker_wx.IdentityMismatch as exc:
+        return _identity_conflict(exc)
     body = request.get_json(force=True, silent=True) or {}
     to = body.get("to")
     kind = body.get("type", "text")
@@ -1739,6 +1797,8 @@ def api_send():
             res = (sender.send_text(to, content, chat_username=chat) if kind == "text"
                    else sender.send_image(to, path, chat_username=chat))
             return jsonify(res), (200 if res.get("ok") else 500)
+        except docker_wx.IdentityMismatch as exc:
+            return _identity_conflict(exc)
         except Exception as e:  # noqa: BLE001
             return jsonify({"ok": False, "error": str(e)}), 500
     job_id, ahead = sendq.enqueue(kind, to, chat, content, path)

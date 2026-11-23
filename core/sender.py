@@ -149,6 +149,7 @@ def _receipt_matches(receipt, token, chat, jid):
 
 
 def _send(display, chat, kind, payload, *, job_id=None, session=None, proactive_ticket=None):
+    docker_wx.require_identity_match()
     if isinstance(_adapter, LegacySearchAdapter):
         return _adapter.submit(display, chat, kind, payload, job_id=job_id, session=session,
                                proactive_ticket=proactive_ticket)
@@ -311,6 +312,7 @@ def send_webhook(url, payload, *, job_id, session):
     """Push HTTP transport: confirmed means HTTP 2xx, NOT WeChat delivery.
     Same durable intent rule; timeout/non-2xx after request initiation is held.
     """
+    docker_wx.require_identity_match()
     import urllib.parse
     import urllib.request
     ledger = send_ledger.Ledger()

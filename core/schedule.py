@@ -437,7 +437,8 @@ def is_scheduled_msg(msg, chat=None):
 
 def fire(t, occurrence=None, session=None):
     """One durable execution per account/task/due time. Manual run gets a new ID."""
-    from core import sender
+    from core import docker_wx, sender
+    docker_wx.require_identity_match()
     token = session or sessions.capture()
     occurrence = occurrence or ('manual:' + send_ledger.next_id())
     task_identity = t.get('send_uid') or ('legacy', t.get('id'), t.get('created'))
@@ -498,6 +499,8 @@ def fire(t, occurrence=None, session=None):
             return ledger.view(row)
     except sessions.StaleAccount:
         return ledger.view(ledger.update(jid, 'stale', 'account_session_changed'))
+    except docker_wx.IdentityMismatch:
+        return ledger.view(ledger.update(jid, 'not_sent', 'identity_mismatch'))
     except Exception as exc:
         # A committed child may have sent. Preserve conservative review state.
         return ledger.view(ledger.update(jid, 'uncertain', 'execution_exception_' + type(exc).__name__))

@@ -54,6 +54,12 @@ class Native:
         return True, ''
 
     def run(self, *args, timeout=6):
+        if args and args[0] == 'xdotool' and len(args) > 1:
+            verb = args[1]
+            read_only = verb in ('getwindowname', 'getwindowgeometry', 'search', 'getactivewindow', 'getwindowpid')
+            if not read_only:
+                from core import docker_wx
+                docker_wx.require_identity_match()
         r = subprocess.run(list(args), env=self.env, capture_output=True, timeout=timeout)
         if r.returncode:
             raise NativeError('微信界面命令未完成')

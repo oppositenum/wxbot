@@ -11,7 +11,7 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core import account_session as sessions, send_ledger
+from core import account_session as sessions, docker_wx, send_ledger
 from core import sender  # noqa: E402
 
 _q = queue.Queue()
@@ -35,12 +35,17 @@ def _run():
         _jobs[jid] = {"status": "running", "to": item["to"]}
         t0 = time.time()
         try:
+            docker_wx.require_identity_match()
             if item["kind"] == "text":
                 res = sender.send_text(item["to"], item["content"],
                                        chat_username=item["chat"], job_id=jid, session=item["session"])
             else:
                 res = sender.send_image(item["to"], item["path"],
                                         chat_username=item["chat"], job_id=jid, session=item["session"])
+        except docker_wx.IdentityMismatch:
+            # Wrong account must not sit in the retry timer.
+            res = {"ok": False, "status": "failed", "reason": "identity_mismatch",
+                   "retryable": False, "job_id": jid}
         except Exception as e:  # noqa: BLE001
             res = send_ledger.result(jid) or {"ok": False, "status": "not_sent",
                 "reason": "queue_exception_" + type(e).__name__, "retryable": False}

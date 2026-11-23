@@ -113,6 +113,43 @@ def logged_in():
     return container_wxid() is not None and wechat_running()
 
 
+class IdentityMismatch(RuntimeError):
+    def __init__(self, info):
+        self.info = info
+        super().__init__(info.get("reason") or "identity_mismatch")
+
+
+def require_identity_match():
+    """Refuse UI input when the data-dir wxid is not the expected account.
+
+    Unset WXBOT_EXPECTED_WXID stays open so existing containers keep working.
+    """
+    expected = (os.environ.get("WXBOT_EXPECTED_WXID") or "").strip()
+    inferred = container_wxid() or ""
+    info = {
+        "logged_in": bool(logged_in()),
+        "inferred_wxid": inferred,
+        "expected_wxid": expected,
+        "match": True,
+        "reason": "unset",
+    }
+    if not expected:
+        return info
+    if info["logged_in"] and inferred == expected:
+        info["reason"] = "match"
+        return info
+    info["match"] = False
+    if not info["logged_in"]:
+        info["reason"] = "not_logged_in"
+    else:
+        info["reason"] = "wxid_mismatch"
+    raise IdentityMismatch(info)
+
+
+def _require_input():
+    require_identity_match()
+
+
 @sessions.task
 def capture_img_key(log=lambda m: None, trigger=True):
     with UI_LOCK:
@@ -171,6 +208,7 @@ def _capture_img_key_locked(log=lambda m: None, trigger=True):
             break
         _t.sleep(1)
     if trigger and not os.environ.get("WXBOT_IMGKEY_DAT"):
+        _require_input()
         with UI_LOCK:
             for y in (160, 232, 300, 370, 440):
                 _exec("bash", "-lc", f"DISPLAY=:0 xdotool mousemove 340 {y} click 1")
@@ -262,6 +300,7 @@ def send_text(name, text):
 
 def open_chat(name):
     """只打开会话、不发送(供发送前截图核对标题)。"""
+    _require_input()
     with UI_LOCK:
         r = _exec("python3", "/usr/local/bin/wx_send.py", "justopen", name, timeout=30)
     return "OK" in r.stdout
@@ -269,6 +308,7 @@ def open_chat(name):
 
 def search_query(name):
     """在侧栏搜索框输入查询、弹出结果下拉(不回车)。"""
+    _require_input()
     with UI_LOCK:
         r = _exec("python3", "/usr/local/bin/wx_send.py", "searchquery", name, timeout=30)
     return "OK" in r.stdout
@@ -276,6 +316,7 @@ def search_query(name):
 
 def click(cx, cy):
     """点击绝对屏幕坐标。"""
+    _require_input()
     with UI_LOCK:
         r = _exec("python3", "/usr/local/bin/wx_send.py", "clickxy",
                   str(int(cx)), str(int(cy)), timeout=20)
@@ -289,6 +330,7 @@ def paste_text(text):
 
 def title_shot(host_out):
     """截当前微信窗口(含会话标题)到 host_out，返回是否成功。"""
+    _require_input()
     cpath = host_out if LOCAL else "/tmp/_titleshot.png"
     with UI_LOCK:
         _exec("python3", "/usr/local/bin/wx_send.py", "titleshot", cpath, timeout=20)

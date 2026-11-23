@@ -24,6 +24,7 @@ class LegacySearchAdapter:
 
     def submit(self, display, chat, kind, payload, *, job_id=None, session=None,
                proactive_ticket=None):
+        docker_wx.require_identity_match()
         token = session or sessions.capture()
         jid = job_id or send_ledger.next_id()
         ledger = send_ledger.Ledger()
@@ -125,6 +126,7 @@ class LegacySearchAdapter:
     @staticmethod
     def _leave_search_ui():
         try:
+            docker_wx.require_identity_match()
             docker_wx._exec(
                 'bash', '-lc',
                 "DISPLAY=:0 xdotool search --name '^微信$' | tail -1 | "

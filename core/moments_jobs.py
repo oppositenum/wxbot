@@ -133,6 +133,7 @@ def recover():
 def refresh():
     from core import docker_wx
     from core.moments_native import Native
+    docker_wx.require_identity_match()
     if docker_wx.priority_pending() or not docker_wx.UI_LOCK.acquire(blocking=False):
         raise m.Conflict('聊天正在操作微信，稍后再刷新朋友圈')
     n=Native()
@@ -385,6 +386,10 @@ def _process_chat(job):
 def process_one():
     from core import docker_wx, moments_ai
     from core.moments_native import Native
+    try:
+        docker_wx.require_identity_match()
+    except docker_wx.IdentityMismatch:
+        return
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
         r=c.execute("SELECT * FROM moments_jobs WHERE state='queued' ORDER BY CASE origin WHEN 'manual' THEN 0 ELSE 1 END,created LIMIT 1").fetchone()

@@ -31,6 +31,8 @@ services:
       WXBOT_UI_USER: ${WXBOT_UI_USER:?WXBOT_UI_USER must be set in .env}
       WXBOT_UI_PASSWORD: ${WXBOT_UI_PASSWORD:?WXBOT_UI_PASSWORD must be set in .env}
       WXBOT_SECRET: ${WXBOT_SECRET:?WXBOT_SECRET must be set in .env}
+      # 本容器会话 cookie。另一个微信容器必须改成别的名字。
+      WXBOT_SESSION_COOKIE: ${WXBOT_SESSION_COOKIE:-wxbot_primary}
       WXBOT_UI_IDLE: ${WXBOT_UI_IDLE:-600}
       # 多账号 启动/停止/重启 通过宿主助手执行（容器内无 docker CLI）。
       WXBOT_SELF_CONTAINER: ${WXBOT_SELF_CONTAINER:-wxbot}

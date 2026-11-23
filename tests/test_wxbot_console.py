@@ -38,11 +38,20 @@ class ConsoleRegistryTests(unittest.TestCase):
         def run(args, timeout=None, **kwargs):
             cmd = list(args)
             self.assertEqual(cmd[0], "docker")
-            name = next((part for part in reversed(cmd[1:]) if not str(part).startswith("-") and "{{" not in str(part)), "")
-            if cmd[1] == "inspect":
+            if cmd[1] in ("stop", "restart", "start"):
+                name = cmd[-1]
+            else:
+                name = next((part for part in reversed(cmd[1:]) if not str(part).startswith("-") and "{{" not in str(part)), "")
+            if cmd[1] == "inspect" or str(cmd[1]).startswith("inspect"):
                 if name not in known:
                     return _completed(cmd, 1, stderr="No such object: " + name)
                 meta = known[name]
+                joined = " ".join(cmd)
+                if "Config.Env" in joined or ".Config.Env" in joined:
+                    env = meta.get("env")
+                    if env is None:
+                        env = []
+                    return _completed(cmd, 0, stdout=json.dumps(env) + "\n")
                 if "binds" in meta:
                     binds = json.dumps(meta["binds"])
                 else:
@@ -53,6 +62,8 @@ class ConsoleRegistryTests(unittest.TestCase):
                 if name not in known:
                     return _completed(cmd, 1, stderr="No such container")
                 return _completed(cmd, 0, stdout=known[name].get("ports", ""))
+            if cmd[1] in ("stop", "restart"):
+                return _completed(cmd, 0, stdout=name + "\n")
             if cmd[1] == "ps":
                 wanted = ""
                 if "--filter" in cmd:
@@ -208,29 +219,107 @@ class ConsoleRegistryTests(unittest.TestCase):
         self.assertNotEqual(payload["account"]["volume"], "wxbot")
 
     def test_accounts_api_has_no_stop_actions(self):
+        """A live container whose self env is still 'wxbot' gets no stop control.
+
+        Registry JSON itself has no start/stop/restart fields. The static PAGE
+        template used before cards were rendered per request has no buttons.
+        """
         known = {
             "wxbot-ubuntu-manual": {
                 "running": True,
+                "env": ["WXBOT_SELF_CONTAINER=wxbot"],
                 "ports": "5100/tcp -> 127.0.0.1:5100\n6080/tcp -> 127.0.0.1:6082\n",
             }
         }
         with mock.patch.object(console.subprocess, "run", side_effect=self._docker(known)):
             console.adopt("wxbot-ubuntu-manual", "甲", "wxid_a")
-            body = console.list_with_probes()
-        text = json.dumps(body, ensure_ascii=False)
+            body = console.list_with_probes("127.0.0.1:5090")
+            page = console.render_page("127.0.0.1:5090")
+        text = json.dumps({k: v for k, v in body["accounts"][0].items() if k != "can_stop"}, ensure_ascii=False)
         self.assertNotIn("stop", text)
         self.assertNotIn("restart", text)
         self.assertNotIn("start", text)
+        self.assertFalse(body["accounts"][0]["can_stop"])
         self.assertEqual(body["accounts"][0]["container"], "wxbot-ubuntu-manual")
         self.assertTrue(body["accounts"][0]["probe"]["running"])
-        page = console.PAGE
         self.assertNotIn(">停止<", page)
         self.assertNotIn(">重启<", page)
-        self.assertNotIn("type=\"button\">停止", page)
-        handler_src = (ROOT / "tools" / "wxbot_console.py").read_text(encoding="utf-8")
-        self.assertNotIn('"/api/accounts/"', handler_src)
-        self.assertNotIn("stop", [line.strip() for line in handler_src.splitlines()
-                                  if "do_POST" in line or "path ==" in line])
+        self.assertNotIn('type="submit">停止', page)
+
+    def test_card_links_use_page_host_and_registered_ports(self):
+        known = {
+            "wxbot-ubuntu-manual": {
+                "running": True,
+                "env": ["WXBOT_SELF_CONTAINER=wxbot"],
+                "ports": "5100/tcp -> 127.0.0.1:5100\n6080/tcp -> 127.0.0.1:6082\n",
+            }
+        }
+        with mock.patch.object(console.subprocess, "run", side_effect=self._docker(known)):
+            console.adopt("wxbot-ubuntu-manual", "甲", "wxid_a")
+            body = console.list_with_probes("127.0.0.1:5090")
+            page = console.render_page("127.0.0.1:5090")
+        account = body["accounts"][0]
+        self.assertEqual(account["admin_url"], "http://127.0.0.1:5100/")
+        self.assertEqual(
+            account["vnc_url"],
+            "http://127.0.0.1:6082/vnc.html?autoconnect=true&resize=scale&view_only=false&path=websockify",
+        )
+        self.assertIn("http://127.0.0.1:5100/", page)
+        self.assertIn(
+            "http://127.0.0.1:6082/vnc.html?autoconnect=true&amp;resize=scale&amp;view_only=false&amp;path=websockify",
+            page,
+        )
+        self.assertNotIn("iframe", page.lower())
+        v6 = console.render_page("[2001:db8::1]:5090")
+        self.assertIn("http://[2001:db8::1]:5100/", v6)
+        self.assertIn("http://[2001:db8::1]:6082/vnc.html", v6)
+        self.assertEqual(console.page_hostname("0.0.0.0:5090"), "")
+        self.assertEqual(console.page_hostname(""), "")
+
+    def test_missing_port_omits_that_link(self):
+        account = {"container": "wxbot-a", "web_port": 5101, "vnc_port": None, "id": "wxbot-a"}
+        admin, vnc = console.entry_urls(account, "127.0.0.1:5090")
+        self.assertEqual(admin, "http://127.0.0.1:5101/")
+        self.assertEqual(vnc, "")
+        self.assertNotIn("6080", admin)
+
+    def test_self_mismatch_has_no_stop_and_confirm_mismatch_does_not_stop(self):
+        calls = []
+        known = {
+            "wxbot-ubuntu-manual": {
+                "running": True,
+                "env": ["WXBOT_SELF_CONTAINER=wxbot"],
+                "ports": "5100/tcp -> 127.0.0.1:5100\n6080/tcp -> 127.0.0.1:6082\n",
+            },
+            "wxbot-second": {
+                "running": True,
+                "env": ["WXBOT_SELF_CONTAINER=wxbot-second"],
+                "ports": "5100/tcp -> 127.0.0.1:5101\n6080/tcp -> 127.0.0.1:6083\n",
+            },
+        }
+        real = self._docker(known)
+
+        def run(args, timeout=None, **kwargs):
+            cmd = list(args)
+            if cmd[1] in ("stop", "restart"):
+                calls.append(cmd)
+            return real(args, timeout=timeout, **kwargs)
+
+        with mock.patch.object(console.subprocess, "run", side_effect=run):
+            console.adopt("wxbot-ubuntu-manual", "甲", "wxid_a")
+            console.adopt("wxbot-second", "乙", "wxid_b")
+            page = console.render_page("127.0.0.1:5090")
+            mismatch = console.account_control("wxbot-second", "stop", "wxid_other")
+            matched = console.account_control("wxbot-second", "stop", "wxid_b")
+            refused = console.account_control("wxbot-ubuntu-manual", "stop", "wxid_a")
+        self.assertNotIn(">停止<", page.split("wxbot-ubuntu-manual")[1].split("</section>")[0])
+        self.assertIn(">停止<", page)
+        self.assertEqual(mismatch[0], 400)
+        self.assertEqual(mismatch[1]["reason"], "confirm_wxid_mismatch")
+        self.assertEqual(calls, [["docker", "stop", "wxbot-second"]])
+        self.assertEqual(matched[0], 200)
+        self.assertEqual(refused[0], 403)
+        self.assertEqual(refused[1]["reason"], "self_name_mismatch")
 
 
 if __name__ == "__main__":

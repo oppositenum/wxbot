@@ -733,9 +733,28 @@ def api_accounts_create():
     try: return jsonify(ok=True, account=multi_account.create(body['label'], body.get('id')))
     except (ValueError, KeyError) as exc: return jsonify(error=str(exc)),400
 
+def _account_target_container(account_id):
+    """Container name the existing action path already uses: the account id."""
+    return (account_id or "").strip()
+
+
+def _own_container_stop(account_id, operation):
+    """Stop/restart only this process's container. Unset self name refuses; never guess."""
+    if operation not in ("stop", "restart"):
+        return None
+    self_name = os.environ.get("WXBOT_SELF_CONTAINER", "").strip()
+    target = _account_target_container(account_id)
+    if not self_name or target != self_name:
+        return jsonify(error="只能操作本容器"), 403
+    return None
+
+
 @app.post('/api/accounts/<account_id>/<operation>')
 def api_accounts_action(account_id, operation):
     from core import multi_account
+    denied = _own_container_stop(account_id, operation)
+    if denied:
+        return denied
     try: return jsonify(multi_account.action(account_id, operation))
     except (ValueError, KeyError) as exc: return jsonify(error=str(exc)),400
 
@@ -744,7 +763,13 @@ def api_accounts_batch():
     from core import multi_account
     action=request.get_json(silent=True).get('action') if request.get_json(silent=True) else ''
     if action not in ('start','stop','restart'): return jsonify(error='不支持的批量操作'),400
-    return jsonify(results=[multi_account.action(a['id'], action) for a in multi_account.list_accounts()])
+    accounts = multi_account.list_accounts()
+    if action in ("stop", "restart"):
+        self_name = os.environ.get("WXBOT_SELF_CONTAINER", "").strip()
+        targets = [_account_target_container(a.get("id")) for a in accounts]
+        if not self_name or any(target != self_name for target in targets):
+            return jsonify(error="只能操作本容器"), 403
+    return jsonify(results=[multi_account.action(a['id'], action) for a in accounts])
 
 
 @app.post("/api/login")

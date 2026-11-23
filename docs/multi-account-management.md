@@ -1,27 +1,26 @@
-# 多微信账号管理规划与第一版实现
+# 多微信账号管理
 
-## 运行模型
+## 控制台
 
-每个微信号对应一个独立的 `wxbot-<id>` 容器、独立 `/home/wechat` 数据卷、独立账号配置目录、独立后台端口和独立 VNC 端口。这样登录态、微信进程、密钥、解密库、发送队列和机器人状态不会在账号之间混用。
+宿主机控制台只听 `127.0.0.1:5090`（可用 `WXBOT_CONSOLE_PORT` 改端口，绑定地址不变）。登记来自 `docker inspect` 和 `docker port`，不猜测端口，也不把注册表写进任何容器的 `work/multi_accounts.json`。
 
-账号管理页是运营入口：`http://127.0.0.1:5100/accounts`。它显示账号名称、容器状态、后台/VNC 入口，并支持添加账号、启动、停止、重启和批量启动/停止。
+每张卡片打开该容器自己的后台和已发布的 noVNC：
 
-## 状态边界
+- 后台：`http://{页面主机名}:{web_port}/`
+- noVNC：`http://{页面主机名}:{vnc_port}/vnc.html?autoconnect=true&resize=scale&view_only=false&path=websockify`
 
-“运行中”只表示对应容器存在并处于 running；“微信在线”必须由该账号后台实际报告登录成功，不能从 Docker 进程存在推断。当前 registry 页面先展示这一差异，后续可在每个账号后台提供带签名的状态探针后显示在线绿点。
+协议固定为 http。主机名取自请求 `Host`（`urllib.parse.urlsplit`）。空主机名和 `0.0.0.0` 不生成链接。IPv6 写成 `[addr]`。某个端口没有登记时，那一条链接不出现，不回退到 6080 或 6082。
 
-## API
+停止和重启只在 `docker inspect` 的 `Config.Env` 里 `WXBOT_SELF_CONTAINER` 等于该容器真实名字时才出现。现网第一个容器的环境变量仍是 `wxbot`，真实名字是 `wxbot-ubuntu-manual`，这张卡片没有停止按钮。出现按钮时，请求体里的 `confirm_wxid` 必须等于登记的 `expected_wxid`，不一致返回 400，不会调用 `docker stop` 或 `docker restart`。
 
-- `GET /api/accounts`：返回账号注册表与容器状态。
-- `POST /api/accounts`：`{"label":"客服号","id":"optional-slug"}` 创建隔离环境登记。
-- `POST /api/accounts/<id>/start|stop|restart`：操作单个容器。
-- `POST /api/accounts/batch`：`{"action":"start"|"stop"|"restart"}` 批量操作。
+## 容器内
 
-这些接口需要现有 `WXBOT_ADMIN_READ_TOKEN` 或本机管理员访问头。Docker 不可用时只返回明确的 `docker_unavailable`，不会假装启动成功。
+容器内的账号页只说明这是本容器，并链到同一主机名上的 `http://{主机名}:5090/`。没有添加账号、批量启停，也不再要求管理 Token。
 
-## 当前已实现范围与下一步
+`POST /api/accounts/<id>/stop`、`/restart` 和批量 stop/restart：目标容器名（请求里的账号 id）必须等于本进程的 `WXBOT_SELF_CONTAINER`。否则 403。`WXBOT_LOCAL=1` 不能放行。`WXBOT_SELF_CONTAINER` 未设置时同样 403，不会猜成 `wxbot`。只读的账号列表仍可查看。容器不会调用 `multi_account.create()` 把控制台注册表抄进自己的 `work/`。
 
-本轮已实现账号注册表、端口/卷分配、管理 API、权限保护、账号卡片和批量操作界面。由于当前后台运行在没有 Docker socket 的容器里，页面可以登记和查看计划，但不能从这个容器直接创建宿主 Docker 容器；生产部署时应把管理 API 放到宿主管理进程，或只给专用 manager 容器挂载受限 Docker socket。创建实例时使用 registry 生成的独立卷、端口和 `/app/accounts/<id>` 挂载，再逐个 VNC 扫码登录。
+## API（容器内，仅本容器）
 
-建议第二阶段加入：宿主 manager 的容器创建器、每账号状态探针、批量配置模板、按账号审计日志、端口冲突检查、启动失败重试和滚动升级。账号登录、发送和密钥刷新仍必须绑定各自账号 epoch，禁止跨账号复用。
-
+- `GET /api/accounts`：本容器可见的账号列表。
+- `POST /api/accounts/<id>/stop|restart`：仅当 `<id>` 等于 `WXBOT_SELF_CONTAINER`。
+- `POST /api/accounts/batch`：`{"action":"stop"|"restart"}` 只要包含别的容器就 403。

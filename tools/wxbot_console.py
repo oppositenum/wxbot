@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Host-side registry for already-running WeChat containers.
 
-Listens on 127.0.0.1:5090 (WXBOT_CONSOLE_PORT). It only records containers
-the operator adopts. It does not start, stop, or restart anything, and it
-does not write any container's work/multi_accounts.json.
+Listens on 127.0.0.1:5090 (WXBOT_CONSOLE_PORT). It records containers the
+operator adopts and opens each container's own admin and noVNC. Stop and
+restart exist only when docker inspect Config.Env WXBOT_SELF_CONTAINER equals
+the container name, and the body supplies that row's expected_wxid. It never
+calls multi_account.create and does not write any container's
+work/multi_accounts.json.
 
 Run:  python3 tools/wxbot_console.py
 Registry:  ~/.wxbot/console/registry.json
 """
 import fcntl
+import html
 import json
 import os
 import re
@@ -16,6 +20,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote, urlsplit
 
 PORT = int(os.environ.get("WXBOT_CONSOLE_PORT", "5090"))
 BIND = "127.0.0.1"
@@ -191,8 +196,78 @@ def inspect_meta(name):
     return volume, hostname
 
 
-def public_account(account):
-    return {
+def inspect_self_container(name):
+    """WXBOT_SELF_CONTAINER from Config.Env. Missing or unset stays empty. Never guess.
+
+    The format stays attached to --format so a name-scanning docker stub still
+    sees the container as the only bare argument.
+    """
+    proc = docker_run(["inspect", "--format={{json .Config.Env}}", name])
+    if proc.returncode != 0:
+        return ""
+    return self_container_from_env(proc.stdout.strip())
+
+
+def self_container_from_env(raw_env):
+    """WXBOT_SELF_CONTAINER from docker inspect Config.Env. Unset stays empty."""
+    try:
+        env = json.loads(raw_env) if raw_env and raw_env not in ("<no value>", "null") else []
+    except ValueError:
+        env = []
+    if isinstance(env, dict):
+        env = [f"{key}={value}" for key, value in env.items()]
+    if not isinstance(env, list):
+        return ""
+    prefix = "WXBOT_SELF_CONTAINER="
+    for item in env:
+        text = str(item)
+        if text.startswith(prefix):
+            return text[len(prefix):].strip()
+    return ""
+
+
+def page_hostname(host_header):
+    """Hostname of the page request. Empty and 0.0.0.0 are rejected. IPv6 is [addr]."""
+    raw = (host_header or "").strip()
+    if not raw:
+        return ""
+    hostname = urlsplit("//" + raw).hostname or ""
+    if not hostname or hostname == "0.0.0.0":
+        return ""
+    if ":" in hostname:
+        return "[" + hostname + "]"
+    return hostname
+
+
+def entry_urls(account, host_header):
+    """Direct http links to the ports adopt stored. Missing port omits that link."""
+    host = page_hostname(host_header)
+    admin = vnc = ""
+    if not host:
+        return admin, vnc
+    web = account.get("web_port")
+    vnc_port = account.get("vnc_port")
+    if web:
+        admin = f"http://{host}:{int(web)}/"
+    if vnc_port:
+        vnc = (
+            f"http://{host}:{int(vnc_port)}/vnc.html"
+            "?autoconnect=true&resize=scale&view_only=false&path=websockify"
+        )
+    return admin, vnc
+
+
+def self_name_matches(name):
+    """True only when inspect Config.Env self name equals this container's name."""
+    try:
+        self_name = inspect_self_container(name)
+    except Exception:
+        return False
+    return bool(self_name) and self_name == name
+
+
+def public_account(account, host_header=""):
+    info = {
         "id": account.get("id", ""),
         "label": account.get("label", ""),
         "container": account.get("container", ""),
@@ -202,11 +277,20 @@ def public_account(account):
         "volume": account.get("volume", ""),
         "hostname": account.get("hostname", ""),
     }
+    if host_header:
+        admin, vnc = entry_urls(account, host_header)
+        if admin:
+            info["admin_url"] = admin
+        if vnc:
+            info["vnc_url"] = vnc
+        name = account.get("container") or ""
+        info["can_stop"] = bool(name) and self_name_matches(name)
+    return info
 
 
-def probe_one(account):
+def probe_one(account, host_header=""):
     name = account.get("container") or ""
-    info = public_account(account)
+    info = public_account(account, host_header)
     info["probe"] = {"ok": False, "running": False, "error": ""}
     if not name:
         info["probe"]["error"] = "no_container"
@@ -233,13 +317,13 @@ def probe_one(account):
     return info
 
 
-def list_with_probes():
+def list_with_probes(host_header=""):
     registry = read_registry()
     accounts = registry.get("accounts") or []
     error = ""
     probed = []
     if accounts:
-        futures = [_POOL.submit(probe_one, account) for account in accounts]
+        futures = [_POOL.submit(probe_one, account, host_header) for account in accounts]
         for future in futures:
             try:
                 probed.append(future.result(timeout=PROBE_TIMEOUT))
@@ -329,30 +413,105 @@ def adopt(container, label, expected_wxid):
     return locked(_modify)
 
 
-PAGE = """<!DOCTYPE html>
+def account_control(account_id, operation, confirm_wxid):
+    """Stop or restart only the container whose inspect self name is its own name.
+
+    confirm_wxid must equal the registry expected_wxid. Mismatch does not call docker.
+    """
+    if operation not in ("stop", "restart"):
+        return 400, {"ok": False, "reason": "unsupported_operation"}
+    account_id = (account_id or "").strip()
+    confirm_wxid = (confirm_wxid or "").strip()
+
+    def _find(current):
+        account = next(
+            (a for a in current.get("accounts") or [] if a.get("id") == account_id),
+            None,
+        )
+        return None, account
+
+    account = locked(_find)
+    if not account:
+        return 404, {"ok": False, "reason": "unknown_account"}
+    expected = (account.get("expected_wxid") or "").strip()
+    if not confirm_wxid or confirm_wxid != expected:
+        return 400, {"ok": False, "reason": "confirm_wxid_mismatch"}
+    name = account.get("container") or ""
+    if not name or not self_name_matches(name):
+        return 403, {"ok": False, "reason": "self_name_mismatch"}
+    try:
+        proc = docker_run([operation, name], timeout=30)
+    except subprocess.TimeoutExpired:
+        return 502, {"ok": False, "reason": "docker_timeout"}
+    except Exception as exc:
+        return 502, {"ok": False, "reason": str(exc)[-400:]}
+    if proc.returncode != 0:
+        return 502, {"ok": False, "reason": (proc.stderr or proc.stdout or "docker failed").strip()[-400:]}
+    return 200, {"ok": True, "account": public_account(account)}
+
+
+def _link(url, text):
+    if not url:
+        return ""
+    return f'<a href="{html.escape(url, quote=True)}">{html.escape(text)}</a>'
+
+
+def render_page(host_header):
+    """Chinese cards. Stop/restart only when inspect self name equals the container name."""
+    try:
+        registry = read_registry()
+        error = ""
+    except Exception as exc:
+        registry = _empty()
+        error = str(exc)[-400:]
+    cards = []
+    for account in registry.get("accounts") or []:
+        admin, vnc = entry_urls(account, host_header)
+        name = account.get("container") or ""
+        can_control = bool(name) and self_name_matches(name)
+        label = html.escape(account.get("label") or account.get("id") or "")
+        container = html.escape(name)
+        wxid = html.escape(account.get("expected_wxid") or "")
+        account_id = html.escape(account.get("id") or "", quote=True)
+        links = " ".join(part for part in (_link(admin, "后台"), _link(vnc, "noVNC")) if part)
+        controls = ""
+        if can_control:
+            controls = (
+                f'<form method="post" action="/api/accounts/{quote(account.get("id") or "")}/stop">'
+                f'<input name="confirm_wxid" placeholder="确认 wxid" required> '
+                f'<button type="submit">停止</button></form>'
+                f'<form method="post" action="/api/accounts/{quote(account.get("id") or "")}/restart">'
+                f'<input name="confirm_wxid" placeholder="确认 wxid" required> '
+                f'<button type="submit">重启</button></form>'
+            )
+        cards.append(
+            f'<section class="card"><h2>{label}</h2>'
+            f'<p>容器 {container}</p>'
+            f'<p>期望 wxid {wxid}</p>'
+            f'<p data-account="{account_id}">{links}</p>'
+            f'{controls}</section>'
+        )
+    body = "\n".join(cards) or "<p>还没有登记容器。</p>"
+    err = f'<p class="err">{html.escape(error)}</p>' if error else ""
+    return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <title>微信控制台</title>
 <style>
-  body { font: 15px/1.5 -apple-system, sans-serif; margin: 24px; color: #1a1a1a; }
-  table { border-collapse: collapse; width: 100%; margin: 12px 0 28px; }
-  th, td { border-bottom: 1px solid #ddd; text-align: left; padding: 6px 8px; }
-  label { display: block; margin: 8px 0; }
-  input { padding: 4px 8px; min-width: 240px; }
-  button { padding: 6px 14px; }
-  .err { color: #a30; }
+  body {{ font: 15px/1.5 -apple-system, sans-serif; margin: 24px; color: #1a1a1a; }}
+  .card {{ border: 1px solid #ddd; border-radius: 8px; padding: 12px 16px; margin: 12px 0; }}
+  label {{ display: block; margin: 8px 0; }}
+  input {{ padding: 4px 8px; min-width: 240px; }}
+  button {{ padding: 6px 14px; }}
+  .err {{ color: #a30; }}
 </style>
 </head>
 <body>
 <h1>微信控制台</h1>
-<p>只登记已经在跑的容器。本页没有启停操作。</p>
-<h2>已登记</h2>
-<div id="err" class="err"></div>
-<table>
-  <thead><tr><th>名称</th><th>容器</th><th>后台端口</th><th>VNC 端口</th><th>期望 wxid</th></tr></thead>
-  <tbody id="rows"></tbody>
-</table>
+<p>只登记已经在跑的容器。卡片打开该容器自己的后台和 noVNC。停止只在容器自报名字与真实名字一致时出现，并且要填写该号的期望 wxid。</p>
+{err}
+<div id="cards">{body}</div>
 <h2>登记一个正在运行的容器</h2>
 <form id="adopt">
   <label>容器名 <input name="container" required placeholder="wxbot-ubuntu-manual"></label>
@@ -362,51 +521,34 @@ PAGE = """<!DOCTYPE html>
 </form>
 <pre id="candidates"></pre>
 <script>
-async function load() {
-  const err = document.getElementById('err');
-  err.textContent = '';
-  const res = await fetch('/api/accounts');
-  const data = await res.json();
-  if (data.error) err.textContent = data.error;
-  const rows = document.getElementById('rows');
-  rows.innerHTML = '';
-  for (const a of data.accounts || []) {
-    const tr = document.createElement('tr');
-    for (const key of ['label', 'container', 'web_port', 'vnc_port', 'expected_wxid']) {
-      const td = document.createElement('td');
-      td.textContent = a[key] == null ? '' : String(a[key]);
-      tr.appendChild(td);
-    }
-    rows.appendChild(tr);
-  }
-  const cand = await fetch('/api/candidates');
-  const listed = await cand.json();
-  const lines = (listed.candidates || []).map(c => c.name + '  ' + (c.ports_raw || ''));
-  document.getElementById('candidates').textContent =
-    lines.length ? '正在运行的候选：\\n' + lines.join('\\n') : '没有名字以 wxbot 开头的运行中容器';
-}
-document.getElementById('adopt').addEventListener('submit', async (ev) => {
+document.getElementById('adopt').addEventListener('submit', async (ev) => {{
   ev.preventDefault();
   const form = ev.target;
-  const body = {
+  const body = {{
     container: form.container.value,
     label: form.label.value,
     expected_wxid: form.expected_wxid.value
-  };
-  const res = await fetch('/api/adopt', {
+  }};
+  const res = await fetch('/api/adopt', {{
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: {{'Content-Type': 'application/json'}},
     body: JSON.stringify(body)
-  });
+  }});
   const data = await res.json();
-  if (!data.ok) {
-    document.getElementById('err').textContent = data.reason || '登记失败';
+  if (!data.ok) {{
+    const err = document.createElement('p');
+    err.className = 'err';
+    err.textContent = data.reason || '登记失败';
+    document.body.prepend(err);
     return;
-  }
-  form.reset();
-  load();
-});
-load();
+  }}
+  location.reload();
+}});
+fetch('/api/candidates').then(r => r.json()).then(listed => {{
+  const lines = (listed.candidates || []).map(c => c.name + '  ' + (c.ports_raw || ''));
+  document.getElementById('candidates').textContent =
+    lines.length ? '正在运行的候选：\\n' + lines.join('\\n') : '没有名字以 wxbot 开头的运行中容器';
+}});
 </script>
 </body>
 </html>
@@ -425,20 +567,36 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _read_body(self):
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length) if length else b""
+        ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if ctype == "application/x-www-form-urlencoded":
+            from urllib.parse import parse_qs
+            parsed = parse_qs(raw.decode("utf-8", "replace"), keep_blank_values=True)
+            return {key: values[-1] if values else "" for key, values in parsed.items()}
+        if not raw:
+            return {}
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("bad_request")
+        return data
+
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path == "/":
-            return self._send(200, PAGE, "text/html; charset=utf-8")
+            return self._send(200, render_page(self.headers.get("Host", "")), "text/html; charset=utf-8")
         if path == "/health":
             return self._send(200, {"ok": True, "service": "wxbot-console"})
         if path == "/api/accounts":
+            host = self.headers.get("Host", "")
             try:
-                return self._send(200, list_with_probes())
+                return self._send(200, list_with_probes(host))
             except Exception as exc:
                 registry = _read_unlocked()
                 return self._send(200, {
                     "version": 1,
-                    "accounts": [public_account(a) for a in registry.get("accounts") or []],
+                    "accounts": [public_account(a, host) for a in registry.get("accounts") or []],
                     "error": str(exc)[-400:],
                 })
         if path == "/api/candidates":
@@ -450,15 +608,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
-        if path != "/api/adopt":
+        control = re.fullmatch(r"/api/accounts/([^/]+)/(stop|restart)", path)
+        if path != "/api/adopt" and not control:
             return self._send(404, {"ok": False, "reason": "not_found"})
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            data = json.loads(self.rfile.read(length) or b"{}")
+            data = self._read_body()
         except (ValueError, OSError):
             return self._send(400, {"ok": False, "reason": "bad_request"})
-        if not isinstance(data, dict):
-            return self._send(400, {"ok": False, "reason": "bad_request"})
+        if control:
+            account_id, operation = control.group(1), control.group(2)
+            from urllib.parse import unquote
+            code, payload = account_control(
+                unquote(account_id),
+                operation,
+                str(data.get("confirm_wxid", "")),
+            )
+            return self._send(code, payload)
         code, payload = adopt(
             str(data.get("container", "")),
             str(data.get("label", "")),

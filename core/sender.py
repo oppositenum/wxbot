@@ -21,7 +21,20 @@ class UnavailableIdentityAdapter:
 
 from core.native_sender import NativeContactAdapter
 from core.legacy_sender import LegacySearchAdapter
+from core.direct_sender import DirectSendAdapter
 _adapter = LegacySearchAdapter()
+_direct = DirectSendAdapter(fallback=_adapter)
+
+
+def current_adapter():
+    """按后台「回复发送方式」选择通道。只在默认界面适配器上切换,
+    测试或其它地方显式替换的 _adapter 保持原样。"""
+    if type(_adapter) is LegacySearchAdapter:
+        from core import send_mode
+        if send_mode.mode() == 'direct':
+            _direct.fallback = _adapter
+            return _direct
+    return _adapter
 
 
 def is_self_chat(chat):
@@ -43,10 +56,11 @@ def preflight(chat, session=None, kind='text'):
     actions. None means generation may proceed, not that a message was sent.
     """
     token = session or sessions.capture()
+    adapter = current_adapter()
     reason = ('account_session_changed' if not sessions.valid(token) else
-              'cannot_confirm_target' if not chat or not _adapter.available else '')
-    if not reason and hasattr(_adapter, 'capability'):
-        reason = _adapter.capability(chat, kind)
+              'cannot_confirm_target' if not chat or not adapter.available else '')
+    if not reason and hasattr(adapter, 'capability'):
+        reason = adapter.capability(chat, kind)
     if reason:
         return dict(ok=False, status='stale' if reason == 'account_session_changed' else 'not_sent',
                     reason=reason, retryable=False,
@@ -55,6 +69,7 @@ def preflight(chat, session=None, kind='text'):
                         'native_group_identity_unavailable':'当前适配器尚不能确认群聊身份',
                         'native_payload_not_supported':'当前适配器暂只支持私聊文字',
                         'legacy_payload_not_supported':'最早版支持文字和图片，不支持群成员定向 @',
+                        'direct_payload_not_supported':'直发只支持文字和图片，不支持群成员定向 @',
                         'native_contact_identity_unavailable':'联系人缺少可唯一核对的微信号',
                         'native_client_state_unavailable':'当前微信账号或窗口状态无法核对',
                     }.get(reason, '真实微信发送适配器尚不可用，无法确认收件人'))
@@ -149,9 +164,10 @@ def _receipt_matches(receipt, token, chat, jid):
 
 
 def _send(display, chat, kind, payload, *, job_id=None, session=None, proactive_ticket=None):
-    if isinstance(_adapter, LegacySearchAdapter):
-        return _adapter.submit(display, chat, kind, payload, job_id=job_id, session=session,
-                               proactive_ticket=proactive_ticket)
+    adapter = current_adapter()
+    if isinstance(adapter, (LegacySearchAdapter, DirectSendAdapter)):
+        return adapter.submit(display, chat, kind, payload, job_id=job_id, session=session,
+                              proactive_ticket=proactive_ticket)
     token = session or sessions.capture()
     jid = job_id or send_ledger.next_id()
     ledger = send_ledger.Ledger()

@@ -26,6 +26,10 @@ button.primary{background:#23815a;color:#fff;border-color:#23815a}button:disable
 .hist .text{white-space:pre-wrap;word-break:break-word;margin-top:2px}
 .warn{background:#fff7e6;border:1px solid #f1dcae;color:#7a5a12;border-radius:10px;padding:10px 12px;margin-top:12px;font-size:14px}
 .empty{color:#718078;padding:12px 4px}
+.mode{margin-top:16px}.mode .opts{display:flex;gap:10px;flex-wrap:wrap;margin:8px 0}
+.mode label.opt{flex:1;min-width:220px;border:1px solid #d6e2db;border-radius:12px;padding:10px 12px;cursor:pointer;background:#fff}
+.mode label.opt.on{border-color:#23815a;background:#eef8f2}.mode label.opt b{display:block}
+.mode .sub{font-size:13px;color:#718078}.bot{font-size:12px;border-radius:20px;padding:1px 7px;background:#f3ecfb;color:#6a3fa0}
 .preview{display:none;align-items:center;gap:10px;margin-top:10px;padding:8px;border:1px dashed #bfd0c6;border-radius:10px}
 .preview img{max-width:120px;max-height:90px;border-radius:6px}.preview .fn{flex:1;min-width:0;font-size:13px;color:#55635b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @media(max-width:820px){main{padding:18px 12px}.grid{grid-template-columns:1fr}#list{max-height:40vh}}
@@ -34,6 +38,15 @@ button.primary{background:#23815a;color:#fff;border-color:#23815a}button:disable
 <h1>直发测试</h1>
 <p class="muted">直接调用微信底层发送，不操作界面。<b>独立测试功能</b>，不影响机器人现有的发送方式。</p>
 <div class="status" id="status"><span class="pill">检查中…</span></div>
+<section class="card mode">
+  <h2>机器人回复发送方式</h2>
+  <div class="opts">
+    <label class="opt" id="opt-ui"><input type="radio" name="mode" value="ui"> <b>界面自动化（原有）</b><span class="sub">搜索联系人、粘贴、回车，和人工操作一样</span></label>
+    <label class="opt" id="opt-direct"><input type="radio" name="mode" value="direct"> <b>直发（实验）</b><span class="sub">直接调用微信底层发送，不操作界面，更快</span></label>
+  </div>
+  <label class="sub"><input type="checkbox" id="fallback"> 直发确定没发出时（未连接、未登录等）自动改用界面自动化；结果不确定时不回退，避免重复发送</label>
+  <div class="sub" id="modeMsg" style="margin-top:6px"></div>
+</section>
 <div class="warn">支持文字和图片（PNG / JPG / GIF / WEBP，20MB 以内）。「已交给微信发送」只代表微信已接收；图片要等微信后台上传完才算真正发出，是否送达请在手机或 VNC 里看有没有红色感叹号。</div>
 <div class="grid">
   <section class="card">
@@ -97,7 +110,7 @@ function fmt(t){const d=new Date(t*1000);return d.toLocaleString('zh-CN',{hour12
 async function loadHistory(){
   const [r,d]=await j('/api/direct/history');
   const h=(r.ok&&d.history)||[];
-  $('#history').innerHTML=h.length?h.map(x=>`<div class="hist"><div class="meta"><span>${fmt(x.t)}</span><span>${esc(x.name||x.chat)}</span><span style="color:${x.ok?'#1d7a50':'#a33232'}">${x.ok?'✓ 已交给微信':'✗ '+esc(x.error||'失败')}</span></div><div class="text">${x.kind==='image'?'🖼️ 图片 · ':''}${esc(x.content)}</div></div>`).join(''):'<p class="empty">还没有记录</p>';
+  $('#history').innerHTML=h.length?h.map(x=>`<div class="hist"><div class="meta"><span>${fmt(x.t)}</span>${x.source==='bot'?'<span class="bot">🤖 机器人</span>':''}<span>${esc(x.name||x.chat)}</span><span style="color:${x.ok?'#1d7a50':'#a33232'}">${x.ok?'✓ 已交给微信':'✗ '+esc(x.error||'失败')}</span></div><div class="text">${x.kind==='image'?'🖼️ 图片 · ':''}${esc(x.content)}</div></div>`).join(''):'<p class="empty">还没有记录</p>';
 }
 async function post(url,body){
   const opt={method:'POST'};
@@ -146,6 +159,22 @@ Promise.all([j('/api/contacts'),j('/api/groups')]).then(([[r1,people],[r2,groups
   if(fh>0)rows.unshift(rows.splice(fh,1)[0]);
   draw();
 }).catch(e=>{$('#list').innerHTML=`<p class="empty">${esc(e.message)}</p>`;});
-loadStatus();loadHistory();setInterval(loadStatus,15000);
+async function loadMode(){
+  const [r,d]=await j('/api/send_mode');
+  if(!r.ok){$('#modeMsg').textContent='读取失败';return;}
+  document.querySelectorAll('input[name=mode]').forEach(x=>x.checked=x.value===d.mode);
+  $('#opt-ui').classList.toggle('on',d.mode==='ui');$('#opt-direct').classList.toggle('on',d.mode==='direct');
+  $('#fallback').checked=!!d.fallback;
+  $('#modeMsg').textContent='当前：'+(d.mode==='direct'?'直发':'界面自动化')+(d.updated?' · 修改于 '+fmt(d.updated):'');
+}
+async function saveMode(body){
+  $('#modeMsg').textContent='保存中…';
+  const [r,d]=await j('/api/send_mode',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+  if(!r.ok){$('#modeMsg').textContent='✗ '+(d.error||'保存失败');}
+  loadMode();
+}
+document.querySelectorAll('input[name=mode]').forEach(x=>x.onchange=()=>saveMode({mode:x.value}));
+$('#fallback').onchange=e=>saveMode({fallback:e.target.checked});
+loadMode();loadStatus();loadHistory();setInterval(loadStatus,15000);setInterval(loadHistory,15000);
 </script>
 <script src="/static/nav.js"></script></html>

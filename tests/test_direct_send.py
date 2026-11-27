@@ -191,6 +191,17 @@ class DirectSendRoutesTest(unittest.TestCase):
         r = self.client.post("/api/direct/send", json={"token": "api-token", "chat": "a", "content": "x"})
         self.assertEqual(r.status_code, 401)
 
+    def test_send_mode_requires_login_and_validates(self):
+        self.assertEqual(self.client.get("/api/send_mode").status_code, 401)
+        self.assertEqual(self.client.post("/api/send_mode", json={"token": "api-token", "mode": "direct"}).status_code, 401)
+        self.client.post("/api/auth/login", json={"username": "u", "password": "p"})
+        with tempfile.TemporaryDirectory() as d, patch("config.WORK_DIR", d):
+            self.assertEqual(self.client.get("/api/send_mode").json["mode"], "ui")
+            self.assertEqual(self.client.post("/api/send_mode", json={"mode": "bad"}).status_code, 400)
+            r = self.client.post("/api/send_mode", json={"mode": "direct", "fallback": False})
+            self.assertEqual((r.json["mode"], r.json["fallback"]), ("direct", False))
+            self.assertEqual(self.client.get("/api/send_mode").json["mode"], "direct")
+
     def test_send_maps_errors_to_409(self):
         self.client.post("/api/auth/login", json={"username": "u", "password": "p"})
         with patch("core.direct_send.send", side_effect=ds.DirectSendError("empty", "内容不能为空")):

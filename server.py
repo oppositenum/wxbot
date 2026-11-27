@@ -1500,6 +1500,25 @@ def api_direct_send():
     return jsonify(row)
 
 
+@app.get("/api/send_mode")
+def api_send_mode_get():
+    from core import send_mode
+    return jsonify(send_mode.get())
+
+
+@app.post("/api/send_mode")
+def api_send_mode_set():
+    """机器人回复的发送方式:ui=界面自动化,direct=直发。立即生效。"""
+    from core import send_mode
+    data = request.get_json(silent=True) or {}
+    fallback = data.get("fallback")
+    try:
+        cur = send_mode.set(data.get("mode"), fallback if isinstance(fallback, bool) else None)
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    return jsonify(cur)
+
+
 @app.post("/api/direct/send_image")
 def api_direct_send_image():
     """实验直发图片。表单 file=图片;或 JSON path=/api/upload 返回的路径(仅限 work 下上传目录)。"""

@@ -26,6 +26,13 @@ HISTORY = os.path.join(config.WORK_DIR, "direct_send_history.jsonl")
 MAX_CHARS = 2000
 WAIT_SECONDS = 8.0
 
+# 这些错误码出现时,消息一定没有交给微信(可安全改走其它方式);其余(timeout/frida_error)结果不确定。
+NOT_SENT_CODES = frozenset({
+    "no_frida", "no_wechat", "unsupported", "not_running", "attach_failed", "agent_error",
+    "not_logged_in", "request_mismatch", "bad_chat", "empty", "too_long", "no_file",
+    "bad_image", "too_large", "step_failed",
+})
+
 STEP_TEXT = {
     1: "取服务对象失败(第1步)", 2: "取服务对象失败(第2步)", 3: "取服务对象失败(第3步)",
     4: "服务对象类型不符,可能版本不对", 9: "已交给微信发送",
@@ -213,7 +220,13 @@ def _dispatch(row, call):
     """在锁内调用 agent 并等协程结果;row 会写进历史。"""
     with _lock:
         try:
-            script = _ensure_script()
+            try:
+                script = _ensure_script()
+            except DirectSendError:
+                raise
+            except Exception as e:  # 附加阶段失败:肯定还没发
+                _drop()
+                raise DirectSendError("attach_failed", f"附加微信失败:{e}")
             r = call(script.exports_sync)
             if not r.get("ok"):
                 code = r.get("error") or "failed"
@@ -249,7 +262,7 @@ def _dispatch(row, call):
     return row
 
 
-def send(chat, content, name=""):
+def send(chat, content, name="", source="manual"):
     """发文字。chat=wxid 或 xxx@chatroom。返回结果字典;失败抛 DirectSendError。"""
     chat = _check_chat(chat)
     content = content if isinstance(content, str) else ""
@@ -257,11 +270,12 @@ def send(chat, content, name=""):
         raise DirectSendError("empty", "内容不能为空")
     if len(content) > MAX_CHARS:
         raise DirectSendError("too_long", f"内容超过 {MAX_CHARS} 字")
-    row = {"t": int(time.time()), "kind": "text", "chat": chat, "name": name, "content": content}
+    row = {"t": int(time.time()), "kind": "text", "chat": chat, "name": name, "content": content,
+           "source": source}
     return _dispatch(row, lambda ex: ex.send(chat, content))
 
 
-def send_image(chat, path, name="", label=""):
+def send_image(chat, path, name="", label="", source="manual"):
     """发图片。path 必须是微信(wechat 用户)读得到的本地文件,通常来自 stage_image。"""
     chat = _check_chat(chat)
     path = os.path.realpath(path or "")
@@ -275,5 +289,5 @@ def send_image(chat, path, name="", label=""):
     if not size or size > MAX_IMAGE_BYTES:
         raise DirectSendError("too_large", "图片为空或超过 20MB")
     row = {"t": int(time.time()), "kind": "image", "chat": chat, "name": name,
-           "content": label or os.path.basename(path), "path": path, "size": size}
+           "content": label or os.path.basename(path), "path": path, "size": size, "source": source}
     return _dispatch(row, lambda ex: ex.send_image(chat, path, size))

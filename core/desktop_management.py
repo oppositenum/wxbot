@@ -51,16 +51,22 @@ def desktop_url(profile):
     public_url = os.environ.get("WXBOT_PUBLIC_NOVNC_URL", "").strip()
     if public_url:
         return public_url
-    # When the management API is reached through a reverse proxy, keep the
-    # browser on that same public origin. The proxy must route /vnc/ to 6082
-    # and pass WebSocket Upgrade/Connection headers.
-    if has_request_context():
+    # 每个管理端口只嵌自己那台微信的桌面。5101 若仍指向 6082，
+    # 浏览器里看到的是第一个微信的登录码。
+    port = profile["port"]
+    if has_request_context() and request.host:
+        web_port = request.host.rsplit(":", 1)[-1] if ":" in request.host else ""
+        own = {"5100": 6082, "5101": 6083}.get(web_port)
+        if own:
+            port = own
         host = request.host
         host_name = host.rsplit(":", 1)[0].strip("[]")
         if host_name not in {"localhost", "127.0.0.1", "::1"}:
             scheme = request.headers.get("X-Forwarded-Proto", request.scheme).split(",", 1)[0].strip()
             return f"{scheme}://{host}/vnc/vnc.html?autoconnect=true&resize=scale&view_only=false&path=vnc/websockify"
-    return (f"http://localhost:{profile['port']}/vnc.html"
+        return (f"http://{host_name}:{port}/vnc.html"
+                "?autoconnect=true&resize=scale&view_only=false&path=websockify")
+    return (f"http://127.0.0.1:{port}/vnc.html"
             "?autoconnect=true&resize=scale&view_only=false&path=websockify")
 
 
@@ -103,6 +109,21 @@ def desktop_page():
 @bp.get("/api/desktop/instances")
 def instances():
     profiles = _load_profiles()
+    # 从 5101 打开时，画面必须是第二个容器，不能再列出第一个微信的 6082。
+    web_port = ""
+    if request.host and ":" in request.host:
+        web_port = request.host.rsplit(":", 1)[-1]
+    if web_port == "5101":
+        profiles = {
+            "second": {
+                "id": "second",
+                "name": "第二个微信号",
+                "container": os.environ.get("WXBOT_SELF_CONTAINER", "wxbot-second"),
+                "port": 6083,
+                "system": "Ubuntu 24.04 · XFCE",
+                "home": "/home/wechat",
+            }
+        }
     return jsonify(default_instance=_default_instance(profiles), mode="manual_desktop",
                    instances=[dict(p, desktop_url=desktop_url(p)) for p in profiles.values()])
 

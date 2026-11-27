@@ -1,0 +1,51 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>发送命令</title><link rel="stylesheet" href="/static/nav.css">
+<style>
+:root{font:15px system-ui;color:#24362e;background:#f5f7f4}body{margin:0}main{max-width:980px;margin:auto;padding:28px}
+h1{font-size:28px;margin:0 0 4px}.muted{color:#718078}
+input{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #bfd0c6;border-radius:10px;font:15px system-ui}
+.row{display:flex;gap:8px;align-items:center;padding:10px 12px;border:1px solid #e4ece7;border-radius:10px;margin-top:8px;background:#fff}
+.row .who{flex:1;min-width:0}.row .name{font-weight:600}.row .id{font:12px ui-monospace;color:#8a978f;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tag{font-size:12px;border-radius:20px;padding:2px 8px;background:#eaf5ef;color:#23815a}
+.tag.group{background:#eef3fb;color:#2a5db0}
+button{padding:8px 12px;border:1px solid #bfd0c6;background:#fff;border-radius:8px;cursor:pointer;white-space:nowrap}
+button.primary{background:#23815a;color:#fff;border-color:#23815a}
+.empty{color:#718078;padding:16px 0}#err{color:#a33232}
+@media(max-width:820px){main{padding:18px 12px}.row{align-items:flex-start}}
+</style>
+<main>
+<h1>发送命令</h1>
+<p class="muted">点「复制」得到一条 curl。<code>content</code> 留空，填上要发的文字再执行。</p>
+<input id="q" placeholder="搜索名字或微信号">
+<p id="err"></p>
+<div id="list"><p class="empty">加载中…</p></div>
+</main>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s||'').replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
+let rows=[], url='', token='';
+function curl(row){
+  const body={token, to:row.to, chat:row.chat, type:'text', content:''};
+  return "curl --url '"+url+"' \\\n  -H 'content-type: application/json' \\\n  --data-raw '"+JSON.stringify(body)+"'";
+}
+function draw(){
+  const q=$('#q').value.trim().toLowerCase();
+  const shown=rows.filter(r=>(r.to+' '+r.chat).toLowerCase().includes(q));
+  $('#list').innerHTML=shown.length?shown.map((r,i)=>`<div class="row"><span class="tag ${r.kind==='群'?'group':''}">${esc(r.kind)}</span><div class="who"><div class="name">${esc(r.to)}</div><div class="id">${esc(r.chat)}</div></div><button data-i="${i}" class="primary">复制</button></div>`).join(''):'<p class="empty">没有匹配的人或群。</p>';
+  const map=new Map(shown.map((r,i)=>[String(i),r]));
+  document.querySelectorAll('[data-i]').forEach(b=>b.onclick=async()=>{
+    const text=curl(map.get(b.dataset.i));
+    try{await navigator.clipboard.writeText(text); b.textContent='已复制';}
+    catch(e){b.textContent='复制失败';}
+    setTimeout(()=>{b.textContent='复制';},1200);
+  });
+}
+$('#q').oninput=draw;
+fetch('/api/send/targets',{credentials:'same-origin'}).then(async r=>{
+  const d=await r.json();
+  if(!r.ok) throw Error(d.error||'加载失败');
+  rows=d.targets||[]; url=d.url||''; token=d.token||'';
+  if(!token){$('#err').textContent='这个号还没有配置发送 token。';}
+  draw();
+}).catch(e=>{$('#list').innerHTML=''; $('#err').textContent=e.message;});
+</script>
+<script src="/static/nav.js"></script></html>

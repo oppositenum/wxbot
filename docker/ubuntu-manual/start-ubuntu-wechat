@@ -40,6 +40,13 @@ mkdir -p /home/wechat/accounts /home/wechat/work
 backend_supervisor() {
     while true; do
         echo "[$(date -Is)] starting backend" >>"$LOG_DIR/backend.log"
+        token_file="$HOME/.local/state/ubuntu-wechat/api_token"
+        if [ -z "${WXBOT_API_TOKEN:-}" ] && [ -f "$token_file" ]; then
+            # api_token has no trailing newline, so read returns 1 at EOF.
+            # set -e would otherwise kill this background supervisor.
+            IFS= read -r WXBOT_API_TOKEN < "$token_file" || true
+            export WXBOT_API_TOKEN
+        fi
         (cd /app && exec python3 /app/server.py) >>"$LOG_DIR/backend.log" 2>&1 || true
         echo "[$(date -Is)] backend exited; restarting in 2s" >>"$LOG_DIR/backend.log"
         sleep 2

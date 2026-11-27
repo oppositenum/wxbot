@@ -78,13 +78,20 @@ _API_TOKEN_PATHS = frozenset({
 
 
 def _api_token_request():
-    """本机收发接口凭据。只放行消息 hook 和发送，不打开其余后台。"""
+    """本机收发接口凭据。只放行消息 hook 和发送，不打开其余后台。
+
+    请求头 X-Wxbot-Token，或 JSON 里的 token。后者给不能加请求头的调用方。
+    """
     path = request.path or "/"
     if path not in _API_TOKEN_PATHS and not path.startswith("/api/send/status"):
         return False
     import hmac
     expected = os.environ.get("WXBOT_API_TOKEN", "")
     supplied = request.headers.get("X-Wxbot-Token", "")
+    if not supplied and request.method in ("POST", "PUT", "PATCH"):
+        body = request.get_json(force=True, silent=True) or {}
+        if isinstance(body, dict):
+            supplied = str(body.get("token") or "")
     return bool(expected and supplied) and hmac.compare_digest(expected.encode(), supplied.encode())
 
 
@@ -158,7 +165,8 @@ def require_ui_login():
     if path in _UI_PUBLIC or path.startswith("/static/"):
         return None
     if _ui_logged_in():
-        if _ui_activity_request():
+        # 接口凭据只放行收发，不换一整份后台登录。
+        if _ui_activity_request() and not _api_token_request():
             _touch_ui_session()
         return None
     if path.startswith("/api/"):
@@ -561,7 +569,7 @@ def api_status():
         "wechat_running": docker_wx.wechat_running(),
         "logged_in": docker_wx.logged_in(),
         "logged_in_wxid": docker_wx.container_wxid(),
-        "novnc_url": os.environ.get("WXBOT_NOVNC_URL", "http://localhost:6080/vnc.html"),
+        "novnc_url": _novnc_url(),
         "keys_ready": keys_ready,
         "core_keys": core_keys,
         "decrypted_ready": decrypted_ready,
@@ -621,13 +629,36 @@ def api_accounts_batch():
     return jsonify(results=[multi_account.action(a['id'], action) for a in multi_account.list_accounts()])
 
 
+def _novnc_url():
+    """扫码桌面跟当前打开的管理页走，不写死 6080。
+
+    第二个微信的管理页在 5101，桌面在宿主机 6083。本机没有 6080
+    监听时，浏览器会落到别处，看到的是另一个微信的登录码。
+    """
+    explicit = os.environ.get("WXBOT_NOVNC_URL", "").strip()
+    if explicit:
+        return explicit
+    web_to_vnc = {"5100": "6082", "5101": "6083"}
+    web_port = ""
+    host = "127.0.0.1"
+    if request and request.host:
+        raw_host = request.host
+        if ":" in raw_host:
+            host, web_port = raw_host.rsplit(":", 1)
+            host = host.strip("[]")
+        else:
+            host = raw_host.strip("[]") or host
+    port = os.environ.get("WXBOT_NOVNC_PORT", "").strip() or web_to_vnc.get(web_port, "6082")
+    return f"http://{host}:{port}/vnc.html?autoconnect=true&resize=scale"
+
+
 @app.post("/api/login")
 def api_login():
     """返回 noVNC 地址，让用户在浏览器里扫码登录容器里的微信。"""
     running = docker_wx.container_running()
     return jsonify({
         "ok": running,
-        "novnc_url": os.environ.get("WXBOT_NOVNC_URL", "http://localhost:6080/vnc.html"),
+        "novnc_url": _novnc_url(),
         "logged_in": docker_wx.logged_in(),
         "msg": ("打开 noVNC 用小号扫码登录" if running else "容器未运行，请先启动容器"),
     })
@@ -1471,6 +1502,11 @@ def api_sessions():
     return jsonify(ss)
 
 
+@app.get("/send-curl")
+def send_curl_page():
+    return send_from_directory(os.path.join(config.PROJECT_DIR, "static"), "send-curl.html")
+
+
 @app.get("/direct-send")
 def direct_send_page():
     return send_from_directory(os.path.join(config.PROJECT_DIR, "static"), "direct-send.html")
@@ -1543,6 +1579,25 @@ def api_direct_send_image():
     except direct_send.DirectSendError as e:
         return jsonify(ok=False, code=e.code, error=e.message), 409
     return jsonify(row)
+
+
+@app.get("/api/send/targets")
+def api_send_targets():
+    """登录后的复制清单。to 是微信显示名，chat 是微信号或群号。"""
+    try:
+        people = contacts.list_contacts()
+        groups = contacts.list_groups()
+    except FileNotFoundError as e:
+        return jsonify({"error": str(e)}), 409
+    rows = [{"kind": "私聊", "to": p.get("name") or p.get("username") or "",
+             "chat": p.get("username") or ""} for p in people]
+    rows += [{"kind": "群", "to": g.get("name") or g.get("username") or "",
+              "chat": g.get("username") or ""} for g in groups]
+    rows = [r for r in rows if r["to"] and r["chat"]]
+    return jsonify(
+        targets=rows,
+        url=request.host_url.rstrip("/") + "/api/send",
+        token=os.environ.get("WXBOT_API_TOKEN") or "")
 
 
 @app.get("/api/contacts")

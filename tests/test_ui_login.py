@@ -25,6 +25,26 @@ class UiLogin(unittest.TestCase):
         self.assertEqual(r.status_code, 302)
         self.assertTrue(r.headers["Location"].endswith("/login"))
 
+    def test_send_targets_require_login_and_shape_the_copy_list(self):
+        anon = self.client.get("/api/send/targets")
+        self.assertEqual(anon.status_code, 401)
+        self.client.post("/api/auth/login", json={
+            "username": "test-user", "password": "test-password"})
+        people = [{"name": "叮", "username": "wxid_a"}]
+        groups = [{"name": "每天都是修罗场", "username": "1@chatroom"}]
+        with patch.dict(os.environ, {"WXBOT_API_TOKEN": "local-token"}, clear=False), \
+             patch("core.contacts.list_contacts", return_value=people), \
+             patch("core.contacts.list_groups", return_value=groups):
+            r = self.client.get("/api/send/targets")
+        self.assertEqual(r.status_code, 200)
+        body = r.json
+        self.assertEqual(body["token"], "local-token")
+        self.assertEqual(body["url"], "http://localhost/api/send")
+        self.assertEqual(body["targets"], [
+            {"kind": "私聊", "to": "叮", "chat": "wxid_a"},
+            {"kind": "群", "to": "每天都是修罗场", "chat": "1@chatroom"},
+        ])
+
     def test_anonymous_api_is_unauthorized(self):
         r = self.client.get("/api/status")
         self.assertEqual(r.status_code, 401)
@@ -39,6 +59,12 @@ class UiLogin(unittest.TestCase):
             ok = self.client.post("/api/send", headers={"X-Wxbot-Token": "local-token"},
                                   json={"type": "text", "content": "hi"})
             self.assertEqual(ok.status_code, 400)
+            body = self.client.post("/api/send", json={
+                "token": "local-token", "type": "text", "content": "hi"})
+            self.assertEqual(body.status_code, 400)
+            bad_body = self.client.post("/api/send", json={
+                "token": "nope", "to": "群", "type": "text", "content": "hi"})
+            self.assertEqual(bad_body.status_code, 401)
             push = self.client.get("/api/bot/push", headers={"X-Wxbot-Token": "local-token"})
             self.assertEqual(push.status_code, 200)
 

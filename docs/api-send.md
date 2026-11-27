@@ -2,7 +2,7 @@
 
 后台地址默认为 `http://127.0.0.1:5100`。接口支持向好友或群发送文字、图片。
 
-本机调用带请求头 `X-Wxbot-Token: $WXBOT_API_TOKEN`，不必先登录网页。这个凭据只放行 `/api/send`、`/api/send/status`、`/api/upload`、`/api/bot/push` 和 `/api/bot/push/test`。其余后台接口仍要网页登录。未设置 `WXBOT_API_TOKEN` 时，这个请求头无效。
+本机调用带请求头 `X-Wxbot-Token: $WXBOT_API_TOKEN`，或在 JSON 里加 `"token": "$WXBOT_API_TOKEN"`，不必先登录网页。这个凭据只放行 `/api/send`、`/api/send/status`、`/api/upload`、`/api/bot/push` 和 `/api/bot/push/test`。其余后台接口仍要网页登录。未设置 `WXBOT_API_TOKEN` 时，请求头和 body 里的 token 都无效。
 
 ## 发送文字或图片
 
@@ -10,6 +10,7 @@
 
 ```json
 {
+  "token": "可选，与 X-Wxbot-Token 相同",
   "to": "好友备注或群名称",
   "chat": "可选的稳定微信账号或群 ID",
   "type": "text",

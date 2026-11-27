@@ -3,6 +3,7 @@
   if (window.__wxnav) return; window.__wxnav = true;
   var LINKS = [
     ['/',                '会话',       '💬'],
+    ['/send-curl',       '发送命令',   '📋'],
     ['/direct-send',     '直发测试',   '⚡'],
     ['/moments',         '朋友圈',     '🖼️'],
     ['/personalization', '画像与人设', '🎭'],

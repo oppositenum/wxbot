@@ -23,6 +23,10 @@ class FakeExports:
         self.sent.append((to, content))
         return self.send_result
 
+    def send_image(self, to, path, size):
+        self.sent.append(("image", to, path, size))
+        return self.send_result
+
     def poll(self):
         return {"step": self.steps.pop(0) if self.steps else 0, "calls": 1}
 
@@ -146,6 +150,22 @@ class DirectSendTest(unittest.TestCase):
         self.assertEqual(cm.exception.code, "timeout")
         self.assertEqual([x["ok"] for x in ds.history()], [False, False, False])
 
+    def test_image_is_staged_checked_and_sent_with_size(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"x" * 100
+        with patch.object(ds, "MEDIA_DIR", os.path.join(self.tmp.name, "media")):
+            path = ds.stage_image(png, "a.png")
+            row = ds.send_image("wxid_a", path, name="甲", label="a.png")
+            self.assertTrue(row["ok"])
+            self.assertEqual(self.exports.sent, [("image", "wxid_a", os.path.realpath(path), len(png))])
+            self.assertEqual(ds.history()[0]["kind"], "image")
+            for data, code in [(b"", "empty"), (b"not an image at all", "bad_image")]:
+                with self.assertRaises(ds.DirectSendError) as cm:
+                    ds.stage_image(data)
+                self.assertEqual(cm.exception.code, code)
+        with self.assertRaises(ds.DirectSendError) as cm:
+            ds.send_image("wxid_a", os.path.join(self.tmp.name, "missing.png"))
+        self.assertEqual(cm.exception.code, "no_file")
+
     def test_wechat_not_running(self):
         self.dev.pid = None
         st = ds.status()
@@ -182,6 +202,44 @@ class DirectSendRoutesTest(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.json["ok"])
 
+    def test_send_image_path_is_limited_to_upload_dirs(self):
+        self.client.post("/api/auth/login", json={"username": "u", "password": "p"})
+        with patch("core.direct_send.send_image") as send:
+            r = self.client.post("/api/direct/send_image", json={"chat": "a", "path": "/etc/passwd"})
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(r.json["code"], "bad_path")
+        send.assert_not_called()
+
+    def test_send_image_multipart_stages_then_sends(self):
+        import io
+        self.client.post("/api/auth/login", json={"username": "u", "password": "p"})
+        with patch("core.direct_send.stage_image", return_value="/w/direct_media/x.png") as stage, \
+             patch("core.direct_send.send_image", return_value={"ok": True}) as send:
+            r = self.client.post("/api/direct/send_image", content_type="multipart/form-data", data={
+                "chat": "1@chatroom", "name": "群", "file": (io.BytesIO(b"\x89PNG\r\n\x1a\nxx"), "p.png")})
+        self.assertEqual(r.status_code, 200)
+        stage.assert_called_once()
+        send.assert_called_once_with("1@chatroom", "/w/direct_media/x.png", "群", "p.png")
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LenientDbTextTest(unittest.TestCase):
+    def test_invalid_utf8_text_does_not_break_reads(self):
+        import sqlite3
+        from core import db
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "m.db")
+            raw = sqlite3.connect(path)
+            raw.execute("CREATE TABLE Name2Id(user_name TEXT)")
+            raw.execute("INSERT INTO Name2Id VALUES (?)", ("wxid_ok",))
+            raw.execute("INSERT INTO Name2Id VALUES (CAST(? AS TEXT))", (b" \xfb#\x8c\xff\xff",))
+            raw.commit(); raw.close()
+            with patch("config.decrypted_path", return_value=path):
+                con = db.connect("message")
+                names = [r[0] for r in con.execute("SELECT user_name FROM Name2Id ORDER BY rowid")]
+                con.close()
+        self.assertEqual(names[0], "wxid_ok")
+        self.assertIn("�", names[1])

@@ -1500,6 +1500,32 @@ def api_direct_send():
     return jsonify(row)
 
 
+@app.post("/api/direct/send_image")
+def api_direct_send_image():
+    """实验直发图片。表单 file=图片;或 JSON path=/api/upload 返回的路径(仅限 work 下上传目录)。"""
+    from core import direct_send
+    try:
+        f = request.files.get("file")
+        if f is not None:
+            form = request.form
+            chat, name = form.get("chat"), form.get("name") or ""
+            label = os.path.basename(f.filename or "") or "图片"
+            path = direct_send.stage_image(f.read(), label)
+        else:
+            data = request.get_json(silent=True) or {}
+            chat, name = data.get("chat"), data.get("name") or ""
+            path = os.path.realpath(str(data.get("path") or ""))
+            allowed = [os.path.realpath(os.path.join(config.WORK_DIR, d)) + os.sep
+                       for d in ("uploads", "direct_media")]
+            if not any(path.startswith(a) for a in allowed):
+                raise direct_send.DirectSendError("bad_path", "path 只能是 /api/upload 返回的路径")
+            label = os.path.basename(path)
+        row = direct_send.send_image(chat, path, name, label)
+    except direct_send.DirectSendError as e:
+        return jsonify(ok=False, code=e.code, error=e.message), 409
+    return jsonify(row)
+
+
 @app.get("/api/contacts")
 def api_contacts():
     try:

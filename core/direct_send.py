@@ -170,21 +170,51 @@ def history(limit=50):
     return rows
 
 
-def send(chat, content, name=""):
-    """chat=wxid 或 xxx@chatroom。返回结果字典;失败抛 DirectSendError。"""
+IMAGE_EXT = {b"\x89PNG\r\n\x1a\n": ".png", b"\xff\xd8\xff": ".jpg", b"GIF87a": ".gif", b"GIF89a": ".gif"}
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+MEDIA_DIR = os.path.join(config.WORK_DIR, "direct_media")
+
+
+def _check_chat(chat):
     chat = (chat or "").strip()
-    content = content if isinstance(content, str) else ""
     if not chat or any(c.isspace() for c in chat):
         raise DirectSendError("bad_chat", "请选择发送对象")
-    if not content.strip():
-        raise DirectSendError("empty", "内容不能为空")
-    if len(content) > MAX_CHARS:
-        raise DirectSendError("too_long", f"内容超过 {MAX_CHARS} 字")
-    row = {"t": int(time.time()), "chat": chat, "name": name, "content": content}
+    return chat
+
+
+def _image_ext(head):
+    for magic, ext in IMAGE_EXT.items():
+        if head.startswith(magic):
+            return ext
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return ".webp"
+    return None
+
+
+def stage_image(data, filename=""):
+    """把上传的图片字节存成 work/direct_media/<随机名>,返回路径。
+
+    微信是异步上传 CDN 的,交出去的文件要一直留着,所以每次单独存一份。"""
+    if not data:
+        raise DirectSendError("empty", "图片是空的")
+    if len(data) > MAX_IMAGE_BYTES:
+        raise DirectSendError("too_large", "图片超过 20MB")
+    ext = _image_ext(data[:16])
+    if not ext:
+        raise DirectSendError("bad_image", "只支持 PNG / JPG / GIF / WEBP 图片")
+    os.makedirs(MEDIA_DIR, exist_ok=True)
+    path = os.path.join(MEDIA_DIR, f"{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(4).hex()}{ext}")
+    with open(path, "wb") as f:
+        f.write(data)
+    return path
+
+
+def _dispatch(row, call):
+    """在锁内调用 agent 并等协程结果;row 会写进历史。"""
     with _lock:
         try:
             script = _ensure_script()
-            r = script.exports_sync.send(chat, content)
+            r = call(script.exports_sync)
             if not r.get("ok"):
                 code = r.get("error") or "failed"
                 msg = {"not_logged_in": "微信还没登录完成(停在登录页?)",
@@ -217,3 +247,33 @@ def send(chat, content, name=""):
     if not row["ok"]:
         raise DirectSendError(row["code"], row["error"])
     return row
+
+
+def send(chat, content, name=""):
+    """发文字。chat=wxid 或 xxx@chatroom。返回结果字典;失败抛 DirectSendError。"""
+    chat = _check_chat(chat)
+    content = content if isinstance(content, str) else ""
+    if not content.strip():
+        raise DirectSendError("empty", "内容不能为空")
+    if len(content) > MAX_CHARS:
+        raise DirectSendError("too_long", f"内容超过 {MAX_CHARS} 字")
+    row = {"t": int(time.time()), "kind": "text", "chat": chat, "name": name, "content": content}
+    return _dispatch(row, lambda ex: ex.send(chat, content))
+
+
+def send_image(chat, path, name="", label=""):
+    """发图片。path 必须是微信(wechat 用户)读得到的本地文件,通常来自 stage_image。"""
+    chat = _check_chat(chat)
+    path = os.path.realpath(path or "")
+    if not os.path.isfile(path):
+        raise DirectSendError("no_file", "图片不存在")
+    with open(path, "rb") as f:
+        head = f.read(16)
+    if not _image_ext(head):
+        raise DirectSendError("bad_image", "只支持 PNG / JPG / GIF / WEBP 图片")
+    size = os.path.getsize(path)
+    if not size or size > MAX_IMAGE_BYTES:
+        raise DirectSendError("too_large", "图片为空或超过 20MB")
+    row = {"t": int(time.time()), "kind": "image", "chat": chat, "name": name,
+           "content": label or os.path.basename(path), "path": path, "size": size}
+    return _dispatch(row, lambda ex: ex.send_image(chat, path, size))

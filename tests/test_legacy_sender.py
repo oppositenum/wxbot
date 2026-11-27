@@ -57,9 +57,16 @@ class Legacy(Isolated):
         self.assertNotIn('search_still_open', src)
         self.assertNotIn('click_search(px, py)\n    return search_box_holds', src)
         self.assertNotIn('key("Down")', open_fn)
-        self.assertIn('key("Return")', open_fn)
         self.assertIn('_group_row_y', open_fn)
         self.assertIn('群聊', open_fn)
+        group_open = open_fn[open_fn.index('# 群名'):]
+        self.assertIn('clicks=1', group_open)
+        self.assertIn('clicks=2', group_open)
+        self.assertIn('row_dy = group_y - py', group_open)
+        self.assertNotIn('key("Return")', group_open)
+        self.assertIn('dismiss_search', group_open)
+        self.assertNotIn('click_search_hit(px, py,', group_open)
+        self.assertIn('ERR:wrong-chat', group_open)
         self.assertIn('key("Escape")', open_fn)
         self.assertNotIn('px + w // 2', open_fn)
         self.assertNotIn('py + h // 2', open_fn)
@@ -75,7 +82,11 @@ class Legacy(Isolated):
         self.assertIn('--repeat', src)
         self.assertIn('before = header_text', open_fn)
         self.assertIn('already_on_chat', open_fn)
+        self.assertIn('def _header_box', src)
+        self.assertIn('px + 8, py + 30, px + right, py + 68', src)
         self.assertIn('detached_chat_id', src)
+        self.assertIn('_window_title_is', src)
+        self.assertIn(r'\(\d+\)', src)
 
     def test_unfocused_search_is_not_sent_to_the_visible_chat(self):
         self.execute.return_value = SimpleNamespace(returncode=3, stdout='ERR:search-unfocused\n')
@@ -143,6 +154,117 @@ class Legacy(Isolated):
         self.assertFalse(ns['searched_by_wechat_id']('ABC'))
         self.assertTrue(ns['searched_by_wechat_id']('wxid143779'))
         self.assertFalse(ns['searched_by_wechat_id']('wxid_abc123'))
+
+    def test_group_row_ignores_web_results_and_chat_history(self):
+        from PIL import Image
+        src = Path('docker/wx_send_legacy.py').read_text(encoding='utf-8')
+        start = src.index('def _ocr_rows')
+        end = src.index('\ndef search_shows_query')
+        ns = {'x': lambda *a, **k: SimpleNamespace(stdout='')}
+        exec(compile(src[start:end], 'group_row.py', 'exec'), ns)
+        name = '每天都是修罗场'
+        rows = [
+            (20, '每天都是修罗场'),
+            (52, '失忆后每天都是修罗场txt'),
+            (84, '每天都在修罗场by'),
+            (116, '每天都在修罗场by颜祖'),
+            (150, '群聊'),
+            (186, '每天都是修罗场'),
+            (230, '搜索网络结果'),
+            (270, 'besos'),
+        ]
+        self.assertEqual(ns['_section_label']('群聊'), 'group')
+        self.assertEqual(ns['_section_label']('聊天记录'), 'history')
+        self.assertEqual(ns['_section_label']('每天都是修罗场'), '')
+        self.assertTrue(ns['_name_hits']('每天都是修罗场', name))
+        self.assertFalse(ns['_name_hits']('失忆后每天都是修罗场txt', name))
+        self.assertFalse(ns['_name_hits']('每天都在修罗场by', name))
+        # 「群聊」和「搜索网络结果」之间只有一个头像，直接点它。
+        panel = Image.new('RGB', (370, 600), (247, 247, 247))
+        for y0 in (170,):
+            for dy in range(36):
+                for x0 in range(8, 46):
+                    panel.putpixel((x0, y0 + dy), (180, 90, 70))
+        self.assertEqual(ns['_group_row_from_rows'](rows, panel, name), 187)
+
+    def test_group_row_finds_avatar_when_section_label_is_cropped(self):
+        from PIL import Image
+        src = Path('docker/wx_send_legacy.py').read_text(encoding='utf-8')
+        start = src.index('def _ocr_rows')
+        end = src.index('\ndef search_shows_query')
+        ns = {'x': lambda *a, **k: SimpleNamespace(stdout='')}
+        exec(compile(src[start:end], 'group_row.py', 'exec'), ns)
+        name = '每天都是修罗场'
+        # 「群聊」被裁出画面。群在最上，下面是网络结果，再下面是单人头像的聊天记录。
+        rows = [(90, name), (180, name), (230, '聊天记录'), (270, 'besos')]
+        panel = Image.new('RGB', (370, 600), (247, 247, 247))
+        for y0 in (76, 246):
+            for dy in range(36):
+                for x0 in range(8, 46):
+                    panel.putpixel((x0, y0 + dy), (180, 90, 70))
+        self.assertEqual(ns['_group_row_from_rows'](rows, panel, name), 93)
+        # 裁图的 y 要加上裁图在屏幕上的起点。整屏图才用 box。
+        saved = ns['_ocr_rows']
+        ns['_ocr_rows'] = lambda _path: rows
+        try:
+            self.assertEqual(ns['_group_row_y'](panel, (0, 400, 370, 1000), 'unused', name), 93)
+        finally:
+            ns['_ocr_rows'] = saved
+
+    def test_group_row_survives_garbled_web_heading(self):
+        from PIL import Image
+        src = Path('docker/wx_send_legacy.py').read_text(encoding='utf-8')
+        start = src.index('def _ocr_rows')
+        end = src.index('\ndef search_shows_query')
+        ns = {'x': lambda *a, **k: SimpleNamespace(stdout='')}
+        exec(compile(src[start:end], 'group_row.py', 'exec'), ns)
+        # 19:02 真实 OCR：「搜索网络结果」读成「网涅索络结果」，群名也被拆碎。
+        rows = [(48, '群聊'), (88, '旨昌场'), (96, '每天都是修罗'),
+                (136, '网'), (152, '索络结果'), (184, 'Q每天是修罗'), (560, '猫来了小队')]
+        panel = Image.new('RGB', (370, 600), (247, 247, 247))
+        for y0 in (86, 564):
+            for dy in range(34):
+                for x0 in range(8, 46):
+                    panel.putpixel((x0, y0 + dy), (180, 90, 70))
+        self.assertEqual(ns['_section_label']('网涅索络结果'), 'web')
+        picked = ns['_group_row_from_rows'](rows, panel, '每天都是修罗场')
+        self.assertGreaterEqual(picked, 86)
+        self.assertLess(picked, 136)
+
+    def test_group_row_refuses_when_group_section_missing(self):
+        src = Path('docker/wx_send_legacy.py').read_text(encoding='utf-8')
+        start = src.index('def _ocr_rows')
+        end = src.index('\ndef search_shows_query')
+        ns = {'x': lambda *a, **k: SimpleNamespace(stdout='')}
+        exec(compile(src[start:end], 'group_row.py', 'exec'), ns)
+        from PIL import Image
+        panel = Image.new('RGB', (370, 200), (247, 247, 247))
+        rows = [(20, '每天都是修罗场'), (52, '失忆后每天都是修罗场txt')]
+        self.assertIsNone(ns['_group_row_from_rows'](rows, panel, '每天都是修罗场'))
+
+    def test_group_row_stops_at_the_search_card(self):
+        from PIL import Image
+        src = Path('docker/wx_send_legacy.py').read_text(encoding='utf-8')
+        start = src.index('def _ocr_rows')
+        end = src.index('\ndef search_shows_query')
+        ns = {'x': lambda *a, **k: SimpleNamespace(stdout='')}
+        exec(compile(src[start:end], 'group_row.py', 'exec'), ns)
+        # 浮层只有群这一行。裁图继续往下，扫进了会话列表的公众号头像。
+        panel = Image.new('RGB', (370, 600), (222, 222, 222))
+        for y in range(40, 139):
+            for x in range(80, 330):
+                panel.putpixel((x, y), (242, 242, 242))
+        for dy in range(28):
+            for x0 in range(12, 44):
+                # 四宫格中间的浅色十字缝，下面列表里的单人头像没有这条缝。
+                seam = dy == 14 or x0 == 27
+                panel.putpixel((x0, 86 + dy), (236, 236, 236) if seam else (180, 90, 70))
+                panel.putpixel((x0, 220 + dy), (20, 90, 200))
+        # 真实 OCR 会把「群聊」裁掉，群名少最后一个字。
+        rows = [(88, '旨昌场'), (96, '每天都是修罗')]
+        picked = ns['_group_row_from_rows'](rows, panel, '每天都是修罗场')
+        self.assertIsNotNone(picked)
+        self.assertLess(picked, 150)
 
     def test_wrong_header_is_not_sent(self):
         self.execute.return_value = SimpleNamespace(returncode=3, stdout='ERR:wrong-chat\n')

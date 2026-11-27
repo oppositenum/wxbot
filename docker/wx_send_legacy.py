@@ -64,16 +64,23 @@ def win_id():
     return best
 
 
+def _window_title_is(name, expect):
+    """独立群窗口标题是「群名 (6)」。人数不参与核对。"""
+    import re
+    got = re.sub(r"\s*\(\d+\)\s*$", "", (name or "").strip())
+    return got == (expect or "").strip()
+
+
 def detached_chat_id(expect):
-    """独立聊天窗标题等于会话名（自己跟自己）。子串匹配会误伤别的窗口，必须整标题相等。"""
+    """独立聊天窗。标题等于会话名，群窗口允许末尾带人数。"""
     if not expect:
         return None
-    r = x("xdotool", "search", "--name", "^" + expect + "$")
+    r = x("xdotool", "search", "--name", expect)
     ids = [l for l in r.stdout.split() if l.strip()]
     main = set(main_window_ids())
     for i in reversed(ids):
         name = x("xdotool", "getwindowname", i).stdout.strip()
-        if i not in main and name == expect:
+        if i not in main and _window_title_is(name, expect):
             return i
     return None
 
@@ -313,15 +320,9 @@ def search_panel_text(px, py):
     return "".join((r.stdout or "").split())
 
 
-def _group_row_y(im, box, crop_path):
-    """在搜索浮层里找「群聊」分区标题，返回该分区第一条的屏幕 y。
-
-    回车打开的是当前高亮行。群名和网络文章标题相近时，高亮经常落在
-    「搜索网络结果」上，会话不会切换。群行在「群聊」标题下面约 36px。
-    认不出「群聊」两个字就返回空，调用方改走回车，避免点到联系人。
-    """
+def _ocr_rows(crop_path):
+    """把搜索浮层 OCR 按行拼回。同一行的字会分开输出。"""
     r = x("tesseract", crop_path, "stdout", "-l", "chi_sim", "--psm", "4", "tsv")
-    # 同一行的字分开输出。「群聊」常被读成「群 聊」，整词相等会对不上。
     rows = {}
     for line in (r.stdout or "").splitlines()[1:]:
         parts = line.split("\t")
@@ -330,20 +331,186 @@ def _group_row_y(im, box, crop_path):
         try:
             top = int(parts[7])
             conf = float(parts[10])
+            left = int(parts[6])
         except ValueError:
             continue
         if conf < 0:
             continue
-        rows.setdefault(top // 8 * 8, []).append((int(parts[6]), parts[11].strip()))
-    label_top = None
+        rows.setdefault(top // 8 * 8, []).append((left, parts[11].strip()))
+    out = []
     for top, words in rows.items():
         text = "".join(w for _x, w in sorted(words))
-        if "群" in text and "聊" in text and "群聊" in text.replace(" ", ""):
-            if label_top is None or top < label_top:
-                label_top = top
-    if label_top is None:
+        out.append((top, text.replace(" ", "")))
+    return out
+
+
+def _section_label(text):
+    """分区标题。文章行里的「修罗场」不能当成「群聊」。"""
+    t = "".join((text or "").split())
+    if "群聊" in t and "聊天记录" not in t and len(t) <= 6:
+        return "group"
+    if "聊天记录" in t and len(t) <= 8:
+        return "history"
+    if "联系人" in t and len(t) <= 6:
+        return "contact"
+    # OCR 会把「搜索网络结果」拆成「网涅索络结果」，只保留「络结果」。
+    if ("结果" in t and "聊天" not in t and len(t) <= 12) or "网络" in t:
+        return "web"
+    return ""
+
+
+def _name_hits(text, name):
+    """这一行是不是目标群名。相近文章标题（每天都是/都在修罗场）不算。"""
+    q = "".join((name or "").split())
+    t = "".join((text or "").split())
+    if not q or not t or len(t) > len(q) + 4:
+        return False
+    return q in t
+
+
+def _panel_floor(im):
+    """搜索浮层铺着一片浅灰。这片灰结束、出现会话分隔线时就是卡片底。
+
+    分隔线下面是公众号和文件传输助手，不能当成群。
+    """
+    def gray_share(y):
+        hit = seen = 0
+        for x in range(80, min(im.width, 330), 2):
+            r, g, b = im.getpixel((x, y))[:3]
+            seen += 1
+            if 235 <= min(r, g, b) <= 246 and max(r, g, b) - min(r, g, b) < 8:
+                hit += 1
+        return hit / seen if seen else 0
+
+    seen_card = False
+    for y in range(30, im.height - 2):
+        if gray_share(y) >= 0.8:
+            seen_card = True
+            continue
+        if seen_card and gray_share(y) < 0.3 and gray_share(y + 1) < 0.3:
+            return y
+    return im.height
+
+
+def _result_rows(im):
+    """搜索结果里带头像的行，返回 (y, 是不是群的四宫格头像)。
+
+    联系人是一张完整头像。群是四张小图拼成的方块，中间有浅色十字缝。
+    网络结果只有灰色放大镜，没有这块彩色头像。
+    """
+    x1 = min(48, im.width)
+    floor = _panel_floor(im)
+    hits = []
+    for y in range(im.height):
+        colorful = 0
+        for x in range(8, x1):
+            r, g, b = im.getpixel((x, y))[:3]
+            if max(r, g, b) - min(r, g, b) >= 18 and min(r, g, b) < 235:
+                colorful += 1
+        if y >= floor:
+            break
+        if colorful >= 6:
+            hits.append(y)
+    bands = []
+    start = prev = None
+    for y in hits + [10 ** 9]:
+        if start is None:
+            start = prev = y
+            continue
+        if y > prev + 3:
+            if 16 <= prev - start + 1 <= 64:
+                bands.append((start, prev))
+            start = y
+        prev = y
+    rows = []
+    for top, bottom in bands:
+        seam = 0
+        seen = 0
+        # 十字缝可能偏上或偏下，扫中间一带，不赌正好在中线。
+        for y in range(top + 4, bottom - 3):
+            for x in range(8, x1):
+                r, g, b = im.getpixel((x, y))[:3]
+                if min(r, g, b) >= 200 and max(r, g, b) - min(r, g, b) < 24:
+                    seam += 1
+                seen += 1
+        rows.append(((top + bottom) // 2, bool(seen) and seam / seen >= 0.06))
+    return rows
+
+
+def _joined_rows(rows):
+    """上下挨着的 OCR 碎片拼回一行。群名的最后一个字经常被拆到上一截。"""
+    out = []
+    for top, text in sorted(rows):
+        if out and top - out[-1][0] <= 16:
+            out[-1][1] += text
+            continue
+        out.append([top, text])
+    return [(top, text) for top, text in out]
+
+
+def _next_section(rows, floor):
+    """群行到此为止。再往下是网络文章或聊天记录，不能点。"""
+    tops = [top for top, text in rows
+            if top > floor and _section_label(text) in ("web", "history", "contact")]
+    return min(tops) if tops else None
+
+
+def _group_row_from_rows(rows, panel, name):
+    """返回群那一行在裁切图里的 y。找不到返回空。
+
+    群在「群聊」标题和「搜索网络结果」之间，左边是头像。OCR 会把群名拆碎，
+    也会在前面认错一两个字，所以这个区间里只有一个头像时直接点它。
+    没有「群聊」标题时，只点名字对得上的那一行。
+    """
+    rows = _joined_rows(rows)
+    label_top = None
+    for top, text in rows:
+        if _section_label(text) == "group" and (label_top is None or top < label_top):
+            label_top = top
+    floor = 0 if label_top is None else label_top + 12
+    ceiling = _next_section(rows, floor)
+    if ceiling is None:
+        ceiling = panel.height
+    named = [top for top, text in rows if floor <= top < ceiling and _name_hits(text, name)]
+    found = [(y, is_group) for y, is_group in _result_rows(panel) if floor <= y < ceiling]
+    avatars = [y for y, _is_group in found]
+    if label_top is not None and len(avatars) == 1:
+        return avatars[0]
+    # 「群聊」被裁掉、群名少认最后一个字时，卡片里唯一的群头像就是这一行。
+    groups = [y for y, is_group in found if is_group]
+    q = "".join((name or "").split())
+    # OCR 常把群名最后一个字裁掉，并和上一行的碎片粘在一起。
+    stem = q[:-1] if len(q) >= 5 else q
+    prefix = any(stem and stem in "".join((text or "").split())
+                 for _top, text in rows if floor <= _top < ceiling)
+    if label_top is None and len(groups) == 1 and prefix:
+        return groups[0]
+    near = [y for y in avatars if any(abs(y - top) <= 28 for top in named)]
+    if len(near) == 1:
+        return near[0]
+    if label_top is not None and len(named) == 1:
+        return named[0] + 10
+    return None
+
+
+def _group_row_y(im, box, crop_path, name=""):
+    """返回「群聊」分区里、名字对得上的那一行的屏幕 y。
+
+    搜「每天都是修罗场」时，浮层最上面是四条网络文章，回车打开的是文章。
+    真正的群在「群聊」标题下面，头像是多人图。再往下的「聊天记录」是私聊，
+    不能点。认不出群这一行就返回空，调用方不回车。
+    """
+    full_screen = im.size[0] > (box[2] - box[0] + 4)
+    try:
+        panel = im.crop(box) if full_screen else im
+    except Exception:
+        panel = im
+        full_screen = False
+    y = _group_row_from_rows(_ocr_rows(crop_path), panel, name)
+    # 整屏截图里，行 y 要加上裁图的屏幕起点。传入的就是裁图时，y 已经在裁图内。
+    if y is None:
         return None
-    return box[1] + label_top + 36
+    return box[1] + y if full_screen else y
 
 
 def search_shows_query(px, py, name, held=""):
@@ -396,7 +563,13 @@ def search_box_holds(name):
     return focused_text() == name
 
 
-def click_search_hit(px, py, dy, clicks=1):
+def dismiss_search(px, py):
+    """关掉侧栏搜索浮层。Esc 关不掉这个浮层，要点搜索框右侧的清除。"""
+    x("xdotool", "mousemove", str(px + 268), str(py + 48), "click", "1")
+    time.sleep(0.2)
+
+
+def click_search_hit(px, dy, py, clicks=1):
     # 侧栏搜索「联系人」第一条。单击只出资料预览，双击才打开会话。
     # 同样必须打进微信窗口，屏幕坐标会被桌面吃掉。
     # 行尾的 i 是资料按钮。点名字（约 150, 128），别点到行尾。
@@ -435,6 +608,15 @@ def _ocr_title(path):
     return reads
 
 
+def _header_box(px, py, w):
+    """主窗口顶栏在侧栏右边，紧贴窗口内容顶。
+    独立聊天窗没有侧栏，标题在系统标题栏下面一行，从左边开始。"""
+    if w >= 900:
+        return px + 286, py + 6, px + min(w - 80, 700), py + 52
+    right = max(120, w - 90)
+    return px + 8, py + 30, px + right, py + 68
+
+
 def header_text(px, py, w, h):
     """读会话顶栏标题。OCR 只做核对，不拿来选人。"""
     full, crop = _shot_paths()
@@ -442,7 +624,7 @@ def header_text(px, py, w, h):
     try:
         from PIL import Image
         im = Image.open(full)
-        im.crop((px + 286, py + 6, px + min(w - 80, 700), py + 52)).save(crop)
+        im.crop(_header_box(px, py, w)).save(crop)
     except Exception:
         return ""
     return "\n".join(_ocr_title(crop))
@@ -553,7 +735,7 @@ def header_crop_path(px, py, w, h):
     try:
         from PIL import Image
         im = Image.open(full)
-        im.crop((px + 286, py + 6, px + min(w - 80, 700), py + 52)).save(crop)
+        im.crop(_header_box(px, py, w)).save(crop)
         return crop
     except Exception:
         return ""
@@ -633,36 +815,32 @@ def open_chat(wid, name, expect=""):
             print("ERR:wrong-chat"); sys.exit(3)
         _opened_by_alias = name
         return px, py, w, h
-    # 群名：先双击「群聊」分区的第一条。回车会打开高亮行，
-    # 群名和网络文章标题相近时，高亮经常是「搜索网络结果」，会话不切换。
+    # 群名：单击「群聊」分区里名字对得上的那一行，再回车打开。
+    # 直接回车会打开当前高亮。群名和网络文章标题相近时，高亮是最上面的文章。
     group_y = None
     try:
         panel, box, crop = search_panel_image(px, py)
-        group_y = _group_row_y(panel, box, crop)
+        group_y = _group_row_y(panel, box, crop, name)
     except Exception:
         group_y = None
-    if group_y:
-        click_search_hit(px, group_y - py, clicks=2)
-        time.sleep(0.8)
-    else:
-        key("Return")
-        time.sleep(1.0)
-    # Do not click the search box again to test whether navigation succeeded:
-    # that click steals focus and can reopen a search/preview layer. Escape is
-    # keyboard-only cleanup; the title check below is the send safety gate.
-    key("Escape")
-    time.sleep(0.15)
+    if not group_y:
+        leave_search()
+        print("ERR:wrong-chat"); sys.exit(3)
+    # 单击能选中群行（名字变绿），但回车打进搜索框，不打开会话。
+    # 连续两次双击，第二下会落在浮层后面的列表上。先单击把浮层留住，
+    # 停一下再双击，两下都打在这一行上。
+    # group_y 是屏幕坐标。click_search_hit 要的是相对窗口顶的行距，
+    # 漏传 py 会在点群行时 TypeError，发送器只能记成结果未知。
+    row_dy = group_y - py
+    click_search_hit(px, row_dy, py, clicks=1)
+    time.sleep(0.35)
+    click_search_hit(px, row_dy, py, clicks=2)
+    time.sleep(0.8)
+    # Esc 关不掉这个搜索浮层。点搜索框右侧的清除。
+    dismiss_search(px, py)
     px, py, w, h = win_geom(wid)
     if expect and not header_matches(header_text(px, py, w, h), expect):
-        # One bounded fallback selects the visible contact row without ever
-        # clicking the message area or the search input again.
-        click_search_hit(px, py, 128)
-        time.sleep(0.8)
-        key("Escape")
-        time.sleep(0.15)
-        px, py, w, h = win_geom(wid)
-        if not header_matches(header_text(px, py, w, h), expect):
-            print("ERR:wrong-chat"); sys.exit(3)
+        print("ERR:wrong-chat"); sys.exit(3)
     return px, py, w, h
 
 

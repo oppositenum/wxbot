@@ -17,6 +17,7 @@ VISION_PROMPT = (
     '{"status":"success","description":"简短、客观的可见内容描述"}；'
     '看不到或无法识别时返回{"status":"unreadable","description":""}。'
     '只陈述实际可见内容，不推测画外情节，不把无法识别写成成功。'
+    '聊天截图、网页截图、表格都按画面里实际的文字和界面描述，不要改写成笔记或公式。'
 )
 
 
@@ -47,6 +48,18 @@ def _failure_reason(reason):
     if reason.startswith("no-silk-decoder"):
         return "decoder_unavailable"
     return "file_unavailable"
+
+
+def _unfence(text):
+    """Strip an optional ```json fence. Grok often wraps the vision JSON."""
+    body = text.strip()
+    if body.startswith("```"):
+        body = body.split("\n", 1)[1] if "\n" in body else body.strip("`")
+        if body.rstrip().endswith("```"):
+            body = body.rstrip()[:-3]
+        if body.lstrip().lower().startswith("json"):
+            body = body.lstrip()[4:]
+    return body.strip()
 
 
 def native_voice(msg):
@@ -103,7 +116,7 @@ def read(chat, msg, cfg):
         return Result("invalid_result", kind)
     if t != 34:
         try:
-            payload = json.loads(text)
+            payload = json.loads(_unfence(text))
         except (ValueError, TypeError):
             return Result("invalid_result", kind)
         if not isinstance(payload, dict):

@@ -227,7 +227,8 @@ def update(contact, patch, revision):
     _id(contact)
     if set(patch) - {'persona_id', 'personalization_enabled', 'auto_update',
                      'conversation_control_enabled', 'agent_enabled',
-                     'skip_closing_replies', 'shared_sessions', 'preferences'}:
+                     'skip_closing_replies', 'shared_sessions', 'preferences',
+                     '_persona_ready'}:
         raise ValueError('未知设置字段')
     with _db(True) as con:
         data = _get(con, contact)
@@ -241,7 +242,7 @@ def update(contact, patch, revision):
                 v = patch[key]
                 if key == 'persona_id':
                     _slug(v)
-                    if v and not _persona_exists(v):
+                    if v and not _persona_exists(v) and not patch.get('_persona_ready'):
                         raise ValueError('所选人设不存在')
                 elif not isinstance(v, bool):
                     raise ValueError('开关必须是布尔值')
@@ -378,6 +379,49 @@ def match_switch(text, current=None):
         if slug in have and slug != current:
             return slug
     return None
+
+
+_ROLE_PASTE = re.compile(r'扮演《[^》]{1,40}》中的([^，,。\s]{1,12})')
+
+
+def pasted_role(text):
+    """对方发来的整份角色说明书。普通聊天里的「扮演」不算。"""
+    raw = (text or '').strip()
+    if len(raw) < 400:
+        return None
+    found = _ROLE_PASTE.search(raw.replace(' ', ''))
+    if not found or '人格' not in raw:
+        return None
+    name = found.group(1).strip('，,。 ')
+    if not name or len(name) > 12:
+        return None
+    return name
+
+
+@sessions.task
+def adopt_pasted_role(contact, text, *, is_group=None):
+    """把发来的整份人设存成当前会话的人设。群也只改这个群，不改别人的私聊。"""
+    if is_group is None:
+        is_group = bool(contact and str(contact).endswith('@chatroom'))
+    name = pasted_role(text)
+    if not contact or not name:
+        return None
+    body = text.strip()
+    slug = name
+    existing = distill.load_persona(slug)
+    if existing and (existing.get('persona') or '').strip() != body:
+        slug = name + '-贴入'
+    distill.import_persona(name, body, slug=slug)
+    data = get(contact)
+    if data.get('persona_id') != slug:
+        try:
+            update(contact, {'persona_id': slug, '_persona_ready': True}, data['revision'])
+        except Conflict:
+            data = get(contact)
+            if data.get('persona_id') != slug:
+                update(contact, {'persona_id': slug, '_persona_ready': True}, data['revision'])
+    return {'slug': slug, 'name': name,
+            'persona': {'slug': slug, 'name': name, 'persona': body, 'samples': []}}
 
 
 @sessions.task

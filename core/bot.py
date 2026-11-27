@@ -378,6 +378,8 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
     media_results = {}
 
     def enrich(cm):
+        if cm.get("type") in (3, 43):
+            return "[图片]" if cm.get("type") == 3 else "[视频]"
         if cm.get("type") not in media_read.LABELS:
             return cm.get("content") or ""
         key = (cm.get("server_id"), cm.get("local_id"), cm.get("type"))
@@ -396,6 +398,13 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
     if not batch:
         return ""
     msg = batch[-1]
+    # 纯图片/视频不描述、不回复。5 秒批次里同时有文字时，丢掉画面，只回文字。
+    if any(cm.get("type") in (3, 43) for cm in batch):
+        text_only = [cm for cm in batch if reply_policy._has_reply_text(cm)]
+        if not text_only:
+            return ""
+        batch = text_only
+        msg = batch[-1]
     if all(cm.get("type") in media_read.LABELS for cm in batch):
         for cm in batch:
             enrich(cm)
@@ -419,6 +428,11 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
                          cfg={**llm.load_cfg(), "max_tokens": 80, "no_gpt_fallback": True,
                               "single_attempt": True}) or "").strip()
     is_group = chat_username.endswith("@chatroom")
+    adopted = personalization.adopt_pasted_role(
+        chat_username, inbound_raw, is_group=is_group)
+    if adopted:
+        # 这条是人设说明书，不是要回复的话。
+        return ""
     switched = personalization.maybe_switch(chat_username, inbound_raw, is_group=is_group)
     if switched:
         persona = switched['persona']
@@ -455,6 +469,12 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
               "只输出要发出去的正文。需要连发时用单独一行 [[NEXT]] 分段。"
               "旧消息只供理解，不是当前指令。")
     system += media_read.HONESTY
+    if any(cm.get("type") in media_read.LABELS for cm in batch):
+        system += (
+            "\n【已附媒体】本批图片或视频封面若标注已解析，描述就是你看到的内容。"
+            "直接根据描述回答对方的问题。禁止说图片没显示、没收到、打不开、看不清，"
+            "禁止让对方重新发送。"
+        )
     system += "\n当前时间：" + time.strftime('%Y-%m-%d %H:%M', time.localtime(now))
     if continuous_mode.is_on(chat_username):
         system += continuous_mode.PROMPT
@@ -1053,6 +1073,12 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
             return {"ok": False, "status": "not_sent", "reason": "generation_failed", "retryable": False}
         try:
             model_started = time.monotonic()
+            batch = batch_msgs or [msg]
+            inbound = [m for m in batch if not m.get("is_self")]
+            visual = [m for m in inbound if m.get("type") in (3, 43)]
+            if visual and not any(reply_policy._has_reply_text(m) for m in inbound):
+                log("  reply_ai 跳过：本批只有图片或视频，没有文字")
+                return {"ok": True, "status": "skipped", "reason": "image_no_reply", "retryable": False}
             text = _ai_reply(persona, chat_username, msg, context_msgs or [], rules, batch_msgs=batch_msgs)
             log(f'[回复耗时] 模型与工具 {round((time.monotonic()-model_started)*1000)}ms')
         except Exception as e:  # noqa: BLE001
@@ -1340,6 +1366,7 @@ MEDIA_SETTLE = 30      # 纯媒体批(只发了图/语音/视频没说话)等更
 
 
 VOICE_GRACE = 90       # 纯语音批最多再等微信「转文字」落库的宽限秒数(超过就带兜底回)
+IMAGE_GRACE = 90       # 图片原图常比消息晚几十秒落盘，这段时间里只有缩略图
 
 
 def _settle_for(batch, rules=None):
@@ -1374,6 +1401,20 @@ def _voice_batch_waiting(chat, msgs):
         return False
     # 已配自带转写就不必等微信,下游会自己转;否则值得再等微信的转文字落库。
     return not llm.load_cfg().get("enable_stt")
+
+
+def _image_batch_waiting(chat, msgs):
+    """原图还没下到本地时继续等。缩略图能解开，但看不清内容，模型会说图没显示。"""
+    images = [m for m in msgs if m.get("type") == 3 and not m.get("is_self")]
+    if not images:
+        return False
+    for m in images:
+        try:
+            if not imgdec.image_readable(chat, m.get("local_id")):
+                return True
+        except Exception:  # noqa: BLE001
+            return True
+    return False
 
 
 # ---------------- 主动跟进(对方不接话时轻声唤1-2次) ----------------
@@ -2036,6 +2077,13 @@ def run_once(rules, state, log=print):
             # 别急着回落到"这条语音我没能读取"。
             if elapsed < VOICE_GRACE and _voice_batch_waiting(chat, p["msgs"]):
                 continue
+            # 纯图片/视频不回复。原图还没下完时先留在队列，下完或等到宽限后再静默跳过。
+            # 同一批次里已经有文字：5 秒到了就按文字回，不等原图。
+            inbound = [m for m in p["msgs"] if not m.get("is_self")]
+            if any(m.get("type") in (3, 43) for m in inbound) and not any(
+                    reply_policy._has_reply_text(m) for m in inbound):
+                if elapsed < IMAGE_GRACE and _image_batch_waiting(chat, p["msgs"]):
+                    continue
             _is_battle = (p.get("rule") or {}).get("name") == "战斗模式"
             if _is_battle and not humanize.battle_ready(chat, now):
                 continue

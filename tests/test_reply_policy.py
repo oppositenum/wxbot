@@ -33,6 +33,14 @@ class Decisions(unittest.TestCase):
                          'own_reply_after_source')
         self.assertEqual(policy.decide([msg(3, '地点呢？')], [own], 'account-A').action, 'reply')
 
+    def test_image_batch_is_not_replied(self):
+        image = msg(1, '[图片]'); image['type'] = 3
+        self.assertEqual(policy.decide([image], [], 'account-A').reason, 'image_no_reply')
+        # 图片和 5 秒批次里的文字一起到：回复文字，不再整批丢掉。
+        mixed = policy.decide([image, msg(2, '这是什么')], [], 'account-A')
+        self.assertEqual(mixed.action, 'reply')
+        self.assertEqual(policy.decide([msg(3, '这是什么')], [], 'account-A').action, 'reply')
+
     def test_automated_reply_after_followup_is_not_a_manual_answer(self):
         follow = msg(2, '不乖的话，让你当医生了')
         own = msg(3, '嗯？', True)

@@ -62,6 +62,7 @@ bot.send_name_for = lambda u: "朋友"
 bot._sender_name = lambda w: "朋友"
 bot._enrich_media = lambda c, m: (m.get("content") or "")
 bot._media_result = lambda c, m: bot.media_read.Result("success", "图片", "离线模拟图片描述")
+bot.imgdec.image_readable = lambda chat, local_id, min_edge=400: True
 # 本用例精确断言去抖窗口边界(MEDIA_SETTLE/SETTLE),把拟人化的随机抖动/打字延迟/
 # 深夜跳过固定为中性,使时序确定、不真的 sleep(拟人化本身另有 test_humanize.py 覆盖)。
 bot.humanize.settle_factor = lambda: 1.0
@@ -116,12 +117,12 @@ def run():
     sent.clear()
     run_once_wait(RULES, state)
     check("media-waits-longer", CHAT in bot._pending and not sent)
-    # 超过 MEDIA_SETTLE → 回复
+    # 超过 MEDIA_SETTLE：纯图片不调用模型、不发消息
     bot._pending[CHAT]["last_seen"] = time.time() - (bot.MEDIA_SETTLE + 2)
     bot._pending[CHAT]["first_seen"] = bot._pending[CHAT]["last_seen"]
     run_once_wait(RULES, state)
-    check("media-replied", sent and sent[-1][0] == CHAT and CHAT not in bot._pending)
-    # 图+文字混批:普通 SETTLE 就回
+    check("image-not-replied", not sent and CHAT not in bot._pending)
+    # 图+文字混批：5 秒窗口到了就按文字回复，不等原图。
     msg_store["msgs"].append(
         {"local_id": 3, "server_id": 3, "type": 3, "is_self": False,
          "content": "[图片]", "create_time": NOW + 60, "sender": CHAT})
@@ -133,7 +134,23 @@ def run():
     bot._pending[CHAT]["first_seen"] = bot._pending[CHAT]["last_seen"]
     sent.clear()
     run_once_wait(RULES, state)
-    check("mixed-normal-settle", sent and CHAT not in bot._pending)
+    check("mixed-image-text-replied", sent and CHAT not in bot._pending)
+
+    # 图和文字一起到，原图还没下完：文字已经够回复，不再空等原图。
+    bot.imgdec.image_readable = lambda chat, local_id, min_edge=400: False
+    msg_store["msgs"].append(
+        {"local_id": 5, "server_id": 5, "type": 3, "is_self": False,
+         "content": "[图片]", "create_time": NOW + 120, "sender": CHAT})
+    msg_store["msgs"].append(
+        {"local_id": 6, "server_id": 6, "type": 1, "is_self": False,
+         "content": "这是什么", "create_time": NOW + 121, "sender": CHAT})
+    run_once_wait(RULES, state)
+    for key in ("first_seen", "last_seen"):
+        bot._pending[CHAT][key] = time.time() - (bot.SETTLE + 2)
+    sent.clear()
+    run_once_wait(RULES, state)
+    check("mixed-replies-before-image-ready", sent and CHAT not in bot._pending)
+    bot.imgdec.image_readable = lambda chat, local_id, min_edge=400: True
 
     # ---- 2b. 纯语音批：微信「转文字」是异步落库的 ----
     # 未拿到转写前不该回落"这条语音我没能读取"，落库后用文字正常回；宽限期到了才兜底。

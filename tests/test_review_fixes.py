@@ -240,6 +240,14 @@ class Media(Isolated):
         self.assertEqual(r.status, "disabled")
         self.assertIn("语音未读取", r.context())
 
+    def test_vision_json_code_fence_is_success(self):
+        fenced = '```json\n{"status":"success","description":"一只橘猫"}\n```'
+        with patch("core.imgdec.get_msg_image", return_value=(self.png, "image/png")), \
+             patch.object(llm, "describe_image", return_value=fenced):
+            result = media_read.read("friend", self.msg, {})
+        self.assertEqual(result.status, "success")
+        self.assertIn("一只橘猫", result.context())
+
     def test_vision_unreadable_and_invalid_contract_are_not_success(self):
         with patch("core.imgdec.get_msg_image", return_value=(self.png, "image/png")):
             for raw, want in (({"status": "unreadable", "description": ""}, "unreadable"),
@@ -268,33 +276,55 @@ class Media(Isolated):
             r = media_read.read("friend", dict(self.msg, type=43), {})
             self.assertEqual(r.kind, "视频封面")
 
+    def test_image_only_batch_does_not_call_chat_model(self):
+        with patch.object(llm, "chat", blocked), patch.object(agent, "run", blocked), \
+             patch.object(bot, "_media_result", blocked):
+            out = bot._ai_reply({"persona": "sys"}, "friend", self.msg, [self.msg],
+                                batch_msgs=[self.msg])
+        self.assertEqual(out, "")
+
+    def test_image_with_text_replies_to_text_only(self):
+        text = {"type": 1, "local_id": 2, "content": "这是谁啊", "sender": "friend"}
+        with patch.object(agent, "agent_config", return_value={"enabled": False}), \
+             patch.object(bot, "_sender_name", return_value="friend"), \
+             patch.object(bot, "_media_result", blocked), \
+             patch.object(bot.llm, "chat", return_value="你自己") as model:
+            out = bot._ai_reply({"persona": "sys"}, "friend", self.msg, [self.msg, text],
+                                batch_msgs=[self.msg, text])
+        self.assertEqual(out, "你自己")
+        asked = model.call_args.args[1][-1]["content"]
+        self.assertIn("这是谁啊", asked)
+        self.assertNotIn("PRIVATE_XML", asked)
+
     def test_pure_media_failure_deterministic_no_reply_model(self):
         with patch.object(bot, "_media_result", return_value=media_read.Result("missing_key", "图片")), \
              patch.object(llm, "chat", blocked), patch.object(agent, "run", blocked):
             out = bot._ai_reply({"persona": "pretend you saw everything"}, "friend", self.msg, [self.msg])
-        self.assertIn("没能读取", out); self.assertNotIn("missing_key", out)
+        self.assertEqual(out, ""); self.assertNotIn("missing_key", out)
 
-    def test_mixed_text_failure_preserves_text_and_honesty(self):
-        text = {"type": 1, "local_id": 2, "content": "请帮我安排明天的工作", "sender": None}
+    def test_mixed_text_replies_without_reading_image(self):
+        text = {"type": 1, "local_id": 2, "content": "请帮我安排明天的工作", "sender": "friend"}
         with patch.object(bot, "_media_result", return_value=media_read.Result("api_failed", "图片")) as read, \
              patch.object(bot, "_sender_name", return_value="friend"), \
              patch.object(agent, "agent_config", return_value={"enabled": False}), \
-             patch.object(llm, "chat", return_value="reply") as model:
-            bot._ai_reply({"persona": "sys"}, "friend", self.msg, [self.msg, text], batch_msgs=[self.msg, text])
-            prompt = str(model.call_args)
-            self.assertIn(text["content"], prompt); self.assertIn("图片未读取", prompt)
-            self.assertIn("禁止声称看过", prompt); self.assertNotIn("PRIVATE_XML", prompt)
-            self.assertEqual(read.call_count, 1)
+             patch.object(bot.llm, "chat", return_value="reply") as model:
+            out = bot._ai_reply({"persona": "sys"}, "friend", self.msg, [self.msg, text], batch_msgs=[self.msg, text])
+            self.assertEqual(out, "reply")
+            self.assertEqual(model.call_count, 1)
+            self.assertEqual(read.call_count, 0)
+            self.assertIn("请帮我安排明天的工作", model.call_args.args[1][-1]["content"])
 
     def test_mixed_batch_text_before_many_images_is_not_lost(self):
-        text = {"type": 1, "local_id": 99, "content": "本批文字不能丢", "sender": None}
+        text = {"type": 1, "local_id": 99, "content": "本批文字不能丢", "sender": "friend"}
         batch = [text] + [dict(self.msg, local_id=i, server_id=i) for i in range(1, 25)]
         with patch.object(bot, "_media_result", return_value=media_read.Result("api_failed", "图片")), \
              patch.object(bot, "_sender_name", return_value="friend"), \
              patch.object(agent, "agent_config", return_value={"enabled": False}), \
-             patch.object(llm, "chat", return_value="reply") as model:
-            bot._ai_reply({"persona": "sys"}, "friend", batch[-1], batch, batch_msgs=batch)
-            self.assertIn(text["content"], str(model.call_args))
+             patch.object(bot.llm, "chat", return_value="reply") as model:
+            out = bot._ai_reply({"persona": "sys"}, "friend", batch[-1], batch, batch_msgs=batch)
+            self.assertEqual(out, "reply")
+            self.assertEqual(model.call_count, 1)
+            self.assertIn("本批文字不能丢", model.call_args.args[1][-1]["content"])
 
     def test_cache_is_account_scoped_and_only_success_cached(self):
         with patch.object(media_read, "read", return_value=media_read.Result("success", "图片", "a")) as reader:

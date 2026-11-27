@@ -37,6 +37,7 @@ LABELS = {
     'account_hourly_cap': '本小时自动发送已达上限，稍后继续',
     'continuous_not_addressed': '持续模式：群友之间在聊，不插话',
     'continuous_stale': '持续模式：对方已出下一个，丢弃过期答案',
+    'image_no_reply': '本批只有图片或视频、没有文字，不调用模型、不自动回复',
 }
 
 
@@ -91,6 +92,14 @@ def closing(batch):
     return bool(parts) and all(p in _CLOSINGS for p in parts)
 
 
+def _has_reply_text(msg):
+    """图片旁边 5 秒内的文字。占位符和空内容不算。"""
+    if msg.get('type') not in (1, 49):
+        return False
+    text = plain(msg.get('content'))
+    return bool(text) and text not in ('[图片]', '[视频]', '[小视频]')
+
+
 def decide(batch, context, account, chat=None):
     from core import niu_mode, battle_mode
     chat = chat or ((batch[-1].get('chat') if batch else '') or '')
@@ -100,6 +109,10 @@ def decide(batch, context, account, chat=None):
     incoming = niu or [m for m in batch if not reply_context.is_self(m, account)]
     if not incoming:
         return Decision('observe', 'self_message')
+    # 纯图片/视频仍不回。同一 5 秒批次里还有文字时，文字照常回复，画面不进模型。
+    if any(m.get('type') in (3, 43) for m in incoming) and not any(
+            _has_reply_text(m) for m in incoming):
+        return Decision('observe', 'image_no_reply')
     last = incoming[-1]
     if standalone(last) and plain(last.get('content')).rstrip('。.!！ ') in _CANCEL:
         return Decision('observe', 'reply_cancelled_by_user')

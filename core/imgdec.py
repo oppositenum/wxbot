@@ -209,6 +209,29 @@ def _capture_lookup(h):
     return None
 
 
+def _is_thumb_path(path):
+    """微信文件名：_t 是缩略图，无后缀的 attach/Img 原图也很小。Bubble 的 _b 才是能看清的图。"""
+    base = os.path.basename(path or "")
+    return base.endswith("_t.dat") or (
+        "/Img/" in (path or "").replace("\\", "/") and base.endswith(".dat")
+        and not base.endswith(("_b.dat", "_h.dat")))
+
+
+def image_readable(chat_username, local_id, min_edge=400):
+    """本地是否已有能看清内容的图。只有缩略图时返回 False，回复应再等原图下载。"""
+    import io
+    from PIL import Image
+    data, _reason = get_msg_image(chat_username, local_id)
+    if not data:
+        return False
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            w, h = im.size
+    except Exception:
+        return False
+    return max(w, h) >= min_edge
+
+
 def _dat_paths(h):
     """按本地文件名 hash 找加密 .dat。优先大图 _b.dat，其次缩略图 _t.dat。"""
     acc = account_dir()
@@ -508,7 +531,11 @@ def get_msg_image(chat_username, local_id):
     key=img_key(); paths=[]
     for h in hashes:
         if not h:continue
-        paths.extend(_dat_paths(h))
+        # Full image before the tiny WeChat thumbnail. A thumb that arrives
+        # first must not win just because it decoded.
+        found=_dat_paths(h)
+        found.sort(key=lambda p: (_is_thumb_path(p), -os.path.getsize(p) if os.path.isfile(p) else 0))
+        paths.extend(found)
         d=_capture_dir()
         if d:
             for suffix in ('.jpg','.png','.jpeg','.webp','.gif','_h.dat','_b.dat','.dat','_t.dat'):

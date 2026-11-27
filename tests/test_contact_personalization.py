@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config
-from core import personalization as p, account_session as sessions, bot, memory, media_read, messages
+from core import personalization as p, account_session as sessions, bot, memory, media_read, messages, distill
 from core.voice_text import from_packed
 
 
@@ -564,6 +564,19 @@ class Entries(Isolated):
         self.assertEqual(p.get('friend-A')['persona_id'], '黎深')
         self.assertIn('已切换人设', captured[0])
         self.assertIn('我是黎深', captured[0])
+
+    def test_pasted_role_sheet_becomes_this_chat_persona(self):
+        sheet = ('将扮演《恋与深空》中的祁煜，与用户进行长期微信式聊天。'
+                 + '人格设定真实不高于套路。' + ('你是祁煜。' * 80))
+        short = '今天扮演一下祁煜吧'
+        self.assertIsNone(p.pasted_role(short))
+        self.assertEqual(p.pasted_role(sheet), '祁煜')
+        out = p.adopt_pasted_role('friend-A', sheet, is_group=False)
+        saved = json.load(open(os.path.join(config.personas_dir(), '祁煜.json'), encoding='utf-8'))
+        self.assertEqual(saved['slug'], '祁煜')
+        self.assertEqual(p.get('friend-A')['persona_id'], '祁煜')
+        self.assertEqual(out['name'], '祁煜')
+        self.assertIn('你是祁煜', saved['persona'])
 
     def test_adult_intent_switches_without_saying_成人(self):
         catalog = [{'slug': '夏以昼', 'name': '夏以昼'}, {'slug': '夏以昼成人', 'name': '夏以昼成人'}]

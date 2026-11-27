@@ -1471,6 +1471,35 @@ def api_sessions():
     return jsonify(ss)
 
 
+@app.get("/direct-send")
+def direct_send_page():
+    return send_from_directory(os.path.join(config.PROJECT_DIR, "static"), "direct-send.html")
+
+
+@app.get("/api/direct/status")
+def api_direct_status():
+    from core import direct_send
+    return jsonify(direct_send.status())
+
+
+@app.get("/api/direct/history")
+def api_direct_history():
+    from core import direct_send
+    return jsonify(history=direct_send.history())
+
+
+@app.post("/api/direct/send")
+def api_direct_send():
+    """实验直发:只给后台「直发测试」页手动用,不走 bot 发送链路。"""
+    from core import direct_send
+    data = request.get_json(silent=True) or {}
+    try:
+        row = direct_send.send(data.get("chat"), data.get("content"), data.get("name") or "")
+    except direct_send.DirectSendError as e:
+        return jsonify(ok=False, code=e.code, error=e.message), 409
+    return jsonify(row)
+
+
 @app.get("/api/contacts")
 def api_contacts():
     try:

@@ -41,12 +41,12 @@ class IsAdmin(unittest.TestCase):
             self.assertTrue(ac.is_admin('wxid_owner', {}))
 
     def test_alias_matches_wxid(self):
-        contacts = [{'username': 'wxid_wife', 'alias': 'pian1225', 'remark': '老婆',
-                     'name': '老婆', 'nick_name': '蜜蜜'}]
+        contacts = [{'username': 'wxid_wife', 'alias': 'aliasdemo2', 'remark': '老婆',
+                     'name': '老婆', 'nick_name': '小乙'}]
         with patch('core.contacts.list_contacts', return_value=contacts):
-            self.assertTrue(ac.is_admin('wxid_wife', {'admins': ['pian1225']}))
+            self.assertTrue(ac.is_admin('wxid_wife', {'admins': ['aliasdemo2']}))
             self.assertTrue(ac.is_admin('wxid_wife', {'admins': ['wxid_wife']}))
-            self.assertFalse(ac.is_admin('wxid_other', {'admins': ['pian1225']}))
+            self.assertFalse(ac.is_admin('wxid_other', {'admins': ['aliasdemo2']}))
 
 
 class Handlers(Base):
@@ -185,7 +185,7 @@ class Handlers(Base):
         self.assertIn('未找到会话', out)
 
     def test_send_forwards_recent_image_when_no_text(self):
-        people = [{'username': 'wx_mimi', 'name': '蜜蜜🌱besos', 'nick_name': '', 'remark': '', 'alias': ''}]
+        people = [{'username': 'wx_peer_b', 'name': '小乙🌱demo', 'nick_name': '', 'remark': '', 'alias': ''}]
         image = dict(type=3, local_id=4, create_time=1_000)
         with patch('core.contacts.list_contacts', return_value=people), \
              patch('core.contacts.list_groups', return_value=[]), \
@@ -193,13 +193,13 @@ class Handlers(Base):
              patch('core.imgdec.get_msg_image', return_value=(b'\xff\xd8ok', 'image/jpeg')) as decoded, \
              patch('core.sendq.enqueue', return_value=('job2', 0)) as en, \
              patch('time.time', return_value=1_100):
-            ctx = self.ctx(chat='wxid_admin', content='发给蜜蜜')
+            ctx = self.ctx(chat='wxid_admin', content='发给小乙')
             ctx['m']['local_id'] = 8
-            out = ac._cmd_send('蜜蜜🌱besos', ctx)
+            out = ac._cmd_send('小乙🌱demo', ctx)
         rows.assert_called_once_with('wxid_admin', limit=20)
         decoded.assert_called_once_with('wxid_admin', 4)
         self.assertEqual(en.call_args.args[0], 'image')
-        self.assertEqual(en.call_args.kwargs['chat'], 'wx_mimi')
+        self.assertEqual(en.call_args.kwargs['chat'], 'wx_peer_b')
         self.assertTrue(en.call_args.kwargs['path'].endswith('.jpg'))
         self.assertIn('已把刚才的图片发给', out)
 
@@ -208,61 +208,61 @@ class Handlers(Base):
         self.assertIn('用法', out)
 
     def test_summary_returns_model_text_for_one_chat(self):
-        people = [{'username': 'wx_baiyu', 'name': '白榆', 'nick_name': '白榆', 'remark': '', 'alias': ''}]
+        people = [{'username': 'wx_peer_c', 'name': '小丙', 'nick_name': '小丙', 'remark': '', 'alias': ''}]
         rows = [
-            dict(type=1, is_self=False, sender_name='白榆', content='哥哥想用那个', create_time=1, local_id=1),
+            dict(type=1, is_self=False, sender_name='小丙', content='想用那个功能', create_time=1, local_id=1),
             dict(type=1, is_self=True, sender_name='我', content='现在过来。', create_time=2, local_id=2),
         ]
         with patch('core.contacts.list_contacts', return_value=people), \
              patch('core.contacts.list_groups', return_value=[]), \
              patch('core.messages.get_messages', return_value=rows) as got, \
-             patch('core.llm.chat', return_value='白榆在问一件具体的事，你回了现在过来。') as chat:
-            out = ac._cmd_summary('白榆', self.ctx())
-        got.assert_called_once_with('wx_baiyu', limit=40)
-        self.assertIn('白榆', chat.call_args.args[1][0]['content'])
-        self.assertIn('白榆在问', out)
-        self.assertTrue(out.startswith('「白榆」最近'))
+             patch('core.llm.chat', return_value='小丙在问一件具体的事，你回了现在过来。') as chat:
+            out = ac._cmd_summary('小丙', self.ctx())
+        got.assert_called_once_with('wx_peer_c', limit=40)
+        self.assertIn('小丙', chat.call_args.args[1][0]['content'])
+        self.assertIn('小丙在问', out)
+        self.assertTrue(out.startswith('「小丙」最近'))
 
     def test_plain_summary_request_extracts_chat_name(self):
-        self.assertEqual(ac.summary_request('白榆最近说了什么'), '白榆')
-        self.assertEqual(ac.summary_request('白榆最近和你聊什么，总结一下给我'), '白榆')
-        self.assertEqual(ac.summary_request('@黎深 总结一下每天都是修罗场'), '每天都是修罗场')
+        self.assertEqual(ac.summary_request('小丙最近说了什么'), '小丙')
+        self.assertEqual(ac.summary_request('小丙最近和你聊什么，总结一下给我'), '小丙')
+        self.assertEqual(ac.summary_request('@角色戊 总结一下南风闲话群'), '南风闲话群')
         self.assertEqual(ac.summary_request('你最近和我聊什么'), '')
         self.assertEqual(ac.summary_request('今天吃了吗'), '')
-        self.assertEqual(ac.summary_request('/总结 白榆'), '')
-        self.assertEqual(ac.send_request('告诉白榆，今晚早点睡').split('\n', 1), ['白榆', '今晚早点睡'])
+        self.assertEqual(ac.summary_request('/总结 小丙'), '')
+        self.assertEqual(ac.send_request('告诉小丙，今晚早点睡').split('\n', 1), ['小丙', '今晚早点睡'])
         self.assertEqual(
-            ac.send_request('告诉蜜蜜早点睡觉', ['蜜蜜🌱besos']).split('\n', 1),
-            ['蜜蜜🌱besos', '早点睡觉'])
-        self.assertEqual(ac.send_request('给每天都是修罗场发一句在的').split('\n', 1), ['每天都是修罗场', '在的'])
-        self.assertEqual(ac.send_request('白榆最近和你聊什么'), '')
-        self.assertEqual(ac.send_request('发给蜜蜜', ['蜜蜜🌱besos']).split('\n', 1), ['蜜蜜🌱besos', ''])
-        self.assertEqual(ac.send_request('把这张图发给蜜蜜', ['蜜蜜🌱besos']).split('\n', 1)[0], '蜜蜜🌱besos')
+            ac.send_request('告诉小乙早点睡觉', ['小乙🌱demo']).split('\n', 1),
+            ['小乙🌱demo', '早点睡觉'])
+        self.assertEqual(ac.send_request('给南风闲话群发一句在的').split('\n', 1), ['南风闲话群', '在的'])
+        self.assertEqual(ac.send_request('小丙最近和你聊什么'), '')
+        self.assertEqual(ac.send_request('发给小乙', ['小乙🌱demo']).split('\n', 1), ['小乙🌱demo', ''])
+        self.assertEqual(ac.send_request('把这张图发给小乙', ['小乙🌱demo']).split('\n', 1)[0], '小乙🌱demo')
         self.assertEqual(ac.send_request('今天吃了吗'), '')
 
     def test_plain_summary_from_admin_uses_same_command(self):
         rec = []
         msg = dict(local_id=9, type=1, is_self=False, sender='wxid_admin',
-                   content='白榆最近和你聊什么，总结一下给我')
+                   content='小丙最近和你聊什么，总结一下给我')
         with patch('core.sender.send_text', side_effect=lambda disp, text, **kw: rec.append(text) or {'status': 'confirmed'}), \
              patch('core.bot.send_name_for', lambda u: '管理员'), \
              patch('core.send_ledger.stable_id', lambda *a: 'sid'), \
-             patch('core.contacts.list_contacts', return_value=[{'username':'wx_baiyu','name':'白榆','nick_name':'','remark':'','alias':''}]), \
+             patch('core.contacts.list_contacts', return_value=[{'username':'wx_peer_c','name':'小丙','nick_name':'','remark':'','alias':''}]), \
              patch('core.contacts.list_groups', return_value=[]), \
-             patch('core.messages.get_messages', return_value=[dict(type=1,is_self=False,sender_name='白榆',content='在吗',create_time=1,local_id=1)]), \
+             patch('core.messages.get_messages', return_value=[dict(type=1,is_self=False,sender_name='小丙',content='在吗',create_time=1,local_id=1)]), \
              patch('core.llm.chat', return_value='在问一件事') as cmd:
             handled = ac.dispatch('wxid_admin', msg, False, {'admins': ['wxid_admin']})
         self.assertTrue(handled)
-        self.assertIn('白榆', cmd.call_args.args[1][0]['content'])
+        self.assertIn('小丙', cmd.call_args.args[1][0]['content'])
         self.assertIn('在问一件事', rec[0])
 
     def test_summary_rejects_ambiguous_name(self):
-        people = [{'username': 'wx1', 'name': '白榆甲', 'nick_name': '', 'remark': '', 'alias': ''},
-                  {'username': 'wx2', 'name': '白榆乙', 'nick_name': '', 'remark': '', 'alias': ''}]
+        people = [{'username': 'wx1', 'name': '小丙一', 'nick_name': '', 'remark': '', 'alias': ''},
+                  {'username': 'wx2', 'name': '小丙二', 'nick_name': '', 'remark': '', 'alias': ''}]
         with patch('core.contacts.list_contacts', return_value=people), \
              patch('core.contacts.list_groups', return_value=[]), \
              patch('core.llm.chat') as chat:
-            out = ac._cmd_summary('白榆', self.ctx())
+            out = ac._cmd_summary('小丙', self.ctx())
         chat.assert_not_called()
         self.assertIn('匹配到多个', out)
 

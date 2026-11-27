@@ -345,8 +345,8 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
     if battle_mode.is_on(chat_username):
         system = (
             "【本轮身份=战斗模式，覆盖一切其他角色】\n"
-            "你现在不是黎深，不是恋人，不是医生，不是任何温柔人设。\n"
-            "只执行下面的吵架人设和输出格式。禁止冰晶、手术、芯核、老婆、甜食、雪景、守护。\n"
+            "你现在不是任何已保存的角色，不是恋人，不是医生，不是任何温柔人设。\n"
+            "只执行下面的吵架人设和输出格式。禁止沿用温柔角色的口癖、称呼和场景。\n"
             "【角色】\n" + (persona.get("persona") or battle_mode.get_persona())
             + battle_mode.FORMAT_LOCK
         )
@@ -454,7 +454,7 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
     said = [text for text in said if text]
     lines = [turn['content'] for turn in turns]
 
-    # Shared-circle direct relay:「给飒讲个笑话」sends into 飒's chat immediately.
+    # Shared-circle direct relay:「给小甲讲个笑话」sends into that peer's chat immediately.
     if not is_group:
         relay_src = direct or (said[-1] if said else "") or ask
         relayed = personalization.try_shared_relay(
@@ -622,18 +622,13 @@ def _wants_lookup(text):
     keys = ("找个", "找一下", "帮我找", "查一下", "查资料", "搜一下", "搜索", "更新资料",
             "游戏更新", "今天的", "官网", "公告", "总结下", "总结一下", "帮我看看", "帮我看")
     if any(k in t for k in keys) and any(k in t for k in
-            ("资料", "更新", "公告", "活动", "游戏", "恋与", "夏以昼", "积木", "搜", "找", "查", "总结")):
+            ("资料", "更新", "公告", "活动", "游戏", "积木", "搜", "找", "查", "总结")):
         return True
     return bool(re.search(r"(找|查|搜).{0,12}(资料|更新|公告|活动)", t))
 
 
 def _lookup_queries(text):
     t = " ".join((text or "").split())
-    if any(k in t for k in ("夏以昼", "恋与", "深空", "偏航")):
-        return [
-            "恋与深空 夏以昼 更新 " + time.strftime("%Y年%m月"),
-            "恋与深空 夏以昼 偏航线",
-        ]
     q = t[:120]
     return [q] if q else ["更新"]
 

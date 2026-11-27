@@ -315,17 +315,17 @@ class ScrollToComment(unittest.TestCase):
         self.assertIn('目标评论未完整显示', str(e.exception))
 
     def test_fuzzy_match_tolerates_ocr_dropped_char(self):
-        # OCR drops 昼 and prepends a garbled name glyph; must still locate it
+        # OCR drops one character and prepends a garbled glyph; must still locate it
         # (copy_at is the exact gate downstream, so a fuzzy locate is safe).
-        target = dict(id='c9', name='飒', text='夏以昼 你没回复我！')
-        rows = [dict(text='着:夏以你没回复我!', x=60, y=300)]
+        target = dict(id='c9', name='小甲', text='角色甲 你没回复我！')
+        rows = [dict(text='着:角色你没回复我!', x=60, y=300)]
         n = self._native([[100, 700]], [rows])
         with patch('core.docker_wx.priority_pending', return_value=False):
             hit = n._scroll_to_comment(self.POS, target)
         self.assertEqual(hit['y'], 300)
 
     def test_dissimilar_row_is_not_matched(self):
-        target = dict(id='c9', name='x', text='夏以昼 你没回复我！')
+        target = dict(id='c9', name='x', text='角色甲 你没回复我！')
         rows = [dict(text='完全不同的另一条评论内容啦啦啦', x=60, y=300)]
         n = self._native([[100, 700]] * 4, [rows] * 4)
         with patch('core.docker_wx.priority_pending', return_value=False):
@@ -362,7 +362,7 @@ class ScrollToComment(unittest.TestCase):
         from unittest.mock import MagicMock
         n = moments_native.Native()
         item = dict(text='帖子正文', name='我', author='me',
-                    comments=[dict(id='c9', name='蜜蜜🌱besos', text='他一起回复的。但是概率失败。')])
+                    comments=[dict(id='c9', name='小乙🌱demo', text='一起回过，有时会失败。')])
         clicked = []
         n.find_post = MagicMock(return_value=self.POS)
         n._scroll_to_comment = MagicMock(return_value=dict(x=50, y=300))
@@ -373,7 +373,7 @@ class ScrollToComment(unittest.TestCase):
 
     def test_reply_comment_copy_with_infix_passes_verification(self):
         # WeChat copies a reply as "昵称 回复 某人：正文"; both name and body present.
-        n, item, clicked = self._reply_branch('蜜蜜🌱besos 回复 飒：他一起回复的。但是概率失败。')
+        n, item, clicked = self._reply_branch('小乙🌱demo 回复 小甲：一起回过，有时会失败。')
         with self.assertRaises(AssertionError):  # aborts at shot(), i.e. past the check + click
             n.prepare_comment(item, 'c9', '回复内容')
         self.assertEqual(len(clicked), 1)
@@ -423,21 +423,21 @@ class FindPostAuthor(unittest.TestCase):
             return n.find_post(item)
 
     def test_fuzzy_author_tolerates_ocr_dropped_char(self):
-        item = dict(id='f1', text='哪有正常发挥而已', name='蜜蜜🌱besos', author='wxid_x')
+        item = dict(id='f1', text='这只是一句示例动态', name='小乙🌱demo', author='wxid_x')
         # OCR drops the emoji and a trailing glyph.
-        pos = self._run(item, [dict(text='蜜蜜beso', x=90, y=95)],
-                        [dict(username='wxid_x', name='蜜蜜🌱besos', nick_name='', remark='')])
+        pos = self._run(item, [dict(text='小乙demo', x=90, y=95)],
+                        [dict(username='wxid_x', name='小乙🌱demo', nick_name='', remark='')])
         self.assertEqual(pos['top'], 100)
 
     def test_empty_author_ocr_defers_to_unique_body(self):
-        item = dict(id='f1', text='哪有正常发挥而已', name='蜜蜜🌱besos', author='wxid_x')
+        item = dict(id='f1', text='这只是一句示例动态', name='小乙🌱demo', author='wxid_x')
         # OCR read nothing legible (emoji-heavy name): unique body already proves identity.
         pos = self._run(item, [dict(text='', x=90, y=95)],
-                        [dict(username='wxid_x', name='蜜蜜🌱besos', nick_name='', remark='')])
+                        [dict(username='wxid_x', name='小乙🌱demo', nick_name='', remark='')])
         self.assertEqual(pos['top'], 100)
 
     def test_clearly_wrong_author_still_fails(self):
-        item = dict(id='f1', text='哪有正常发挥而已', name='张三', author='wxid_x')
+        item = dict(id='f1', text='这只是一句示例动态', name='张三', author='wxid_x')
         with self.assertRaises(moments_native.NativeError) as e:
             self._run(item, [dict(text='李四王五', x=90, y=95)],
                       [dict(username='wxid_x', name='张三', nick_name='', remark='')])
@@ -484,8 +484,8 @@ class CopyMenu(unittest.TestCase):
                 dict(text='等着，我尽', x=832, y=715),
                 dict(text='回复', x=707, y=746),
                 dict(text='删除', x=707, y=786)]
-        n = self._native(rows, '叮～人间小清醒上线：画个帅气的自己')
-        self.assertEqual(n.copy_at(679, 663), '叮～人间小清醒上线：画个帅气的自己')
+        n = self._native(rows, '甲号示例昵称：画个帅气的自己')
+        self.assertEqual(n.copy_at(679, 663), '甲号示例昵称：画个帅气的自己')
         # 复制 inferred one row (716-686=30 above) up from 搜一搜, at its x column.
         self.assertEqual(n.clicks[-1][:2], (703, 686))
 

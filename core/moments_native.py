@@ -364,7 +364,7 @@ class Native:
                     def _name_ok(t):
                         return any(t==nm or (min(len(t),len(nm))>=2 and (t in nm or nm in t))
                                    or difflib.SequenceMatcher(None,t,nm).ratio()>=0.6 for nm in names)
-                    # Emoji/pictograph-heavy display names (e.g. "🐮🐮🌱besos") OCR into
+                    # Emoji/pictograph-heavy display names OCR into
                     # noise on the tiny name strip, so a non-match there is not proof of a
                     # wrong target. Only veto when at least one expected name is emoji-free
                     # (reliably OCR-able); otherwise trust the unique-body proof above.

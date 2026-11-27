@@ -9,23 +9,23 @@ def test_payload_strips_trigger():
     assert niu_mode.payload("你好") is None
     assert niu_mode.is_trigger({"type": 1, "content": "牛来"}) is False
     assert niu_mode.is_trigger({"type": 1, "content": "牛来 你现在是谁"}) is True
-    assert niu_mode.is_trigger({"type": 1, "content": "[牛牛模式]黎深", "is_self": True}) is False
+    assert niu_mode.is_trigger({"type": 1, "content": "[牛牛模式]角色戊", "is_self": True}) is False
 
 
 def test_niu_uses_short_llm_path():
     captured = {}
     msg = {"type": 1, "content": "你现在是谁", "is_self": False, "sender": "niu:x", "_niu": True, "local_id": 1}
     orig = {"type": 1, "content": "牛来 你现在是谁", "is_self": True, "sender": "me", "local_id": 1}
-    persona = {"name": "黎深", "persona": "你是黎深。"}
+    persona = {"name": "角色戊", "persona": "你是角色戊。"}
     def fake_chat(system, messages, cfg=None):
         captured["system"] = system
         captured["messages"] = messages
         captured["cfg"] = cfg
-        return "我是黎深"
+        return "我是角色戊"
     with patch.object(bot.llm, "chat", fake_chat), \
          patch.object(bot.personalization, "maybe_switch", return_value=None):
         out = bot._ai_reply(persona, "g@chatroom", orig, [orig], rules={}, batch_msgs=[orig])
-    assert out == "我是黎深"
+    assert out == "我是角色戊"
     assert "牛来" not in captured["system"] or "点名" in captured["system"]
     assert captured["messages"][0]["content"] == "你现在是谁"
     assert captured["cfg"]["max_tokens"] == 80
@@ -33,7 +33,7 @@ def test_niu_uses_short_llm_path():
 
 def test_niu_draw_request_uses_fast_image_path():
     orig = {"type": 1, "content": "牛来 画一个苹果", "is_self": True, "sender": "me", "local_id": 1}
-    persona = {"name": "黎深", "persona": "你是黎深。"}
+    persona = {"name": "角色戊", "persona": "你是角色戊。"}
     with patch.object(bot, "_niu_draw", return_value="") as draw, \
          patch.object(bot.personalization, "maybe_switch", return_value=None):
         out = bot._ai_reply(persona, "wxid_friend", orig, [orig], rules={}, batch_msgs=[orig])
@@ -65,11 +65,11 @@ def test_self_window_niu_is_enqueued_same_chat():
     src = open("core/bot.py", encoding="utf-8").read()
     assert "跳过自己的聊天窗口" not in src
     from core import sender
-    with patch("config.wxid", return_value="wxid_vn2w1t3doieu22"):
-        assert sender.is_self_chat("wxid_vn2w1t3doieu22")
-        assert sender.search_key("wxid_vn2w1t3doieu22", "🐮🐮🌱besos") == (
-            "🐮🐮🌱besos", "🐮🐮🌱besos")
-        assert not sender.is_self_chat("wxid_pp1fsf398lxh21")
+    with patch("config.wxid", return_value="wxid_self0001"):
+        assert sender.is_self_chat("wxid_self0001")
+        assert sender.search_key("wxid_self0001", "🐮🐮🌱demo") == (
+            "🐮🐮🌱demo", "🐮🐮🌱demo")
+        assert not sender.is_self_chat("wxid_other0001")
 
 
 def test_niu_skipped_when_battle_on():
@@ -90,12 +90,12 @@ def test_allowed_watch_or_self_only():
 def test_wants_image_covers_draw_an_animal():
     from core import bot
     assert bot._wants_image("画一只戴着墨镜的小龙虾")
-    assert bot._wants_image("画一个黎深")
+    assert bot._wants_image("画一个角色戊")
     assert not bot._wants_image("中午吃什么")
 
 
 def test_stamp_prefix():
-    assert niu_mode.stamp("黎深") == "[牛牛模式]黎深"
+    assert niu_mode.stamp("角色戊") == "[牛牛模式]角色戊"
     assert niu_mode.stamp("[牛牛模式]已经有了") == "[牛牛模式]已经有了"
     assert niu_mode.is_bot_stamp({"content": "[牛牛模式]在画了。"}) is True
     assert niu_mode.is_bot_stamp({"content": "牛来 画一个"}) is False

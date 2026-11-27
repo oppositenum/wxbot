@@ -21,7 +21,7 @@ class SendModeTest(Isolated):
         self.ui = p.start(); self.addCleanup(p.stop)
 
     def text(self, jid='job-1', body='hi'):
-        return sender.send_text('besos', body, chat_username='wxid_a', job_id=jid, session=self.token)
+        return sender.send_text('demo', body, chat_username='wxid_a', job_id=jid, session=self.token)
 
     def test_default_mode_is_ui_and_does_not_touch_direct(self):
         self.assertEqual(send_mode.get()['mode'], 'ui')
@@ -38,7 +38,7 @@ class SendModeTest(Isolated):
             r = self.text()
         self.assertTrue(r['ok'])
         self.assertEqual(r['reason'], 'direct_submitted')
-        ds.assert_called_once_with('wxid_a', 'hi', 'besos', source='bot')
+        ds.assert_called_once_with('wxid_a', 'hi', 'demo', source='bot')
         self.ui.assert_not_called()
 
     def test_direct_unavailable_falls_back_to_ui_once(self):
@@ -82,10 +82,10 @@ class SendModeTest(Isolated):
         with patch('core.direct_send.status', return_value=READY), \
              patch('core.direct_send.stage_image', return_value='/w/direct_media/x.png') as st, \
              patch('core.direct_send.send_image', return_value={'ok': True}) as si:
-            r = sender.send_image('besos', src, chat_username='wxid_a', job_id='img-1', session=self.token)
+            r = sender.send_image('demo', src, chat_username='wxid_a', job_id='img-1', session=self.token)
         self.assertTrue(r['ok'])
         st.assert_called_once()
-        si.assert_called_once_with('wxid_a', '/w/direct_media/x.png', 'besos', 'a.png', source='bot')
+        si.assert_called_once_with('wxid_a', '/w/direct_media/x.png', 'demo', 'a.png', source='bot')
 
     def test_at_mention_is_not_supported_by_direct(self):
         send_mode.set('direct')

@@ -180,7 +180,7 @@ class Personas(Isolated):
         self.change('friend-A', persona_id='海棠成人', personalization_enabled=True,
                     preferences={'address': {'value': '主人', 'locked': True}})
         self.change('room@chatroom', persona_id='成语接龙高手')
-        private = msg(1, text='老公，换黎深，宝贝儿想做了')
+        private = msg(1, text='老公，换角色戊，宝贝儿想做了')
         leaked = msg(2, text='（一把把你按在桌子上）操，宝贝儿你这小逼今天这么欠操', is_self=True, sender='account-A')
         quote = msg(3, text='不需要吗', refer={'content': '我不需要', 'chatusr': 'account-A', 'displayname': '我'})
         captured = []
@@ -550,40 +550,40 @@ class Entries(Isolated):
         self.assertEqual(parts, ['一', '二', '三'])
 
     def test_named_persona_switch_updates_contact_and_reply(self):
-        self.roles['黎深'] = {'name': '黎深', 'persona': '我是黎深。', 'samples': []}
-        self.roles['夏以昼成人'] = {'name': '夏以昼成人', 'persona': '我是夏以昼，成人向。', 'samples': []}
-        catalog = [{'slug': k, 'name': k} for k in ('黎深', '夏以昼成人')]
-        self.change('friend-A', persona_id='夏以昼成人')
+        self.roles['角色戊'] = {'name': '角色戊', 'persona': '我是角色戊。', 'samples': []}
+        self.roles['角色甲成人'] = {'name': '角色甲成人', 'persona': '我是角色甲，成人向。', 'samples': []}
+        catalog = [{'slug': k, 'name': k} for k in ('角色戊', '角色甲成人')]
+        self.change('friend-A', persona_id='角色甲成人')
         captured=[]
         with patch('core.distill.list_personas', return_value=catalog), \
-                patch('core.llm.chat', side_effect=lambda s, m, **k: captured.append(s) or '刚下台，手套还没摘。'), \
+                patch('core.llm.chat', side_effect=lambda s, m, **k: captured.append(s) or '已换过来。'), \
                 patch('core.bot._sender_name', return_value='对方'), patch('core.memory.select_memories', return_value=[]), \
                 patch('core.agent.agent_config', return_value={'enabled': False}):
-            out = bot._ai_reply(self.roles['Q'], 'friend-A', msg(text='老公，换黎深'), [], self.rules)
-        self.assertEqual(out, '刚下台，手套还没摘。')
-        self.assertEqual(p.get('friend-A')['persona_id'], '黎深')
+            out = bot._ai_reply(self.roles['Q'], 'friend-A', msg(text='老公，换角色戊'), [], self.rules)
+        self.assertEqual(out, '已换过来。')
+        self.assertEqual(p.get('friend-A')['persona_id'], '角色戊')
         self.assertIn('已切换人设', captured[0])
-        self.assertIn('我是黎深', captured[0])
+        self.assertIn('我是角色戊', captured[0])
 
     def test_pasted_role_sheet_becomes_this_chat_persona(self):
-        sheet = ('将扮演《恋与深空》中的祁煜，与用户进行长期微信式聊天。'
-                 + '人格设定真实不高于套路。' + ('你是祁煜。' * 80))
-        short = '今天扮演一下祁煜吧'
+        sheet = ('将扮演《示例作品》中的角色丙，与用户进行长期微信式聊天。'
+                 + '人格设定真实不高于套路。' + ('你是角色丙。' * 80))
+        short = '今天扮演一下角色丙吧'
         self.assertIsNone(p.pasted_role(short))
-        self.assertEqual(p.pasted_role(sheet), '祁煜')
+        self.assertEqual(p.pasted_role(sheet), '角色丙')
         out = p.adopt_pasted_role('friend-A', sheet, is_group=False)
-        saved = json.load(open(os.path.join(config.personas_dir(), '祁煜.json'), encoding='utf-8'))
-        self.assertEqual(saved['slug'], '祁煜')
-        self.assertEqual(p.get('friend-A')['persona_id'], '祁煜')
-        self.assertEqual(out['name'], '祁煜')
-        self.assertIn('你是祁煜', saved['persona'])
+        saved = json.load(open(os.path.join(config.personas_dir(), '角色丙.json'), encoding='utf-8'))
+        self.assertEqual(saved['slug'], '角色丙')
+        self.assertEqual(p.get('friend-A')['persona_id'], '角色丙')
+        self.assertEqual(out['name'], '角色丙')
+        self.assertIn('你是角色丙', saved['persona'])
 
     def test_adult_intent_switches_without_saying_成人(self):
-        catalog = [{'slug': '夏以昼', 'name': '夏以昼'}, {'slug': '夏以昼成人', 'name': '夏以昼成人'}]
+        catalog = [{'slug': '角色甲', 'name': '角色甲'}, {'slug': '角色甲成人', 'name': '角色甲成人'}]
         with patch('core.distill.list_personas', return_value=catalog):
-            self.assertEqual(p.match_switch('想做了，进入状态', current='夏以昼'), '夏以昼成人')
-            self.assertIsNone(p.match_switch('晚饭吃了没', current='夏以昼'))
-            self.assertIsNone(p.match_switch('你还是当黎深吧', current='夏以昼'))
+            self.assertEqual(p.match_switch('想做了，进入状态', current='角色甲'), '角色甲成人')
+            self.assertIsNone(p.match_switch('晚饭吃了没', current='角色甲'))
+            self.assertIsNone(p.match_switch('你还是当角色戊吧', current='角色甲'))
 
     def test_strip_hmm_openers_without_emptying_message(self):
         self.assertEqual(bot._strip_filler_openers('嗯，累了就歇。'), '累了就歇。')
@@ -599,16 +599,16 @@ class Entries(Isolated):
     def test_lookup_request_searches_when_agent_allowed(self):
         self.change('friend-A', agent_enabled=True)
         captured=[]
-        with patch('core.llm.chat', side_effect=lambda s, m, **k: captured.append(s) or '偏航线今天上了'), \
-                patch('core.tools.web_search', return_value='1. 夏以昼主线分线今日更新') as search, \
+        with patch('core.llm.chat', side_effect=lambda s, m, **k: captured.append(s) or '更新今天上了'), \
+                patch('core.tools.web_search', return_value='1. 示例条目今日更新') as search, \
                 patch('core.agent.run', forbidden), patch('core.bot._sender_name', return_value='对方'), \
                 patch('core.memory.select_memories', return_value=[]), \
                 patch('core.agent.agent_config', return_value={'enabled': True, 'tools': ['web_search']}):
-            out=bot._ai_reply(self.roles['Q'],'friend-A',msg(text='你能不能找个夏以昼最近游戏更新资料，今天的'),[],self.rules)
-        self.assertEqual(out,'偏航线今天上了')
+            out=bot._ai_reply(self.roles['Q'],'friend-A',msg(text='你能不能找个角色甲最近游戏更新资料，今天的'),[],self.rules)
+        self.assertEqual(out,'更新今天上了')
         self.assertGreaterEqual(search.call_count,1)
         self.assertIn('已联网搜索', captured[0])
-        self.assertIn('夏以昼主线分线今日更新', captured[0])
+        self.assertIn('示例条目今日更新', captured[0])
 
     def test_chat_does_not_search_or_open_tools(self):
         self.change('friend-A', agent_enabled=True)
@@ -699,7 +699,7 @@ class SharedSessions(Isolated):
     def setUp(self):
         super().setUp()
         self.contacts = [
-            {'username': 'friend-A', 'name': '蜜蜜'},
+            {'username': 'friend-A', 'name': '小乙'},
             {'username': 'friend-B', 'name': '阿B'},
             {'username': 'friend-C', 'name': '阿C'},
             {'username': 'room1@chatroom', 'name': '测试群'},
@@ -754,7 +754,7 @@ class SharedSessions(Isolated):
         })
         captured = []
         with patch('core.llm.chat', side_effect=lambda s, m, **k: captured.append(s) or '嗯'), \
-                patch('core.bot._sender_name', return_value='蜜蜜'), \
+                patch('core.bot._sender_name', return_value='小乙'), \
                 patch('core.memory.select_memories', return_value=[]), \
                 patch('core.agent.agent_config', return_value={'enabled': False}):
             bot._ai_reply(self.roles['Q'], 'friend-A', msg(text='你和几个人勾搭'), [], self.rules)
@@ -762,7 +762,7 @@ class SharedSessions(Isolated):
         captured.clear()
         self.change('friend-A', shared_sessions=False)
         with patch('core.llm.chat', side_effect=lambda s, m, **k: captured.append(s) or '嗯'), \
-                patch('core.bot._sender_name', return_value='蜜蜜'), \
+                patch('core.bot._sender_name', return_value='小乙'), \
                 patch('core.memory.select_memories', return_value=[]), \
                 patch('core.agent.agent_config', return_value={'enabled': False}):
             bot._ai_reply(self.roles['Q'], 'friend-A', msg(text='你和几个人勾搭'), [], self.rules)
@@ -795,14 +795,14 @@ class SharedSessions(Isolated):
         self.assertEqual(sent[0][2], 'friend-B')
         self.assertIn('岸', sent[0][1])
         # Outside circle: honest refusal, never fake success.
-        refuse = p.try_shared_relay('friend-A', '告诉蜜蜜 我想她了',
+        refuse = p.try_shared_relay('friend-A', '告诉小乙 我想她了',
                                     persona=self.roles['Q'], rules=self.rules)
         self.assertIn('没开会话共享', refuse)
         self.assertNotIn('已经发给', refuse)
         with patch('core.sender.send_text',
                    return_value={'ok': True, 'status': 'submitted', 'reason': 'legacy_ui_submitted'}) as send, \
                 patch('core.llm.chat', forbidden), \
-                patch('core.bot._sender_name', return_value='蜜蜜'), \
+                patch('core.bot._sender_name', return_value='小乙'), \
                 patch('core.memory.select_memories', return_value=[]), \
                 patch('core.agent.agent_config', return_value={'enabled': False}):
             reply = bot._ai_reply(self.roles['Q'], 'friend-A',

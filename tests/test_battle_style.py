@@ -74,13 +74,13 @@ def test_group_auto_matches_self_when_include_self():
 
 def test_priority_senders_match_group_id_or_name():
     from unittest.mock import patch
-    rules = {"group_priority_senders": {"Limit": ["pian1225"]}}
-    contacts = [{"username": "wxid_wife", "alias": "pian1225", "remark": "老婆",
-                 "name": "老婆", "nick_name": "蜜蜜"}]
-    groups = [{"username": "49522251292@chatroom", "name": "Limit"}]
+    rules = {"group_priority_senders": {"Limit": ["aliasdemo2"]}}
+    contacts = [{"username": "wxid_wife", "alias": "aliasdemo2", "remark": "老婆",
+                 "name": "老婆", "nick_name": "小乙"}]
+    groups = [{"username": "10000000001@chatroom", "name": "Limit"}]
     with patch("core.contacts.list_groups", return_value=groups), \
          patch("core.contacts.list_contacts", return_value=contacts):
-        got = bot._priority_senders(rules, "49522251292@chatroom")
+        got = bot._priority_senders(rules, "10000000001@chatroom")
     assert got == {"wxid_wife"}
 
 

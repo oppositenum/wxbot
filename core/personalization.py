@@ -328,7 +328,7 @@ _SWITCH_INTENT = re.compile(
 _ADULT_CUES = re.compile(
     r'想做了|想要了|来做[啊呀吧]?|开荤|想色色|想做爱|想被操|想上床|进入状态|开车|'
     r'黄一点|骚一点|成人模式|想浪|想被干|做爱')
-_ADULT_PREF = ('成人3', '夏以昼成人', '成人2', '成人', '成人男友', '成人女友')
+_ADULT_PREF = ('成人3', '角色甲成人', '成人2', '成人', '成人男友', '成人女友')
 
 
 def catalog():
@@ -754,7 +754,7 @@ _SHARE_META_RE = re.compile(
     r'几个人|多少人|勾搭|暧昧|别人|其他[人女男]?|还有谁|和谁|跟谁|几个对象|外面|'
     r'查岗|自己查|查一查|翻.{0,6}记录|看看.{0,6}聊天|证据|交代|坦白')
 
-# 「给飒讲个笑话」「告诉飒，给她讲个冷笑话」「告诉蜜蜜 我想她了」——仅共享圈内可代发。
+# 「给小甲讲个笑话」「告诉小甲，给她讲个冷笑话」「告诉小乙 我想她了」——仅共享圈内可代发。
 _RELAY_JOKE_RES = (
     re.compile(r'(?:告诉|转告)\s*(.+?)[，,、]?\s*给她?(?:讲|说|发)\s*(?:一?[个条句])?(?:冷)?笑话'),
     re.compile(r'(?:告诉|转告)\s*(.+?)\s*(?:讲|说|发)\s*(?:一?[个条句])?(?:冷)?笑话'),
@@ -764,7 +764,7 @@ _RELAY_TEXT_RES = (
     re.compile(r'帮我?(?:给|跟|向)\s*(.+?)\s*(?:说|发|讲)\s*[：:\s]*(.+)'),
     re.compile(r'(?:给|跟|向)\s*(.+?)\s*(?:发|说|讲)\s*(?:一?[个条句句])?\s*[：:\s]+(.+)'),
     re.compile(r'(?:告诉|转告)\s*(.+?)\s*[：:\s]+(.+)'),
-    # 「告诉蜜蜜 我想她了」(空格分隔，无冒号)
+    # 「告诉小乙 我想她了」(空格分隔，无冒号)
     re.compile(r'(?:告诉|转告)\s*([^\s，,、]{1,20})\s+(.+)'),
 )
 _RELAY_LOOKS_RE = re.compile(
@@ -823,7 +823,7 @@ def parse_shared_relay(text, peers):
         return None
     if kind == 'text' and not content:
         return None
-    # Strip trailing「，给她」debris from「告诉飒，给她」
+    # Strip trailing「，给她」debris from「告诉小甲，给她」
     whom = re.sub(r'[，,、].*$', '', whom).strip()
     hit = _match_shared_peer(whom, peers)
     if not hit:

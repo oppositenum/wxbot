@@ -96,12 +96,12 @@ _SEND_VERBS = r'(?:发|说|告诉|转告|讲)'
 
 
 def _plain_name(text):
-    """去掉表情和英文尾巴，只留汉字。蜜蜜🌱besos 用来对「告诉蜜蜜」。"""
+    """去掉表情和英文尾巴，只留汉字。小乙🌱demo 用来对「告诉小乙」。"""
     return ''.join(ch for ch in (text or '') if '\u4e00' <= ch <= '\u9fff')
 
 
 def _known_names():
-    """通讯录和群里能用来对上「告诉蜜蜜…」的名字，长的优先。"""
+    """通讯录和群里能用来对上「告诉小乙…」的名字，长的优先。"""
     from core import contacts
     names = []
     for row in list(contacts.list_contacts()) + list(contacts.list_groups()):
@@ -116,7 +116,7 @@ def _known_names():
 def send_request(content, names=None):
     """从管理员口语里取出代发目标。不是代发就返回空。
 
-    names 是通讯录里的显示名。有它时，「告诉蜜蜜早点睡觉」能对上「蜜蜜🌱besos」。
+    names 是通讯录里的显示名。有它时，「告诉小乙早点睡觉」能对上「小乙🌱demo」。
     """
     text = command_text(content)
     if not text or text.startswith('/') or summary_request(text):
@@ -349,7 +349,7 @@ def _resolve_chat(name):
             hits[c.get('username')] = c.get('remark') or c.get('name') or c.get('username')
     if not hits:
         return None, 'none'
-    # 「蜜蜜」会同时命中「蜜蜜」和「蜜蜜🌱besos」。一个名字包含另一个时算同一个会话。
+    # 「小乙」会同时命中「小乙」和「小乙🌱demo」。一个名字包含另一个时算同一个会话。
     values = list(hits.values())
     if len(hits) > 1 and not all(
             any(a != b and (a in b or b in a) for b in values) for a in values):
@@ -428,7 +428,7 @@ def _cmd_summary(args, ctx):
     from core import llm, messages
     target = (args or '').strip()
     if not target:
-        return '⚠️ 用法：/总结 <群名或联系人>  例如 /总结 白榆'
+        return '⚠️ 用法：/总结 <群名或联系人>  例如 /总结 小乙'
     chat, info = _resolve_chat(target)
     if not chat:
         if info == 'none':

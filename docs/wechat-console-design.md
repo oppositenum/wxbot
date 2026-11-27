@@ -46,7 +46,7 @@
 | 数据目录推断 wxid | 该容器 `/api/identity`（见下） | `expected_wxid`，必须操作者确认 |
 | `WXBOT_SELF_CONTAINER` | 该容器 env | 若与容器名不一致，登记为待修正，不改写成「已经是某值」 |
 
-任务输入里给出的现网对照（夏以昼 / `wxid_btmc45jty7xy22` / `wxbot-ubuntu-manual` / `5100` / `6082` / `5902`，以及第二个容器的端口与身份）只作为 adopt 前的人工核对清单。仓库不能证实 second 的容器名、端口、wxid、MAC、hostname、代理和 `extra_hosts`。两个容器是否共用同一对 `WXBOT_UI_USER` / `WXBOT_UI_PASSWORD`，只有在它们实际加载了同一份 env 时才成立，代码并不强制。
+现网对照只作为 adopt 前的人工核对清单，不写进仓库：显示名、wxid、容器名和端口以当时的 `docker inspect` / `docker port` 为准。仓库不能证实 second 的容器名、端口、wxid、MAC、hostname、代理和 `extra_hosts`。两个容器是否共用同一对 `WXBOT_UI_USER` / `WXBOT_UI_PASSWORD`，只有在它们实际加载了同一份 env 时才成立，代码并不强制。
 
 ### 已经踩过的串号
 
@@ -168,7 +168,7 @@ adopt 输入是容器名。服务端执行：
 5. 文件锁：`fcntl.flock` 包住读-改-写，临时文件仍用 `os.replace`。锁文件是 `~/.wxbot/console/registry.lock`。
 6. 注册表 `accounts` 长度达到 5 则拒绝下一次 adopt。已有 5 条时只能改字段，不能再增。
 
-不在启动时发现「缺少 primary / second 这两个 id」就写入夏以昼和黎深。自动写入会把未核实的 wxid、MAC、代理当成生产数据。首次打开控制台若表为空，页面列出 `docker ps --filter name=^wxbot` 的候选容器，每条显示 inspect 到的端口和 hostname，操作者点「登记」并填写 label 与期望 wxid。
+不在启动时发现「缺少 primary / second 这两个 id」就写入任何显示名或人设名。自动写入会把未核实的 wxid、MAC、代理当成生产数据。首次打开控制台若表为空，页面列出 `docker ps --filter name=^wxbot` 的候选容器，每条显示 inspect 到的端口和 hostname，操作者点「登记」并填写 label 与期望 wxid。
 
 建议字段：
 

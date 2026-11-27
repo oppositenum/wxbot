@@ -178,7 +178,7 @@ class IdiomGame(unittest.TestCase):
         self.assertIsNone(continuous_mode.idiom_game(old, now=10_000))
 
     def test_at_and_punctuation_stripped(self):
-        self.assertEqual(continuous_mode.idiom_of({'type': 1, 'content': '@🐮🐮🌱besos 先行一步。'}), '先行一步')
+        self.assertEqual(continuous_mode.idiom_of({'type': 1, 'content': '@🐮🐮🌱demo 先行一步。'}), '先行一步')
 
 
 class Hints(unittest.TestCase):

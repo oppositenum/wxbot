@@ -113,12 +113,12 @@ class Legacy(Isolated):
         with patch('config.wxid', return_value='wxid_me'):
             self.assertTrue(sender.is_self_chat('wxid_me'))
             self.assertFalse(sender.is_self_chat('wxid_wife'))
-            self.assertEqual(sender.search_key('wxid_me', '🐮🐮🌱besos'),
-                             ('🐮🐮🌱besos', '🐮🐮🌱besos'))
-            r = sender.send_text('🐮🐮🌱besos', 'body', chat_username='wxid_me')
+            self.assertEqual(sender.search_key('wxid_me', '🐮🐮🌱demo'),
+                             ('🐮🐮🌱demo', '🐮🐮🌱demo'))
+            r = sender.send_text('🐮🐮🌱demo', 'body', chat_username='wxid_me')
         self.assertEqual(r['status'], 'submitted')
-        self.assertEqual(self.execute.call_args.args[3], '🐮🐮🌱besos')
-        self.assertEqual(self.execute.call_args.args[5], '🐮🐮🌱besos')
+        self.assertEqual(self.execute.call_args.args[3], '🐮🐮🌱demo')
+        self.assertEqual(self.execute.call_args.args[5], '🐮🐮🌱demo')
 
     def test_header_ocr_typo_still_matches_expected_chat(self):
         src = Path('docker/wx_send_legacy.py').read_text(encoding='utf-8')
@@ -131,28 +131,28 @@ class Legacy(Isolated):
         self.assertTrue(ns['header_matches']('漂云', '漂云'))
         self.assertFalse(ns['header_matches']('老婆', '漂云'))
         self.assertFalse(ns['header_matches']('猫来了小队', '老婆two'))
-        # 切号后顶栏「蜜蜜🌱besos」：原图读成 EE'，放大后读成 密蜜sbesos。
-        self.assertTrue(ns['header_matches']("EE'besos\n密蜜sbesos", '蜜蜜🌱besos'))
-        self.assertTrue(ns['header_matches']('密蜜sbesos', '蜜蜜🌱besos'))
-        self.assertFalse(ns['header_matches']("EE'besos", '蜜蜜🌱besos'))
-        self.assertFalse(ns['header_matches']('besos', '蜜蜜🌱besos'))
-        # 两个 besos 不能靠表情尾巴互认。蜜蜜的顶栏不是 🐮🐮。
-        self.assertFalse(ns['header_matches']('密蜜sbesos', '🐮🐮🌱besos'))
-        self.assertFalse(ns['header_matches']("EE'besos", '🐮🐮🌱besos'))
-        self.assertFalse(ns['header_matches']('蜜蜜🌱besos', '🐮🐮🌱besos'))
-        self.assertFalse(ns['header_matches']('besos', '🐮🐮🌱besos'))
-        self.assertTrue(ns['header_matches']('🐮🐮🌱besos', '🐮🐮🌱besos'))
-        self.assertTrue(ns['_header_conflicts']('密蜜sbesos', '🐮🐮🌱besos'))
-        self.assertFalse(ns['_header_conflicts']("EE'besos", '🐮🐮🌱besos'))
-        self.assertTrue(ns['searched_by_wechat_id']('suwanwan2005'))
+        # 切号后顶栏「小乙🌱demo」：原图读成 EE'，放大后读成 小已sdemo。
+        self.assertTrue(ns['header_matches']("EE'demo\n小已sdemo", '小乙🌱demo'))
+        self.assertTrue(ns['header_matches']('小已sdemo', '小乙🌱demo'))
+        self.assertFalse(ns['header_matches']("EE'demo", '小乙🌱demo'))
+        self.assertFalse(ns['header_matches']('demo', '小乙🌱demo'))
+        # 两个 demo 不能靠表情尾巴互认。小乙的顶栏不是 🐮🐮。
+        self.assertFalse(ns['header_matches']('小已sdemo', '🐮🐮🌱demo'))
+        self.assertFalse(ns['header_matches']("EE'demo", '🐮🐮🌱demo'))
+        self.assertFalse(ns['header_matches']('小乙🌱demo', '🐮🐮🌱demo'))
+        self.assertFalse(ns['header_matches']('demo', '🐮🐮🌱demo'))
+        self.assertTrue(ns['header_matches']('🐮🐮🌱demo', '🐮🐮🌱demo'))
+        self.assertTrue(ns['_header_conflicts']('小乙xyz', '🐮🐮🌱demo'))
+        self.assertFalse(ns['_header_conflicts']("EE'demo", '🐮🐮🌱demo'))
+        self.assertTrue(ns['searched_by_wechat_id']('alias2005'))
         self.assertTrue(ns['searched_by_wechat_id']('unique_a'))
-        self.assertTrue(ns['searched_by_wechat_id']('myuwhn'))
+        self.assertTrue(ns['searched_by_wechat_id']('abcdxy'))
         self.assertFalse(ns['searched_by_wechat_id']('二奶'))
         self.assertFalse(ns['searched_by_wechat_id']('same name'))
         self.assertFalse(ns['searched_by_wechat_id']('group@chatroom'))
         self.assertFalse(ns['searched_by_wechat_id']('Limit'))
         self.assertFalse(ns['searched_by_wechat_id']('ABC'))
-        self.assertTrue(ns['searched_by_wechat_id']('wxid143779'))
+        self.assertTrue(ns['searched_by_wechat_id']('aliasdemo1'))
         self.assertFalse(ns['searched_by_wechat_id']('wxid_abc123'))
 
     def test_group_row_ignores_web_results_and_chat_history(self):
@@ -162,23 +162,23 @@ class Legacy(Isolated):
         end = src.index('\ndef search_shows_query')
         ns = {'x': lambda *a, **k: SimpleNamespace(stdout='')}
         exec(compile(src[start:end], 'group_row.py', 'exec'), ns)
-        name = '每天都是修罗场'
+        name = '南风闲话群'
         rows = [
-            (20, '每天都是修罗场'),
-            (52, '失忆后每天都是修罗场txt'),
-            (84, '每天都在修罗场by'),
-            (116, '每天都在修罗场by颜祖'),
+            (20, '南风闲话群'),
+            (52, '失忆后南风闲话群txt'),
+            (84, '每天都在闲话群by'),
+            (116, '每天都在闲话群by作者'),
             (150, '群聊'),
-            (186, '每天都是修罗场'),
+            (186, '南风闲话群'),
             (230, '搜索网络结果'),
-            (270, 'besos'),
+            (270, 'demo'),
         ]
         self.assertEqual(ns['_section_label']('群聊'), 'group')
         self.assertEqual(ns['_section_label']('聊天记录'), 'history')
-        self.assertEqual(ns['_section_label']('每天都是修罗场'), '')
-        self.assertTrue(ns['_name_hits']('每天都是修罗场', name))
-        self.assertFalse(ns['_name_hits']('失忆后每天都是修罗场txt', name))
-        self.assertFalse(ns['_name_hits']('每天都在修罗场by', name))
+        self.assertEqual(ns['_section_label']('南风闲话群'), '')
+        self.assertTrue(ns['_name_hits']('南风闲话群', name))
+        self.assertFalse(ns['_name_hits']('失忆后南风闲话群txt', name))
+        self.assertFalse(ns['_name_hits']('每天都在闲话群by', name))
         # 「群聊」和「搜索网络结果」之间只有一个头像，直接点它。
         panel = Image.new('RGB', (370, 600), (247, 247, 247))
         for y0 in (170,):
@@ -194,9 +194,9 @@ class Legacy(Isolated):
         end = src.index('\ndef search_shows_query')
         ns = {'x': lambda *a, **k: SimpleNamespace(stdout='')}
         exec(compile(src[start:end], 'group_row.py', 'exec'), ns)
-        name = '每天都是修罗场'
+        name = '南风闲话群'
         # 「群聊」被裁出画面。群在最上，下面是网络结果，再下面是单人头像的聊天记录。
-        rows = [(90, name), (180, name), (230, '聊天记录'), (270, 'besos')]
+        rows = [(90, name), (180, name), (230, '聊天记录'), (270, 'demo')]
         panel = Image.new('RGB', (370, 600), (247, 247, 247))
         for y0 in (76, 246):
             for dy in range(36):
@@ -219,15 +219,15 @@ class Legacy(Isolated):
         ns = {'x': lambda *a, **k: SimpleNamespace(stdout='')}
         exec(compile(src[start:end], 'group_row.py', 'exec'), ns)
         # 19:02 真实 OCR：「搜索网络结果」读成「网涅索络结果」，群名也被拆碎。
-        rows = [(48, '群聊'), (88, '旨昌场'), (96, '每天都是修罗'),
-                (136, '网'), (152, '索络结果'), (184, 'Q每天是修罗'), (560, '猫来了小队')]
+        rows = [(48, '群聊'), (88, '旨昌场'), (96, '南风闲话'),
+                (136, '网'), (152, '索络结果'), (184, 'Q每天是闲话'), (560, '猫来了小队')]
         panel = Image.new('RGB', (370, 600), (247, 247, 247))
         for y0 in (86, 564):
             for dy in range(34):
                 for x0 in range(8, 46):
                     panel.putpixel((x0, y0 + dy), (180, 90, 70))
         self.assertEqual(ns['_section_label']('网涅索络结果'), 'web')
-        picked = ns['_group_row_from_rows'](rows, panel, '每天都是修罗场')
+        picked = ns['_group_row_from_rows'](rows, panel, '南风闲话群')
         self.assertGreaterEqual(picked, 86)
         self.assertLess(picked, 136)
 
@@ -239,8 +239,8 @@ class Legacy(Isolated):
         exec(compile(src[start:end], 'group_row.py', 'exec'), ns)
         from PIL import Image
         panel = Image.new('RGB', (370, 200), (247, 247, 247))
-        rows = [(20, '每天都是修罗场'), (52, '失忆后每天都是修罗场txt')]
-        self.assertIsNone(ns['_group_row_from_rows'](rows, panel, '每天都是修罗场'))
+        rows = [(20, '南风闲话群'), (52, '失忆后南风闲话群txt')]
+        self.assertIsNone(ns['_group_row_from_rows'](rows, panel, '南风闲话群'))
 
     def test_group_row_stops_at_the_search_card(self):
         from PIL import Image
@@ -261,8 +261,8 @@ class Legacy(Isolated):
                 panel.putpixel((x0, 86 + dy), (236, 236, 236) if seam else (180, 90, 70))
                 panel.putpixel((x0, 220 + dy), (20, 90, 200))
         # 真实 OCR 会把「群聊」裁掉，群名少最后一个字。
-        rows = [(88, '旨昌场'), (96, '每天都是修罗')]
-        picked = ns['_group_row_from_rows'](rows, panel, '每天都是修罗场')
+        rows = [(88, '旨昌场'), (96, '南风闲话')]
+        picked = ns['_group_row_from_rows'](rows, panel, '南风闲话群')
         self.assertIsNotNone(picked)
         self.assertLess(picked, 150)
 
@@ -289,7 +289,7 @@ class Legacy(Isolated):
 
     def test_internal_wxid_alias_searches_nickname_instead(self):
         # 未设自定义微信号时 alias 是 wxid_xxx，搜索框搜不到，改搜昵称/备注。
-        # wxid143779 这种用户自己设的微信号仍按微信号搜。
+        # aliasdemo1 这种用户自己设的微信号仍按微信号搜。
         with self.contacts([('wxid_foo', 'wxid_foo', '', '某人')]):
             self.assertEqual(sender.search_key('wxid_foo', '某人'), ('某人', '某人'))
             self.assertEqual(sender.search_key('wxid_foo', ''), ('某人', '某人'))
@@ -299,12 +299,13 @@ class Legacy(Isolated):
         self.assertEqual(r['status'], 'submitted')
         self.assertEqual(self.execute.call_args.args[3], '某人')
         self.assertEqual(self.execute.call_args.args[5], '某人')
-        with self.contacts([('wxid_aumumj5e5a7f22', 'wxid143779', '', '飒')]):
-            self.assertEqual(sender.search_key('wxid_aumumj5e5a7f22', '飒'),
-                             ('wxid143779', '飒'))
+        (Path(self.tmp.name) / 'contacts.sqlite3').unlink()
+        with self.contacts([('wxid_friend0001', 'aliasdemo1', '', '小甲')]):
+            self.assertEqual(sender.search_key('wxid_friend0001', '小甲'),
+                             ('aliasdemo1', '小甲'))
         self.assertFalse(sender._searchable_alias('wxid_abc123'))
-        self.assertTrue(sender._searchable_alias('wxid143779'))
-        self.assertTrue(sender._searchable_alias('pian1225'))
+        self.assertTrue(sender._searchable_alias('aliasdemo1'))
+        self.assertTrue(sender._searchable_alias('aliasdemo2'))
 
     def test_image_also_searches_by_wechat_id(self):
         image = Path(self.tmp.name) / 'image.png'; image.write_bytes(b'synthetic')

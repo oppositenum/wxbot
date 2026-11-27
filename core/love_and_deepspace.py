@@ -1,12 +1,15 @@
-"""Love and Deepspace official portrait refs for image generation."""
+"""Official-style portrait refs for image generation.
+
+Folder names are placeholders. They are not a real person's persona.
+"""
 import os
 
 import config
 
-CHARACTERS = ("夏以昼", "沈星回", "祁煜", "秦彻", "黎深")
+CHARACTERS = ("角色甲", "角色乙", "角色丙", "角色丁", "角色戊")
 
 STYLE_PROMPT = (
-    "Strictly match Love and Deepspace (恋与深空) official 3D character art: "
+    "Strictly match the attached official 3D character art: "
     "Unreal-engine photoreal cinematic quality, refined 3D face, subsurface-scattering skin, "
     "visible but not rough pores, individual glossy hair strands with volume, large clear eyes "
     "with catchlights and emotion, handsome clean premium look, not overly feminine, not brutish. "

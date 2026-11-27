@@ -31,7 +31,7 @@ class UiLogin(unittest.TestCase):
         self.client.post("/api/auth/login", json={
             "username": "test-user", "password": "test-password"})
         people = [{"name": "叮", "username": "wxid_a"}]
-        groups = [{"name": "每天都是修罗场", "username": "1@chatroom"}]
+        groups = [{"name": "南风闲话群", "username": "1@chatroom"}]
         with patch.dict(os.environ, {"WXBOT_API_TOKEN": "local-token"}, clear=False), \
              patch("core.contacts.list_contacts", return_value=people), \
              patch("core.contacts.list_groups", return_value=groups):
@@ -42,7 +42,7 @@ class UiLogin(unittest.TestCase):
         self.assertEqual(body["url"], "http://localhost/api/send")
         self.assertEqual(body["targets"], [
             {"kind": "私聊", "to": "叮", "chat": "wxid_a"},
-            {"kind": "群", "to": "每天都是修罗场", "chat": "1@chatroom"},
+            {"kind": "群", "to": "南风闲话群", "chat": "1@chatroom"},
         ])
 
     def test_anonymous_api_is_unauthorized(self):

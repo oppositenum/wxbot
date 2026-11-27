@@ -345,7 +345,7 @@ def _ocr_rows(crop_path):
 
 
 def _section_label(text):
-    """分区标题。文章行里的「修罗场」不能当成「群聊」。"""
+    """分区标题。文章行里的群名碎片不能当成「群聊」。"""
     t = "".join((text or "").split())
     if "群聊" in t and "聊天记录" not in t and len(t) <= 6:
         return "group"
@@ -360,7 +360,7 @@ def _section_label(text):
 
 
 def _name_hits(text, name):
-    """这一行是不是目标群名。相近文章标题（每天都是/都在修罗场）不算。"""
+    """这一行是不是目标群名。相近文章标题不算。"""
     q = "".join((name or "").split())
     t = "".join((text or "").split())
     if not q or not t or len(t) > len(q) + 4:
@@ -496,7 +496,7 @@ def _group_row_from_rows(rows, panel, name):
 def _group_row_y(im, box, crop_path, name=""):
     """返回「群聊」分区里、名字对得上的那一行的屏幕 y。
 
-    搜「每天都是修罗场」时，浮层最上面是四条网络文章，回车打开的是文章。
+    搜群名时，浮层最上面可能是网络文章，回车打开的是文章。
     真正的群在「群聊」标题下面，头像是多人图。再往下的「聊天记录」是私聊，
     不能点。认不出群这一行就返回空，调用方不回车。
     """
@@ -586,7 +586,7 @@ def _shot_paths():
 
 
 def _ocr_title(path):
-    """顶栏字很小，emoji 会把「蜜蜜」读成「EE'」。放大后再认一次，两份结果都参与核对。"""
+    """顶栏字很小，emoji 会把汉字读丢。放大后再认一次，两份结果都参与核对。"""
     reads = []
     r = x("tesseract", path, "stdout", "-l", "chi_sim+eng", "--psm", "7")
     raw = "".join((r.stdout or "").split())
@@ -669,25 +669,25 @@ def _header_one(got, expect):
         return False
     if a == b or b in a:
         return True
-    # 只读出「besos」不能当成整段昵称。
+    # 只读出拉丁尾巴不能当成整段昵称。
     if a in b and len(a) >= max(4, int(len(b) * 0.85)):
         return True
     import difflib
     ratio = difflib.SequenceMatcher(None, a, b).ratio()
-    # ASCII 群名（Limit）必须几乎整词对上，避免和「老婆」糊成同一会话。
+    # 纯英文短群名必须几乎整词对上，避免和另一个短名糊成同一会话。
     if all(ord(c) < 128 for c in b):
         return b.lower() in a.lower() and ratio >= 0.85
     ha, la, _ma = _title_parts(a)
     hb, lb, mb = _title_parts(b)
     if hb:
-        # 「蜜蜜」和「密蜜」算同一顶栏；和「苏苏」不是。
+        # 差一个同音字算同一顶栏；整词换成另一个名字不是。
         if not ha or difflib.SequenceMatcher(None, ha, hb).ratio() < 0.5:
             return False
         if lb and (lb not in la or len(la) > len(lb) + 2):
             return False
         return ratio >= 0.7 and len(a) >= max(4, int(len(b) * 0.75))
     if mb:
-        # 🐮🐮🌱besos 去掉表情只剩 besos。蜜蜜🌱besos、EE'besos 都带这个尾巴，不能靠它放行。
+        # 表情加拉丁尾巴去掉表情只剩尾巴。另一套汉字加同一尾巴，不能靠它放行。
         if ha:
             return False
         return ratio >= 0.85 and len(a) >= int(len(b) * 0.9)
@@ -704,7 +704,7 @@ def _header_conflicts(got, expect):
         if not ha:
             continue
         if not hb:
-            # Expectation was emoji / latin only (e.g. 🐮🐮🌱besos). OCR often
+            # Expectation was emoji / latin only. OCR often
             # invents a stray Chinese glyph such as「这」; that alone is not the
             # wrong chat. Only conflict when the expected latin tail is gone.
             if lb and lb in (la or ""):
@@ -718,8 +718,8 @@ def _header_conflicts(got, expect):
 
 
 def searched_by_wechat_id(name):
-    """可搜索的微信号：ASCII、无空格、至少 6 位。纯英文短名（Limit）是群名，走标题核对。
-    myuwhn 这种没有数字的微信号也要点联系人行，不能靠回车停在当前会话。
+    """可搜索的微信号：ASCII、无空格、至少 6 位。纯英文短名是群名，走标题核对。
+    没有数字的微信号也要点联系人行，不能靠回车停在当前会话。
     wxid_xxx 是内部号，搜索框搜不到，不能当微信号处理。"""
     s = (name or "").strip()
     if not s or " " in s or "@" in s or any(ord(c) >= 128 for c in s):

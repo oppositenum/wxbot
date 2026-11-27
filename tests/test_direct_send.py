@@ -1,6 +1,7 @@
 """直发(实验)模块:不连真微信,用假 frida 验证校验、串行和结果判定。"""
 import os
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -254,3 +255,143 @@ class LenientDbTextTest(unittest.TestCase):
                 con.close()
         self.assertEqual(names[0], "wxid_ok")
         self.assertIn("�", names[1])
+
+
+class DirectSendVideoTest(unittest.TestCase):
+    def test_media_kind_detects_mp4_and_images(self):
+        from core import direct_send
+        self.assertEqual(direct_send.media_kind(b"\x00\x00\x00\x20ftypisom\x00\x00"), "video")
+        self.assertEqual(direct_send.media_kind(b"\x00\x00\x00\x14ftypqt  \x00\x00"), "video")
+        self.assertEqual(direct_send.media_kind(b"\x89PNG\r\n\x1a\n"), "image")
+        self.assertIsNone(direct_send.media_kind(b"hello world....."))
+
+    def test_send_video_passes_size_to_agent(self):
+        from core import direct_send
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "v.mp4")
+            with open(path, "wb") as f:
+                f.write(b"\x00\x00\x00\x20ftypisom" + b"\x00" * 100)
+            calls = []
+
+            class Ex:
+                def send_video(self, chat, p, size):
+                    calls.append((chat, p, size))
+                    return {"ok": True}
+
+            with patch("core.direct_send._dispatch", side_effect=lambda row, call: (call(Ex()), row)[1]):
+                row = direct_send.send_video("filehelper", path)
+            self.assertEqual(calls, [("filehelper", os.path.realpath(path), 112)])
+            self.assertEqual(row["kind"], "video")
+
+    def test_send_video_rejects_non_video(self):
+        from core import direct_send
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "v.mp4")
+            with open(path, "wb") as f:
+                f.write(b"not a video at all")
+            with self.assertRaises(direct_send.DirectSendError) as cm:
+                direct_send.send_video("filehelper", path)
+            self.assertEqual(cm.exception.code, "bad_video")
+
+
+class DirectRevokeTest(unittest.TestCase):
+    ME, PEER = "wxid_me", "wxid_peer"
+
+    def _db(self, d, rows):
+        import hashlib
+        import sqlite3
+        path = os.path.join(d, "m.db")
+        con = sqlite3.connect(path)
+        con.execute("CREATE TABLE Name2Id(user_name TEXT)")
+        con.execute("INSERT INTO Name2Id(rowid, user_name) VALUES (1, ?)", (self.ME,))
+        con.execute("INSERT INTO Name2Id(rowid, user_name) VALUES (2, ?)", (self.PEER,))
+        t = "Msg_" + hashlib.md5(self.PEER.encode()).hexdigest()
+        con.execute(f"CREATE TABLE {t}(local_id INTEGER, server_id INTEGER, local_type INTEGER, sort_seq INTEGER,"
+                    " real_sender_id INTEGER, create_time INTEGER, status INTEGER, message_content TEXT, source TEXT)")
+        for r in rows:
+            con.execute(f"INSERT INTO {t} VALUES (?,?,?,?,?,?,?,?,?)", r)
+        con.commit()
+        con.close()
+        return lambda *_a, **_k: sqlite3.connect(path)
+
+    def _patches(self, connect):
+        return patch("core.db.connect", side_effect=connect), patch("config.wxid", return_value=self.ME)
+
+    def test_finds_my_latest_message_and_skips_peer_and_revoked(self):
+        from core import direct_send
+        now = int(time.time())
+        with tempfile.TemporaryDirectory() as d:
+            conn = self._db(d, [
+                (10, -5, 1, now * 1000, 1, now - 5, 2, "mine", "<s/>"),
+                (11, 7, 1, now * 1000 + 1, 2, now - 3, 3, "theirs", ""),
+                (12, 8, 10000, now * 1000 + 2, 1, now - 1, 4, "revoked", ""),
+            ])
+            a, b = self._patches(conn)
+            with a, b:
+                m = direct_send._find_my_message(self.PEER)
+        self.assertEqual((m["localId"], m["content"], m["sender"]), (10, "mine", self.ME))
+        self.assertEqual(m["serverId"], str((-5) & 0xFFFFFFFFFFFFFFFF))   # 负数 server_id 按 u64 传
+
+    def test_rejects_peer_message_and_old_message(self):
+        from core import direct_send
+        now = int(time.time())
+        with tempfile.TemporaryDirectory() as d:
+            conn = self._db(d, [(11, 7, 1, 1, 2, now, 3, "theirs", ""), (10, 6, 1, 0, 1, now - 600, 2, "old", "")])
+            a, b = self._patches(conn)
+            with a, b:
+                with self.assertRaises(direct_send.DirectSendError) as cm:
+                    direct_send._find_my_message(self.PEER, 11)
+                self.assertEqual(cm.exception.code, "not_mine")
+                with self.assertRaises(direct_send.DirectSendError) as cm:
+                    direct_send.revoke(self.PEER, 10)
+                self.assertEqual(cm.exception.code, "too_old")
+
+    def test_filehelper_cannot_revoke(self):
+        from core import direct_send
+        with self.assertRaises(direct_send.DirectSendError) as cm:
+            direct_send.revoke("filehelper")
+        self.assertEqual(cm.exception.code, "bad_chat")
+
+    def test_revoke_reports_wechat_refusal(self):
+        from core import direct_send
+        now = int(time.time())
+        with tempfile.TemporaryDirectory() as d:
+            conn = self._db(d, [(10, 6, 1, 0, 1, now, 2, "x", "")])
+            a, b = self._patches(conn)
+
+            class Script:
+                class exports_sync:
+                    @staticmethod
+                    def revoke(msg):
+                        return {"ok": True}
+
+                    @staticmethod
+                    def poll():
+                        return {"step": 9, "result": 0}
+
+            with a, b, patch("core.direct_send._ensure_script", return_value=Script), \
+                    patch("core.direct_send._record"):
+                with self.assertRaises(direct_send.DirectSendError) as cm:
+                    direct_send.revoke(self.PEER)
+        self.assertEqual(cm.exception.code, "revoke_failed")
+
+
+class DirectRevokeRouteTest(unittest.TestCase):
+    def setUp(self):
+        self.env = patch.dict(os.environ, {
+            "WXBOT_UI_AUTH": "1", "WXBOT_UI_USER": "u", "WXBOT_UI_PASSWORD": "p",
+            "WXBOT_SECRET": "s", "WXBOT_API_TOKEN": "api-token"}, clear=False)
+        self.env.start()
+        import server
+        server.app.config["TESTING"] = True
+        self.client = server.app.test_client()
+
+    def tearDown(self):
+        self.env.stop()
+
+    def test_token_allowed_and_local_id_parsed(self):
+        self.assertEqual(self.client.post("/api/direct/revoke", json={"chat": "a"}).status_code, 401)
+        with patch("core.direct_send.revoke", return_value={"ok": True}) as rv:
+            r = self.client.post("/api/direct/revoke", json={"token": "api-token", "chat": "wxid_a", "local_id": "12"})
+        self.assertEqual(r.status_code, 200)
+        rv.assert_called_once_with("wxid_a", 12, "", source="manual")

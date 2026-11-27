@@ -46,6 +46,10 @@
 | `operator new` | `0x7d7e420` | 微信自带分配器，必须用它分配 Req 的内存 |
 | 文字 Req 构造（make_shared） | `0x39deee4` | 控制块 0x18 + 对象 0x410 = **0x428**，对象在 `blk+0x18`，vtable `0x7e1b790` |
 | 图片 Req 构造（make_shared） | `0x39dee1c` | 0x18 + 0x450 = **0x468**，vtable `0x7e07a18` |
+| 视频 Req 构造 | `0x40f95f8` | 只构造对象(0x410)。微信在工厂 `0x4225c84` 里内联 make_shared:`operator new(0x428)`,块头 vptr=`*(B+0x80e5430)+0x10`,两个计数清零,对象 memset 0 后调此函数;vtable `0x7e8bfb8` |
+| 撤回服务定位第 3 步 | `0x4bbe8bc` | `(b)`,x8 返回 shared_ptr,vtable `0x7f4b030`(前两步同 A/B) |
+| `Revoke` | `0x5081554` | `(x8=结果{u8 ok; string 提示}, x0=撤回服务, x1=const 消息行&)`,见 3.10 |
+| `GetMsgByLocalId` | `0x4bc9fe4` | `(x8=输出{Msg; bool@+0x1f8}, x0=svcC, x1=&会话, w2=local_id, w3=create_time)` |
 | `std::string` 拷贝赋值 | `0x3639df8` | libc++ `operator=(const string&)` |
 | `co_launch` | `0x49bf7bc` | `(x0=执行器, x1=位置信息, x2=&std::function, w3=1)`，x8 返回协程句柄 |
 | 应用上下文全局量 | `0x82bb2a8` | `*(B+0x82bb2a8)+0x290` = 业务执行器；执行器 `+0x10` 为 0 表示还没登录完 |
@@ -59,8 +63,9 @@
 | `+0x6c` | u32 | 1 | 1 |
 | `+0x70` | u32 | 7 | 7 |
 | `+0x78` | std::string | 收件人 wxid / `xxx@chatroom` / `filehelper` | 同左 |
-| `+0x94` | u32 | 1（文字） | 3（图片） |
-| `+0xa0` | std::string | — | 本地图片路径（微信用户可读） |
+| `+0x94` | u32 | 1（文字） | 3（图片）/ 43（视频） |
+| `+0xa0` | std::string | — | 本地图片/视频路径（微信用户可读） |
+| `+0x3e0` | u8 | （正文 string 起点） | 视频:界面发送时为 1(工厂里 `0x4f1c540(path)&1`) |
 | `+0xe8` | u32 | 正文 UTF-8 字节数 | 文件字节数 |
 | `+0x3c8` | std::string | 构造函数自动生成的 UUID（客户端消息 id） | 同左 |
 | `+0x3e0` | std::string | 正文 | — |
@@ -200,6 +205,43 @@ Ghidra 全量分析 130MB 约 45 分钟（8 核，10G 内存），`PreFast.java`
 原因：SendMessage 经 x8 返回的对象，对图片来说是**异步上传任务**，要一直存活到 CDN 上传结束。最初所有发送共用同一块返回值缓冲区，第二次发送把第一张图还在运行的任务覆盖了。
 
 修复：每次发送单独分配一块缓冲区（服务定位结果 + SendMessage 返回值），并保留引用（`hold()`，保留最近 256 次）。修复后同一会话背靠背连发 3 张，全部成功。
+
+### 3.9 加视频（2026-11-28）
+
+1. 挂 `hook_sendmessage.js`(size 0x600),往文件传输助手的输入框粘贴 mp4(`xclip -t text/uri-list` 写 `file:///…`,再 Ctrl+V),点发送。视频**同样走 `0x4baee74`**,Req vtable `0x7e8bfb8`,`+0x94=0x2b(43)`,`+0xa0` 路径,`+0xe8` 文件大小,`+0x3e0` 字节为 1。
+2. `vtowner.py 0x7e8bfb8` 找到构造 `0x40f95f8`(只构造对象,不分配)。它的调用者 `0x4225c84` 是微信"按路径建媒体请求"的工厂:图片(0x468,type 3)/视频(0x428,type 43)/其它文件(0x3f8,构造 `0x40f97dc`)三支,视频支是内联 make_shared,agent 照抄(见 1.2 表)。
+3. agent `dryBuild` 构造后和界面发的逐字段比,只有指针和短串尾巴不同。直发 3 条,消息库 `local_type=43, status=2`。
+
+### 3.10 撤回（2026-11-28 打通）
+
+**调用链**(界面右键「撤回」= lambda `0x54338a4`,vtable `0x7f6ac50` 槽 6):
+`svcA(0x483104c) → svcB(0x4950c40) → 0x4bbe8bc`(x8 返回撤回服务,vt `0x7f4b030`)→ `Revoke 0x5081554(x8=结果, x0=撤回服务, x1=const 消息行&)`,须在协程里调。结果 `{u8 ok; std::string 错误提示}`,失败时提示是"无法撤回该消息，请重试。"。
+
+**消息行**(0x268 纯数据结构,拷贝构造 `0x37e66e8`,全零即合法空对象):
+
+| 偏移 | 内容 | 来源 |
+| --- | --- | --- |
+| `+0x0` | u32 类型 | 库 local_type |
+| `+0x8` / `+0x38` | string 发送者(自己 wxid) | config.wxid() |
+| `+0x20` / `+0x50` | string 会话 | 参数 |
+| `+0x6c` | u32 local_id | 库 |
+| `+0x70` `+0x78` `+0x80` `+0x84` | server_id / sort_seq / create_time / status | Msg 实时值覆盖 |
+| `+0x90` `+0xa8` | string 正文 / msgsource | 库(可空) |
+| `+0x1b0` `+0x1c0` | shared_ptr(会话/联系人类对象) | 取自 Msg `+0x1a0` / `+0x1b0`,拷贝时引用计数 +1 |
+| `+0x1d0` | u8 是否我发的(界面为 `0x0101`) | **必须非 0**,首道校验 `0x4f1aa4c` 看它 |
+| `+0x1d8` | shared_ptr<Msg>(vt `0x7f03780`) | 指向我们的 Msg 缓冲,假控制块计数 0x40000000 永不释放 |
+
+**拿 Msg**:`GetMsgByLocalId 0x4bc9fe4(x8=输出{Msg 0x1f8; bool 找到@+0x1f8}, x0=消息服务(就是 SendMessage 用的 svcC), x1=&会话 string, w2=local_id, w3=create_time)`。**w3 不能省**:消息库按时间分片,靠它选库,给 0 会返回"找不到"。另有 `0x4bc0d44` 按 server_id 查,同形。
+
+**踩过的坑**(按顺序):
+1. 行全零 + 只填库字段 → 首道校验 `0x4f1aa4c` 返回 0(`+0x1d0` 是"我发的"标志)。
+2. 补了标志位 → 进组包 `0x5083d40` 后崩在 `0x4f17a40`(读 `+0x1c0` 的 shared_ptr 为空,minidump pc 在 wechat 里)。
+3. 用 GetMsgByLocalId 补齐 shared_ptr,w3 给了 0 → 找不到;改传 create_time 后成功。
+4. 解密库同步有约 10 秒延迟,刚发的消息在库里 status=1、server_id 未更新 → agent 在加载 Msg 后用 Msg 的实时值覆盖(`+0x98` svrid、`+0xa0` sort_seq、`+0xb4` 时间、`+0xb8` 状态)。
+
+**验证**:文字、视频、同一 Frida 会话连撤 2 条、HTTP 接口各测一次,库里都变 `local_type=10000`,微信不崩。文件传输助手没有撤回(界面也没有该菜单),代码直接拒绝。
+
+**接口**:`core/direct_send.revoke(chat, local_id=None)`(不传 local_id = 该会话我最近发的一条;只撤自己发的、2 分钟内);`POST /api/direct/revoke`(后台登录或 API token);直发页「撤回上一条」按钮。抓参数用 `tools/wechat_re/frida/hook_args.js`。
 
 ---
 

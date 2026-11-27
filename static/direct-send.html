@@ -60,7 +60,7 @@ button.primary{background:#23815a;color:#fff;border-color:#23815a}button:disable
       <div class="target" id="target"><span class="muted">先在左边选一个好友或群</span></div>
       <textarea id="content" placeholder="输入要发送的文字，可直接粘贴截图（Ctrl/⌘ + Enter 发送）" maxlength="2000"></textarea>
       <div class="preview" id="preview"><img id="pimg" alt=""><span class="fn" id="pname"></span><button type="button" id="premove">移除</button></div>
-      <div class="actions"><button class="primary" id="send" disabled>发送</button><button type="button" id="pick">选择图片</button><input type="file" id="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden><span id="result"></span></div>
+      <div class="actions"><button class="primary" id="send" disabled>发送</button><button type="button" id="pick">选择图片/视频</button><button type="button" id="revoke" disabled title="撤回我在这个会话里最近发的一条(2 分钟内)">撤回上一条</button><input type="file" id="file" accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/quicktime" hidden><span id="result"></span></div>
     </div>
     <div class="card" style="margin-top:18px">
       <h2>发送记录</h2>
@@ -86,13 +86,14 @@ async function loadStatus(){
   $('#status').innerHTML=p.join('');
   ready=!!(d.attached&&d.logged_in);upd();
 }
-function upd(){$('#send').disabled=!(ready&&sel&&!sending&&($('#content').value.trim()||image));}
+function upd(){$('#send').disabled=!(ready&&sel&&!sending&&($('#content').value.trim()||image));$('#revoke').disabled=!(ready&&sel&&!sending);}
 function setImage(f){
-  if(f&&!/^image\/(png|jpeg|gif|webp)$/.test(f.type)){$('#result').className='bad';$('#result').textContent='✗ 只支持 PNG / JPG / GIF / WEBP';return;}
-  if(f&&f.size>20*1024*1024){$('#result').className='bad';$('#result').textContent='✗ 图片超过 20MB';return;}
+  const vid=!!f&&/^video\/(mp4|quicktime)$/.test(f.type);
+  if(f&&!vid&&!/^image\/(png|jpeg|gif|webp)$/.test(f.type)){$('#result').className='bad';$('#result').textContent='✗ 只支持 PNG / JPG / GIF / WEBP 图片或 MP4 / MOV 视频';return;}
+  if(f&&f.size>(vid?25:20)*1024*1024){$('#result').className='bad';$('#result').textContent=vid?'✗ 视频超过 25MB':'✗ 图片超过 20MB';return;}
   if($('#pimg').src)URL.revokeObjectURL($('#pimg').src);
   image=f||null;
-  if(image){$('#pimg').src=URL.createObjectURL(image);$('#pname').textContent=(image.name||'粘贴的图片')+' · '+Math.ceil(image.size/1024)+' KB';$('#preview').style.display='flex';}
+  if(image){if(vid)$('#pimg').removeAttribute('src');else $('#pimg').src=URL.createObjectURL(image);$('#pname').textContent=(vid?'🎬 ':'')+(image.name||'粘贴的图片')+' · '+Math.ceil(image.size/1024)+' KB';$('#preview').style.display='flex';}
   else{$('#pimg').removeAttribute('src');$('#preview').style.display='none';$('#file').value='';}
   upd();
 }
@@ -110,7 +111,7 @@ function fmt(t){const d=new Date(t*1000);return d.toLocaleString('zh-CN',{hour12
 async function loadHistory(){
   const [r,d]=await j('/api/direct/history');
   const h=(r.ok&&d.history)||[];
-  $('#history').innerHTML=h.length?h.map(x=>`<div class="hist"><div class="meta"><span>${fmt(x.t)}</span>${x.source==='bot'?'<span class="bot">🤖 机器人</span>':''}<span>${esc(x.name||x.chat)}</span><span style="color:${x.ok?'#1d7a50':'#a33232'}">${x.ok?'✓ 已交给微信':'✗ '+esc(x.error||'失败')}</span></div><div class="text">${x.kind==='image'?'🖼️ 图片 · ':''}${esc(x.content)}</div></div>`).join(''):'<p class="empty">还没有记录</p>';
+  $('#history').innerHTML=h.length?h.map(x=>`<div class="hist"><div class="meta"><span>${fmt(x.t)}</span>${x.source==='bot'?'<span class="bot">🤖 机器人</span>':''}<span>${esc(x.name||x.chat)}</span><span style="color:${x.ok?'#1d7a50':'#a33232'}">${x.ok?(x.kind==='revoke'?'✓ 已撤回':'✓ 已交给微信'):'✗ '+esc(x.error||'失败')}</span></div><div class="text">${x.kind==='image'?'🖼️ 图片 · ':x.kind==='video'?'🎬 视频 · ':x.kind==='revoke'?'↩️ 撤回 · ':''}${esc(x.content)}</div></div>`).join(''):'<p class="empty">还没有记录</p>';
 }
 async function post(url,body){
   const opt={method:'POST'};
@@ -127,7 +128,7 @@ async function doSend(){
   try{
     if(img){
       const fd=new FormData();fd.append('chat',target.chat);fd.append('name',target.to);fd.append('file',img,img.name||'paste.png');
-      await post('/api/direct/send_image',fd);done.push('图片');setImage(null);
+      await post('/api/direct/send_image',fd);done.push(img.type.startsWith('video/')?'视频':'图片');setImage(null);
     }
     if(content.trim()){
       await post('/api/direct/send',{chat:target.chat,name:target.to,content});done.push('文字');$('#content').value='';
@@ -139,6 +140,15 @@ async function doSend(){
   sending=false;upd();loadHistory();loadStatus();
 }
 $('#pick').onclick=()=>$('#file').click();
+$('#revoke').onclick=async()=>{
+  if($('#revoke').disabled)return;
+  const target=sel;
+  if(!confirm('撤回我发给「'+(target.to||target.chat)+'」的最近一条消息？只能撤 2 分钟内的。'))return;
+  sending=true;upd();$('#result').className='';$('#result').textContent='撤回中…';
+  try{await post('/api/direct/revoke',{chat:target.chat,name:target.to});$('#result').className='ok';$('#result').textContent='✓ 已撤回';}
+  catch(e){$('#result').className='bad';$('#result').textContent='✗ '+(e.message||'网络错误');}
+  sending=false;upd();loadHistory();
+};
 $('#file').onchange=e=>setImage(e.target.files[0]);
 $('#premove').onclick=()=>setImage(null);
 $('#content').addEventListener('paste',e=>{

@@ -73,7 +73,7 @@ def _ui_activity_request():
 
 _API_TOKEN_PATHS = frozenset({
     "/api/send", "/api/send/status", "/api/upload",
-    "/api/bot/push", "/api/bot/push/test",
+    "/api/bot/push", "/api/bot/push/test", "/api/direct/revoke",
 })
 
 
@@ -1557,7 +1557,7 @@ def api_send_mode_set():
 
 @app.post("/api/direct/send_image")
 def api_direct_send_image():
-    """实验直发图片。表单 file=图片;或 JSON path=/api/upload 返回的路径(仅限 work 下上传目录)。"""
+    """实验直发图片或视频(按文件头自动判断)。表单 file=文件;或 JSON path=/api/upload 返回的路径(仅限 work 下上传目录)。"""
     from core import direct_send
     try:
         f = request.files.get("file")
@@ -1565,7 +1565,7 @@ def api_direct_send_image():
             form = request.form
             chat, name = form.get("chat"), form.get("name") or ""
             label = os.path.basename(f.filename or "") or "图片"
-            path = direct_send.stage_image(f.read(), label)
+            kind, path = direct_send.stage_media(f.read(), label)
         else:
             data = request.get_json(silent=True) or {}
             chat, name = data.get("chat"), data.get("name") or ""
@@ -1575,7 +1575,32 @@ def api_direct_send_image():
             if not any(path.startswith(a) for a in allowed):
                 raise direct_send.DirectSendError("bad_path", "path 只能是 /api/upload 返回的路径")
             label = os.path.basename(path)
-        row = direct_send.send_image(chat, path, name, label)
+            kind = None
+        if kind == "video":
+            row = direct_send.send_video(chat, path, name, label)
+        elif kind == "image":
+            row = direct_send.send_image(chat, path, name, label)
+        else:
+            row = direct_send.send_media(chat, path, name, label)
+    except direct_send.DirectSendError as e:
+        return jsonify(ok=False, code=e.code, error=e.message), 409
+    return jsonify(row)
+
+
+@app.post("/api/direct/revoke")
+def api_direct_revoke():
+    """撤回我发的消息(底层直调,2 分钟内)。JSON:chat=wxid/群号,local_id 可选(不填=该会话我最近发的一条)。"""
+    from core import direct_send
+    data = request.get_json(silent=True) or {}
+    lid = data.get("local_id")
+    try:
+        if lid not in (None, ""):
+            try:
+                lid = int(lid)
+            except (TypeError, ValueError):
+                raise direct_send.DirectSendError("not_found", "local_id 必须是整数")
+        row = direct_send.revoke(data.get("chat"), lid if lid not in (None, "") else None,
+                                 data.get("name") or "", source=data.get("source") or "manual")
     except direct_send.DirectSendError as e:
         return jsonify(ok=False, code=e.code, error=e.message), 409
     return jsonify(row)

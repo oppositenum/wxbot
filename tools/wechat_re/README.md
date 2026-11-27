@@ -10,6 +10,6 @@
 | `fnstart.py` | 指令 → 函数入口(启发式) |
 | `mdparse.py` | 解析微信 crashpad minidump |
 | `ghidra/` | headless 全量分析与按地址查询(反编译/调用者/被调用者) |
-| `frida/` | 在 SendMessage 入口拷请求对象、两条请求逐字段对比 |
+| `frida/` | 在 SendMessage 入口拷请求对象、两条请求逐字段对比;`hook_args.js` 拷任意函数入口的 x0~x2 指向内容 |
 
 二进制路径:`--bin` 或环境变量 `WECHAT_BIN`。地址一律是模块内偏移(Ghidra 里要加 0x100000)。

@@ -2,7 +2,7 @@
 
 后台地址默认为 `http://127.0.0.1:5100`。接口支持向好友或群发送文字、图片。
 
-本机调用带请求头 `X-Wxbot-Token: $WXBOT_API_TOKEN`，或在 JSON 里加 `"token": "$WXBOT_API_TOKEN"`，不必先登录网页。这个凭据只放行 `/api/send`、`/api/send/status`、`/api/upload`、`/api/bot/push` 和 `/api/bot/push/test`。其余后台接口仍要网页登录。未设置 `WXBOT_API_TOKEN` 时，请求头和 body 里的 token 都无效。
+本机调用带请求头 `X-Wxbot-Token: $WXBOT_API_TOKEN`，或在 JSON 里加 `"token": "$WXBOT_API_TOKEN"`，不必先登录网页。这个凭据只放行 `/api/send`、`/api/send/status`、`/api/upload`、`/api/bot/push`、`/api/bot/push/test` 和 `/api/direct/revoke`。其余后台接口仍要网页登录。未设置 `WXBOT_API_TOKEN` 时，请求头和 body 里的 token 都无效。
 
 ## 发送文字或图片
 
@@ -71,6 +71,19 @@ curl -X POST http://127.0.0.1:5100/api/send \
 ```json
 {"to":"小明","chat":"wxid_xxx","type":"text","content":"现在发送","sync":true}
 ```
+
+## 撤回
+
+`POST /api/direct/revoke` 撤回机器人账号自己发出的消息，直接调用微信底层撤回，不经过界面：
+
+```json
+{"token":"…","chat":"wxid_xxx 或 xxx@chatroom","local_id":528}
+```
+
+- `local_id` 可省略，省略时撤回该会话里我最近发的一条。
+- 只能撤自己发的、2 分钟内的消息；文件传输助手不支持撤回。
+- 成功返回 HTTP 200 和 `{"ok":true,"kind":"revoke","local_id":…,"message":"已撤回"}`。
+- 失败返回 HTTP 409，`code` 可能是 `too_old`（超过 2 分钟）、`not_mine`（不是自己发的）、`already_revoked`、`not_found`（库里还没有这条，稍后再试）、`revoke_failed`（微信拒绝）、`unsupported`（微信版本未适配）。
 
 ## 错误
 

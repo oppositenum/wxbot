@@ -9,6 +9,7 @@
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -30,7 +31,7 @@ WAIT_SECONDS = 8.0
 NOT_SENT_CODES = frozenset({
     "no_frida", "no_wechat", "unsupported", "not_running", "attach_failed", "agent_error",
     "not_logged_in", "request_mismatch", "bad_chat", "empty", "too_long", "no_file",
-    "bad_image", "bad_video", "too_large", "step_failed",
+    "bad_image", "bad_video", "bad_audio", "no_ffmpeg", "convert_failed", "too_large", "step_failed",
     "not_found", "not_mine", "not_sent_ok", "too_old", "already_revoked",
 })
 
@@ -212,9 +213,31 @@ def _video_ext(head):
     return ".mov" if head[8:10] == b"qt" else ".mp4"
 
 
+def _audio_ext(head):
+    """常见音频的文件头。微信自己的 SILK 语音 ffmpeg 解不了,单独报错。"""
+    if head[4:8] == b"ftyp" and head[8:11] in (b"M4A", b"M4B"):
+        return ".m4a"
+    if head[:3] == b"ID3" or (len(head) > 1 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0):
+        return ".mp3"
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return ".wav"
+    for magic, ext in ((b"OggS", ".ogg"), (b"fLaC", ".flac"), (b"#!AMR", ".amr")):
+        if head.startswith(magic):
+            return ext
+    return None
+
+
+def _is_silk(head):
+    return head.startswith(b"#!SILK") or head.startswith(b"\x02#!SILK")
+
+
 def media_kind(head):
-    """按文件头判断 'image' / 'video' / None。"""
-    return "image" if _image_ext(head) else "video" if _video_ext(head) else None
+    """按文件头判断 'image' / 'audio' / 'video' / None。m4a 也是 ftyp,先判音频。"""
+    if _image_ext(head):
+        return "image"
+    if _audio_ext(head):
+        return "audio"
+    return "video" if _video_ext(head) else None
 
 
 def stage_video(data, filename=""):
@@ -233,10 +256,59 @@ def stage_video(data, filename=""):
     return path
 
 
+MAX_AUDIO_BYTES = 20 * 1024 * 1024
+MAX_AUDIO_SECONDS = 300
+FFMPEG = os.environ.get("WXBOT_FFMPEG", "ffmpeg")
+
+
+def audio_to_video(src, dst):
+    """音频 → 「深绿底 + 绿色声波」的 mp4(Linux 版微信发不了语音条,用视频代替)。
+
+    声波随声音动;首帧是纯色卡片,对方看到的封面不会是黑屏。超过 5 分钟截断。"""
+    graph = ("color=c=0x1e2a23:s=640x360:r=15[bg];"
+             "[0:a]showwaves=s=640x360:mode=cline:rate=15:colors=0x07C160,format=rgba[w];"
+             "[bg][w]overlay=shortest=1,format=yuv420p[v]")
+    cmd = [FFMPEG, "-nostdin", "-y", "-loglevel", "error", "-i", src, "-t", str(MAX_AUDIO_SECONDS),
+           "-filter_complex", graph, "-map", "[v]", "-map", "0:a:0",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
+           "-c:a", "aac", "-b:a", "96k", "-ar", "44100", "-movflags", "+faststart", "-shortest", dst]
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=180)
+    except FileNotFoundError:
+        raise DirectSendError("no_ffmpeg", "容器里没有 ffmpeg,发不了语音")
+    except subprocess.TimeoutExpired:
+        raise DirectSendError("convert_failed", "音频转视频超时")
+    if r.returncode != 0 or not os.path.isfile(dst) or not os.path.getsize(dst):
+        err = (r.stderr or b"").decode("utf-8", "ignore").strip().splitlines()
+        raise DirectSendError("convert_failed", "音频转视频失败:" + (err[-1] if err else f"rc={r.returncode}"))
+    return dst
+
+
+def stage_audio(data, filename=""):
+    """存音频并转成 mp4,返回 mp4 路径(原音频一起留在 direct_media)。"""
+    if not data:
+        raise DirectSendError("empty", "音频是空的")
+    if len(data) > MAX_AUDIO_BYTES:
+        raise DirectSendError("too_large", "音频超过 20MB")
+    if _is_silk(data[:16]):
+        raise DirectSendError("bad_audio", "微信 SILK 语音不能直接发,请先转成 mp3/m4a/wav")
+    ext = _audio_ext(data[:16])
+    if not ext:
+        raise DirectSendError("bad_audio", "只支持 MP3 / M4A / WAV / OGG / FLAC / AMR 音频")
+    os.makedirs(MEDIA_DIR, exist_ok=True)
+    base = os.path.join(MEDIA_DIR, f"{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(4).hex()}")
+    with open(base + ext, "wb") as f:
+        f.write(data)
+    return audio_to_video(base + ext, base + ".voice.mp4")
+
+
 def stage_media(data, filename=""):
-    """图片或视频都行,返回 (kind, path)。"""
-    if media_kind(data[:16]) == "video":
+    """图片、视频、音频都行,返回 (kind, path);音频返回 ('voice', 转好的 mp4)。"""
+    kind = media_kind(data[:16])
+    if kind == "video":
         return "video", stage_video(data, filename)
+    if kind == "audio" or _is_silk(data[:16]):
+        return "voice", stage_audio(data, filename)
     return "image", stage_image(data, filename)
 
 
@@ -364,8 +436,24 @@ def send_media(chat, path, name="", label="", source="manual"):
             head = f.read(16)
     except OSError:
         raise DirectSendError("no_file", "文件不存在")
-    fn = send_video if media_kind(head) == "video" else send_image
+    kind = media_kind(head)
+    fn = send_voice if kind == "audio" else send_video if kind == "video" else send_image
     return fn(chat, path, name, label, source)
+
+
+def send_voice(chat, path, name="", label="", source="manual"):
+    """发"语音":Linux 版微信不能发语音条,把音频转成带声波画面的视频发出去。
+
+    path 可以是音频文件,也可以是 stage_audio 已转好的 .voice.mp4。"""
+    path = os.path.realpath(path or "")
+    if not os.path.isfile(path):
+        raise DirectSendError("no_file", "音频不存在")
+    with open(path, "rb") as f:
+        head = f.read(16)
+    if media_kind(head) == "audio" or _is_silk(head):
+        with open(path, "rb") as f:
+            path = stage_audio(f.read(), os.path.basename(path))
+    return send_video(chat, path, name, label or ("语音 · " + os.path.basename(path)), source)
 
 
 def _find_my_message(chat, local_id=None):

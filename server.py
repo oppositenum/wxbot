@@ -1557,7 +1557,7 @@ def api_send_mode_set():
 
 @app.post("/api/direct/send_image")
 def api_direct_send_image():
-    """实验直发图片或视频(按文件头自动判断)。表单 file=文件;或 JSON path=/api/upload 返回的路径(仅限 work 下上传目录)。"""
+    """实验直发图片、视频或音频(按文件头自动判断;音频转成带声波画面的视频)。表单 file=文件;或 JSON path=/api/upload 返回的路径(仅限 work 下上传目录)。"""
     from core import direct_send
     try:
         f = request.files.get("file")
@@ -1576,8 +1576,8 @@ def api_direct_send_image():
                 raise direct_send.DirectSendError("bad_path", "path 只能是 /api/upload 返回的路径")
             label = os.path.basename(path)
             kind = None
-        if kind == "video":
-            row = direct_send.send_video(chat, path, name, label)
+        if kind in ("video", "voice"):
+            row = direct_send.send_video(chat, path, name, ("语音 · " if kind == "voice" else "") + label)
         elif kind == "image":
             row = direct_send.send_image(chat, path, name, label)
         else:

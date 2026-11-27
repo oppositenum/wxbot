@@ -30,7 +30,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl locales tzdata \
         dbus-x11 dbus-user-session xvfb x11vnc novnc websockify \
-        xfce4 xfce4-terminal thunar pulseaudio \
+        xfce4 xfce4-terminal thunar pulseaudio ffmpeg \
         fcitx5 fcitx5-chinese-addons fcitx5-frontend-gtk3 \
         fonts-noto-cjk fonts-noto-color-emoji \
         libatomic1 libpulse0 libasound2t64 libnss3 libgbm1 \

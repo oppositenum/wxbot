@@ -60,7 +60,7 @@ button.primary{background:#23815a;color:#fff;border-color:#23815a}button:disable
       <div class="target" id="target"><span class="muted">先在左边选一个好友或群</span></div>
       <textarea id="content" placeholder="输入要发送的文字，可直接粘贴截图（Ctrl/⌘ + Enter 发送）" maxlength="2000"></textarea>
       <div class="preview" id="preview"><img id="pimg" alt=""><span class="fn" id="pname"></span><button type="button" id="premove">移除</button></div>
-      <div class="actions"><button class="primary" id="send" disabled>发送</button><button type="button" id="pick">选择图片/视频</button><button type="button" id="revoke" disabled title="撤回我在这个会话里最近发的一条(2 分钟内)">撤回上一条</button><input type="file" id="file" accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/quicktime" hidden><span id="result"></span></div>
+      <div class="actions"><button class="primary" id="send" disabled>发送</button><button type="button" id="pick" title="音频会转成带声波画面的视频发出(Linux 版微信发不了语音条)">选择图片/视频/音频</button><button type="button" id="revoke" disabled title="撤回我在这个会话里最近发的一条(2 分钟内)">撤回上一条</button><input type="file" id="file" accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/quicktime,audio/*,.mp3,.m4a,.wav,.ogg,.flac,.amr" hidden><span id="result"></span></div>
     </div>
     <div class="card" style="margin-top:18px">
       <h2>发送记录</h2>
@@ -89,11 +89,12 @@ async function loadStatus(){
 function upd(){$('#send').disabled=!(ready&&sel&&!sending&&($('#content').value.trim()||image));$('#revoke').disabled=!(ready&&sel&&!sending);}
 function setImage(f){
   const vid=!!f&&/^video\/(mp4|quicktime)$/.test(f.type);
-  if(f&&!vid&&!/^image\/(png|jpeg|gif|webp)$/.test(f.type)){$('#result').className='bad';$('#result').textContent='✗ 只支持 PNG / JPG / GIF / WEBP 图片或 MP4 / MOV 视频';return;}
-  if(f&&f.size>(vid?25:20)*1024*1024){$('#result').className='bad';$('#result').textContent=vid?'✗ 视频超过 25MB':'✗ 图片超过 20MB';return;}
+  const aud=!!f&&(/^audio\//.test(f.type)||/\.(mp3|m4a|wav|ogg|flac|amr)$/i.test(f.name||''));
+  if(f&&!vid&&!aud&&!/^image\/(png|jpeg|gif|webp)$/.test(f.type)){$('#result').className='bad';$('#result').textContent='✗ 只支持图片、MP4/MOV 视频或 MP3/M4A/WAV 等音频';return;}
+  if(f&&f.size>(vid?25:20)*1024*1024){$('#result').className='bad';$('#result').textContent=vid?'✗ 视频超过 25MB':'✗ 文件超过 20MB';return;}
   if($('#pimg').src)URL.revokeObjectURL($('#pimg').src);
   image=f||null;
-  if(image){if(vid)$('#pimg').removeAttribute('src');else $('#pimg').src=URL.createObjectURL(image);$('#pname').textContent=(vid?'🎬 ':'')+(image.name||'粘贴的图片')+' · '+Math.ceil(image.size/1024)+' KB';$('#preview').style.display='flex';}
+  if(image){if(vid||aud)$('#pimg').removeAttribute('src');else $('#pimg').src=URL.createObjectURL(image);$('#pname').textContent=(vid?'🎬 ':aud?'🔊 ':'')+(image.name||'粘贴的图片')+' · '+Math.ceil(image.size/1024)+' KB';$('#preview').style.display='flex';}
   else{$('#pimg').removeAttribute('src');$('#preview').style.display='none';$('#file').value='';}
   upd();
 }
@@ -128,7 +129,7 @@ async function doSend(){
   try{
     if(img){
       const fd=new FormData();fd.append('chat',target.chat);fd.append('name',target.to);fd.append('file',img,img.name||'paste.png');
-      await post('/api/direct/send_image',fd);done.push(img.type.startsWith('video/')?'视频':'图片');setImage(null);
+      await post('/api/direct/send_image',fd);done.push(img.type.startsWith('video/')?'视频':(img.type.startsWith('audio/')||/\.(mp3|m4a|wav|ogg|flac|amr)$/i.test(img.name||''))?'语音':'图片');setImage(null);
     }
     if(content.trim()){
       await post('/api/direct/send',{chat:target.chat,name:target.to,content});done.push('文字');$('#content').value='';

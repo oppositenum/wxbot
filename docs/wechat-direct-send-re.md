@@ -243,6 +243,12 @@ Ghidra 全量分析 130MB 约 45 分钟（8 核，10G 内存），`PreFast.java`
 
 **接口**:`core/direct_send.revoke(chat, local_id=None)`(不传 local_id = 该会话我最近发的一条;只撤自己发的、2 分钟内);`POST /api/direct/revoke`(后台登录或 API token);直发页「撤回上一条」按钮。抓参数用 `tools/wechat_re/frida/hook_args.js`。
 
+### 3.11 语音：Linux 版发不了语音条，用视频代替（2026-11-28）
+
+- 4.1.8 Linux 版**没有发语音的代码**：界面没有录音按钮；二进制里只有 CGI 路由表里的 `uploadvoice`(cmdid 19)，没有 `micromsg.UploadVoiceRequest` 描述符和 `/cgi-bin/micromsg-bin/uploadvoice` 路径（对比 newsendmsg 两样都有）。能收、能播（`VoiceMessageHandler`、SILK 解码），不能发。库里的 type 34 语音都是 `status=3, origin_source=2`，来自手机端或对方。
+- 现在的语音条是 SILK 音频先加密传 CDN，再发带 `voiceurl`/`aeskey` 的 `<voicemsg>`。要发真语音条，只能在手机端发（adb 自动化），或自己补整套上传协议（不建议，风控风险大）。
+- 采用的替代：`direct_send.stage_audio / send_voice` 用 ffmpeg 把 mp3/m4a/wav/ogg/flac/amr 转成「深绿底 + 绿色声波」的 640x360 mp4（最长 5 分钟），走 3.9 节的视频直发。微信 SILK 语音 ffmpeg 解不了，会直接报错提示先转格式。容器镜像已加装 ffmpeg。
+
 ---
 
 ## 4. 微信升级后怎么重新定位

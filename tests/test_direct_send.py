@@ -395,3 +395,31 @@ class DirectRevokeRouteTest(unittest.TestCase):
             r = self.client.post("/api/direct/revoke", json={"token": "api-token", "chat": "wxid_a", "local_id": "12"})
         self.assertEqual(r.status_code, 200)
         rv.assert_called_once_with("wxid_a", 12, "", source="manual")
+
+
+class DirectVoiceTest(unittest.TestCase):
+    def test_audio_kinds(self):
+        from core import direct_send
+        self.assertEqual(direct_send.media_kind(b"ID3\x04\x00" + b"\x00" * 11), "audio")
+        self.assertEqual(direct_send.media_kind(b"\x00\x00\x00\x20ftypM4A \x00\x00\x00\x00"), "audio")
+        self.assertEqual(direct_send.media_kind(b"RIFF\x00\x00\x00\x00WAVEfmt "), "audio")
+        self.assertEqual(direct_send.media_kind(b"\x00\x00\x00\x20ftypisom\x00\x00\x00\x00"), "video")
+
+    def test_silk_is_rejected_with_hint(self):
+        from core import direct_send
+        with self.assertRaises(direct_send.DirectSendError) as cm:
+            direct_send.stage_media(b"\x02#!SILK_V3" + b"\x00" * 20)
+        self.assertEqual(cm.exception.code, "bad_audio")
+
+    @unittest.skipUnless(__import__("shutil").which("ffmpeg"), "需要 ffmpeg")
+    def test_audio_becomes_mp4(self):
+        import subprocess
+        from core import direct_send
+        with tempfile.TemporaryDirectory() as d, patch("core.direct_send.MEDIA_DIR", d):
+            wav = os.path.join(d, "a.wav")
+            subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                            wav], check=True)
+            kind, path = direct_send.stage_media(open(wav, "rb").read(), "a.wav")
+            self.assertEqual(kind, "voice")
+            with open(path, "rb") as f:
+                self.assertEqual(direct_send.media_kind(f.read(16)), "video")

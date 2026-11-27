@@ -17,6 +17,11 @@ ENV DISPLAY=:0 \
     WXBOT_LLM_CONFIG=/home/wechat/llm_config.json \
     PYTHONUNBUFFERED=1
 
+# 直发"语音":Linux 版微信发不了语音条,音频用 ffmpeg 转成带声波画面的视频再发
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --chown=wechat:wechat config.py server.py /app/
 COPY --chown=wechat:wechat core/ /app/core/
 COPY --chown=wechat:wechat tools/ /app/tools/

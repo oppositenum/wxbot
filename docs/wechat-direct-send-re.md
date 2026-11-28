@@ -276,6 +276,21 @@ Ghidra 全量分析 130MB 约 45 分钟（8 核，10G 内存），`PreFast.java`
 
 ---
 
+### 3.15 数据库密钥（4.1.13，2026-11-28）
+
+4.1.13 起派生后的库密钥不常驻内存（WCDB 闲置会关连接并清零），`docker/linux_keys.py` 的内存扫描一个都抓不到。
+微信重建某个库（换了 salt）时旧密钥就失效了，例如升级后 `message/message_resource.db` 解不开（"file is not a database"）。
+
+办法：SQLCipher 每读一页都会重新设一次 AES 密钥。hook OpenSSL 的 `aes_v8_set_encrypt_key(userKey, bits, AES_KEY*)`
+（4.1.13 模块偏移 `0x8d4da00`；定位：二进制里搜 ARMv8 rcon 表 `01000000×4 0d0e0f0c×4 1b000000×4`，函数紧跟表后，
+模块偏移 = 文件偏移 + 0x10000），收集 bits=256 的密钥，逐个解库第 1 页验证（页大小 0x1000、第 21~23 字节 64/32/32）。
+
+    docker cp tools/wechat_re/capture_db_keys.py <容器>:/tmp/
+    docker exec -w /app <容器> sh -c 'PYTHONPATH=/app python3 /tmp/capture_db_keys.py 60'
+
+默认只补验证不过的库，命中后写回账号 keys.json（先备份），不打印密钥。期间要让微信读一下目标库：
+`message_resource.db` 发个视频就会写（直发一段 1 秒测试视频到文件传输助手即可）。
+
 ## 4. 微信升级后怎么重新定位
 
 先确认新版本 sha256 与 `core/direct_send.py` 里的 `SUPPORTED_SHA256` 不同。不同时直发会自动禁用（页面显示"微信版本未适配"），bot 回复会回退到界面自动化，所以不着急。

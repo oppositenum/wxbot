@@ -49,6 +49,7 @@ function lightbox(src) {
 // ---------------- 账号状态 ----------------
 const STATE = {
   online:       {t: '在线', c: 'green', hint: '微信已登录，密钥齐全，一切正常'},
+  need_enter:   {t: '待进入', c: 'amber', pulse: true, hint: '微信停在「进入微信」页（容器或微信刚重启）。控制台会自动点，十几秒没好就手动点「进入微信」，不用扫码'},
   need_login:   {t: '待扫码', c: 'amber', hint: '微信在运行但没登录：打开「扫码与桌面」，用手机扫码（或点「进入微信」）'},
   keys_missing: {t: '缺密钥', c: 'amber', hint: '已登录但还读不了消息：点「刷新密钥」（约一分钟）'},
   wechat_down:  {t: '微信未运行', c: 'red', hint: '容器在跑但微信进程没起来：点「重启微信」'},
@@ -174,7 +175,7 @@ function pageHome(view) {
     const all = accounts.length && sel.size === accounts.length;
     view.innerHTML = `<div class="page">
       <div class="grid cols-4" style="margin-bottom:18px">
-        ${[['微信总数', accounts.length, ''], ['在线', n(['online']), 'var(--brand-d)'], ['需要处理', n(['need_login', 'keys_missing', 'wechat_down', 'missing', 'error']), '#a5700c'], ['已停止', n(['stopped']), 'var(--text-3)']]
+        ${[['微信总数', accounts.length, ''], ['在线', n(['online']), 'var(--brand-d)'], ['需要处理', n(['need_enter', 'need_login', 'keys_missing', 'wechat_down', 'missing', 'error']), '#a5700c'], ['已停止', n(['stopped']), 'var(--text-3)']]
           .map(([l, v, c]) => `<div class="card stat"><div class="n" style="color:${c || 'inherit'}">${v}</div><div class="l">${l}</div></div>`).join('')}
       </div>
       ${accounts.length ? `<div class="card bulk-bar">
@@ -201,7 +202,7 @@ function pageHome(view) {
     if (!todo.length) return toast(op === 'start' ? '选中的都已经在运行' : op === 'stop' ? '选中的都已经停止' : '没有可重启的', 'err');
     if (op !== 'start' && !await modal({title: `${OPN[op]} ${todo.length} 个微信？`, danger: op === 'stop', ok: OPN[op],
       body: `<p>${todo.map((a) => esc(nm(a))).join('、')}</p><p class="muted small">${op === 'stop'
-        ? '会停掉整个容器：微信下线、机器人不回复、定时任务不执行。登录状态保留，之后点启动就能回来（一般不用重新扫码）。'
+        ? '会停掉整个容器：微信下线、机器人不回复、定时任务不执行。登录状态保留：启动后微信停在「进入微信」页，控制台会自动点进去，一般不用重新扫码。'
         : '容器重启约需 1 分钟，期间这些微信收不到消息。'}</p>`})) return;
     await busy(btn, async () => {
       const r = await Promise.allSettled(todo.map((a) => api(`/api/console/accounts/${a.id}/action`, {method: 'POST', json: {op}})));
@@ -223,6 +224,7 @@ function cardHtml(s, checked = false) {
   let act = '';
   if (s.state === 'stopped') act = `<button class="btn sm primary" data-op="start" data-id="${s.id}">启动</button>`;
   else if (s.state === 'need_login') act = `<a class="btn sm primary" href="#/a/${s.id}/desktop">去扫码</a>`;
+  else if (s.state === 'need_enter') act = `<button class="btn sm primary" data-op="enter_wechat" data-id="${s.id}">进入微信</button>`;
   else if (s.state === 'wechat_down') act = `<button class="btn sm primary" data-op="restart_wechat" data-id="${s.id}">重启微信</button>`;
   else if (s.state === 'keys_missing') act = `<a class="btn sm primary" href="#/a/${s.id}">刷新密钥</a>`;
   const power = s.state === 'missing' ? '' : isUp(s)
@@ -237,7 +239,7 @@ function cardHtml(s, checked = false) {
 function bindCardActions(root) {
   $$('[data-op]', root).forEach((b) => b.onclick = async () => {
     if (b.dataset.op === 'stop' && !await modal({title: `停止「${b.dataset.label}」？`, danger: true, ok: '停止',
-      body: '<p class="muted small">会停掉整个容器：微信下线、机器人不回复、定时任务不执行。登录状态保留，之后点启动就能回来（一般不用重新扫码）。</p>'})) return;
+      body: '<p class="muted small">会停掉整个容器：微信下线、机器人不回复、定时任务不执行。登录状态保留：启动后微信停在「进入微信」页，控制台会自动点进去，一般不用重新扫码。</p>'})) return;
     return busy(b, async () => {
     await api(`/api/console/accounts/${b.dataset.id}/action`, {method: 'POST', json: {op: b.dataset.op}});
     toast('已执行'); await sleep(1500); loadAccounts(true);
@@ -360,6 +362,7 @@ function pageAccount(view, id) {
 function stateActions(s) {
   if (s.state === 'stopped') return `<button class="btn primary" data-op="start">启动</button>`;
   if (s.state === 'need_login') return `<a class="btn primary" href="#/a/${s.id}/desktop">去扫码</a><button class="btn" data-op="enter_wechat">进入微信</button>`;
+  if (s.state === 'need_enter') return `<button class="btn primary" data-op="enter_wechat">进入微信</button><a class="btn" href="#/a/${s.id}/desktop">看桌面</a>`;
   if (s.state === 'wechat_down') return `<button class="btn primary" data-op="restart_wechat">重启微信</button>`;
   return `<a class="btn" href="#/a/${s.id}/chats">打开消息</a><a class="btn" href="#/a/${s.id}/desktop">桌面</a>`;
 }

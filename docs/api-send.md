@@ -4,6 +4,24 @@
 
 本机调用带请求头 `X-Wxbot-Token: $WXBOT_API_TOKEN`，或在 JSON 里加 `"token": "$WXBOT_API_TOKEN"`，不必先登录网页。这个凭据只放行 `/api/send`、`/api/send/status`、`/api/upload`、`/api/bot/push`、`/api/bot/push/test`、`/api/direct/revoke` 和 `/api/direct/send_tts`。其余后台接口仍要网页登录。未设置 `WXBOT_API_TOKEN` 时，请求头和 body 里的 token 都无效。
 
+## 经控制台调用（公网 / 多个微信）
+
+控制台（本机 `http://127.0.0.1:5090`，公网 `https://wx.dy.dywxgz.com`）会把**带 token 的**上面这几个接口原样转给对应的微信容器，由容器自己校验 token，不需要登录控制台；不带 token 或调别的接口仍要登录。
+
+| 地址 | 发到哪个微信 |
+| --- | --- |
+| `/a/<账号id>/api/send` | 指定账号（id 在控制台网址里，如 `w2`；「发送接口」页复制的命令就是这种） |
+| `/api/send` + `"account": "..."` | 按账号 id、微信号、昵称或备注选号 |
+| `/api/send`（不带 account） | 按控制台里的顺序试，第一个 token 对得上的号（老调用方式不用改） |
+
+token 每个容器一个（控制台新建的号自动生成）；输错 token 和输错密码一样计次，同一 IP 10 分钟错 5 次锁 15 分钟。
+
+```bash
+curl https://wx.dy.dywxgz.com/a/w2/api/send \
+  -H 'Content-Type: application/json' -H 'X-Wxbot-Token: <token>' \
+  -d '{"to":"文件传输助手","chat":"filehelper","type":"text","content":"你好"}'
+```
+
 ## 发送文字或图片
 
 `POST /api/send` 接收 JSON：

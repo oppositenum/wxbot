@@ -156,6 +156,65 @@ class ConsoleTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status, 200)
         self.assertEqual(r.headers["X-Frame-Options"], "SAMEORIGIN")
 
+    async def test_send_api_token_passthrough(self):
+        from aiohttp import web as w
+        seen = []
+
+        async def fake_send(req):                                        # 假的微信容器:自己校验 token
+            body = await req.json()
+            seen.append((req.path, req.headers.get("Cookie"), body))
+            tok = req.headers.get("X-Wxbot-Token") or body.get("token")
+            if tok != "T0K":
+                return w.json_response({"error": "需要登录"}, status=401)
+            return w.json_response({"ok": True, "queued": True})
+        app = w.Application(); app.router.add_post("/api/send", fake_send); app.router.add_post("/api/bot/learn", fake_send)
+        backend = TestServer(app); await backend.start_server(); self.addAsyncCleanup(backend.close)
+        self.c.INTERNAL_WEB = backend.port
+        self.c.save_registry({"accounts": [{"id": "w2", "label": "", "container": "127.0.0.1", "order": 0}], "ignored": []})
+        cl = await self.client()
+        msg = {"to": "x", "chat": "wxid_x", "type": "text", "content": "hi"}
+        r = await cl.post("/api/send", json={**msg, "token": "T0K"})                    # 老地址照样能用
+        self.assertEqual((r.status, (await r.json())["ok"]), (200, True))
+        r = await cl.post("/a/w2/api/send", json=msg, headers={"X-Wxbot-Token": "T0K"})
+        self.assertEqual(r.status, 200)
+        self.assertIsNone(seen[-1][1])                                     # 不带控制台/后台的登录态
+        r = await cl.post("/api/send", json={**msg, "token": "bad"})
+        self.assertEqual(r.status, 401)
+        r = await cl.post("/api/send", json={**msg, "token": "T0K", "account": "nope"})
+        self.assertEqual(r.status, 404)
+        r = await cl.post("/a/w2/api/bot/learn", json={"token": "T0K"})             # 不在白名单的接口:要登录
+        self.assertEqual(r.status, 401)
+        self.assertEqual(len(seen), 3)
+        r = await cl.post("/api/send", json=msg)                                    # 没 token:要登录
+        self.assertEqual(r.status, 401)
+
+    async def test_enter_wechat_screen_detected_and_auto_clicked(self):
+        st = {"/api/status": {"wechat_running": True, "logged_in": True, "keys_ready": True},
+              "/api/me": {"wxid": "wxid_a", "name": "A"}, "/api/bot": {"running": True}, "/api/send_mode": {"mode": "direct"},
+              "/api/direct/status": {"attached": True, "logged_in": False, "supported": True}}
+
+        class B:
+            async def json(self, path):
+                return st[path]
+        execs = []
+
+        async def fake_exec(name, cmd):
+            execs.append(name)
+            st["/api/direct/status"] = {**st["/api/direct/status"], "logged_in": True}     # 点完就进去了
+        self.fd.exec = fake_exec
+        self.c.backend = lambda acct: B()
+        self.c.asyncio.sleep, real_sleep = (lambda *_: real_sleep(0)), self.c.asyncio.sleep
+        self.addCleanup(setattr, self.c.asyncio, "sleep", real_sleep)
+        acct = {"id": "w1", "label": "", "container": "wxbot-second"}
+        self.assertEqual((await self.c.account_status(acct, fresh=True))["state"], "need_enter")
+        await real_sleep(0.05)
+        self.assertEqual(execs, ["wxbot-second"])
+        self.assertEqual((await self.c.account_status(acct, fresh=True))["state"], "online")
+        st["/api/direct/status"]["logged_in"] = False
+        await self.c.account_status(acct, fresh=True)
+        await real_sleep(0.05)
+        self.assertEqual(len(execs), 1)                                    # 10 分钟内不再自动点
+
     async def test_create_and_delete(self):
         cl = await self.client()
         await cl.post("/api/console/login", json={"username": "admin", "password": "pw"})
@@ -168,6 +227,7 @@ class ConsoleTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((env["WXBOT_SEND_MODE"], env["WXBOT_SELF_CONTAINER"], env["WXBOT_UI_USER"]),
                          ("direct", "wxbot-acc1", "admin"))
         self.assertNotEqual(env["WXBOT_SECRET"], "s3cret")                 # 每个号自己的签名密钥
+        self.assertEqual(len(env["WXBOT_API_TOKEN"]), 48)                  # 每个号自己的发送接口 token
         self.assertEqual(body["Image"], "img:self")
         self.assertEqual([m["Source"] for m in body["HostConfig"]["Mounts"]], ["wxbot-acc1-home", "wxbot-acc1-data"])
         self.assertEqual(body["HostConfig"]["NetworkMode"], "wxbot-net")

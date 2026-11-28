@@ -118,11 +118,99 @@ async def security_headers(request, handler):
     return resp
 
 
+# ---------------- 发送接口 token 直通 ----------------
+# 没登录控制台、但带了 API token 的发送请求,原样转给微信容器,由容器自己校验 token(不借控制台的登录态)。
+# 只放这几个接口,和容器后台 server.py 的 _API_TOKEN_PATHS 一致。
+TOKEN_PATHS = frozenset({"/api/send", "/api/send/status", "/api/upload", "/api/bot/push", "/api/bot/push/test",
+                         "/api/direct/revoke", "/api/direct/send_tts"})
+TOKEN_RE = re.compile(r"^/a/([a-z0-9]+)(/api/.+)$")
+
+
+def _token_path(path):
+    return path in TOKEN_PATHS or path.startswith("/api/send/status/")
+
+
+async def _supplied_token(request):
+    if request.headers.get("X-Wxbot-Token"):
+        return True
+    if request.method in ("POST", "PUT", "PATCH") and "json" in request.content_type:
+        try:
+            d = json.loads(await request.read() or b"{}")
+        except ValueError:
+            return False
+        return isinstance(d, dict) and bool(d.get("token"))
+    return False
+
+
+async def _pick_accounts(request, acct_id, body):
+    """/a/<id>/api/send 指定账号;裸 /api/send 可用 account(id / 微信号 / 昵称 / 备注 / 容器名)指定,不指定按顺序试。"""
+    accts = sorted(load_registry()["accounts"], key=lambda a: (a.get("order", 1e9), a["id"]))
+    if acct_id:
+        return [a for a in accts if a["id"] == acct_id]
+    want = request.query.get("account") or (body.get("account") if isinstance(body, dict) else None)
+    if want:
+        want = str(want).strip()
+        hit = [a for a in accts if want in (a["id"], a.get("container"), a.get("label"))]
+        if hit:
+            return hit
+        out = []
+        for a in accts:                                       # 微信号 / 昵称要问容器
+            hit = _status_cache.get(a["id"])
+            st = hit[1] if hit else await account_status(a)
+            if want in (st.get("wxid"), st.get("name")):
+                out.append(a)
+        return out
+    return accts
+
+
+async def token_proxy(request, acct_id, sub):
+    ip = client_ip(request)
+    wait = _login_locked(ip)
+    if wait > 0:
+        return web.json_response({"ok": False, "error": f"token 错误次数太多,{int(wait // 60) + 1} 分钟后再试"}, status=429)
+    raw = await request.read()
+    try:
+        body = json.loads(raw) if raw and "json" in request.content_type else {}
+    except ValueError:
+        body = {}
+    cands = await _pick_accounts(request, acct_id, body)
+    if not cands:
+        return web.json_response({"ok": False, "error": "没有这个微信(account 填控制台里的 id、微信号、昵称或备注)"}, status=404)
+    headers = {k: v for k, v in request.headers.items() if k.lower() in ("content-type", "x-wxbot-token", "accept")}
+    path = sub + (("?" + request.query_string) if request.query_string else "")
+    last = None
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=180)) as s:    # 新会话:不带控制台的登录态
+        for a in cands:
+            try:
+                async with s.request(request.method, f"http://{a['container']}:{INTERNAL_WEB}{path}",
+                                     headers=headers, data=raw or None, allow_redirects=False) as r:
+                    data = await r.read()
+                    last = (r.status, r.headers.get("Content-Type", "application/json"), data)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                last = (502, "application/json", json.dumps({"ok": False, "error": f"连不上 {a['container']}:{e.__class__.__name__}"}).encode())
+                continue
+            if r.status not in (401, 403):
+                _fails.pop(ip, None) if ip else None
+                break
+    status, ctype, data = last
+    if status in (401, 403):
+        _record_fail(ip)
+        print(f"[console] 发送接口 token 不对 ip={ip or request.remote} path={sub}", flush=True)
+        await asyncio.sleep(FAIL_SLEEP)
+        return web.json_response({"ok": False, "error": "token 不对"}, status=401)
+    return web.Response(status=status, body=data, content_type=ctype.split(";")[0],
+                        charset="utf-8" if "json" in ctype or "text" in ctype else None)
+
+
 @web.middleware
 async def auth_mw(request, handler):
     p = request.path
     if p in PUBLIC or p.startswith("/ui/fonts/") or logged_in(request):
         return await handler(request)
+    m = TOKEN_RE.match(p)
+    sub = m.group(2) if m else p
+    if _token_path(sub) and await _supplied_token(request):
+        return await token_proxy(request, m.group(1) if m else None, sub)
     if p.startswith("/api/") or p.startswith("/a/") and "/api/" in p:
         return web.json_response({"error": "需要登录"}, status=401)
     raise web.HTTPFound("/ui/login.html")
@@ -353,6 +441,39 @@ def backend(acct):
 
 # ---------------- 状态 ----------------
 
+# 自动点「进入微信」:同一个号 10 分钟内最多自动处理一轮(每轮最多点 3 次),点不进去就交给人(可能要手机确认/重新扫码)
+AUTO_ENTER_GAP = 600
+_auto_enter_at = {}
+
+
+def _schedule_auto_enter(acct):
+    now = time.time()
+    if now - _auto_enter_at.get(acct["id"], 0) < AUTO_ENTER_GAP:
+        return
+    _auto_enter_at[acct["id"]] = now
+    asyncio.ensure_future(_auto_enter(acct))
+
+
+async def _auto_enter(acct, tries=3):
+    b = backend(acct)
+    for _ in range(tries):
+        try:
+            await docker.exec(acct["container"], ["bash", "-lc", "DISPLAY=:0 xdotool mousemove 959 636 click 1"])
+        except Exception as e:  # noqa: BLE001
+            print(f"[console] {acct['container']} 自动进入微信失败:{e}", flush=True)
+            return
+        for _ in range(6):
+            await asyncio.sleep(3)
+            try:
+                ds = await b.json("/api/direct/status")
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(ds, dict) and ds.get("logged_in"):
+                print(f"[console] {acct['container']} 已自动进入微信", flush=True)
+                _status_cache.pop(acct["id"], None)
+                return
+    print(f"[console] {acct['container']} 自动点了 {tries} 次「进入微信」还没登录,需要人工看看", flush=True)
+
 _status_cache = {}
 
 
@@ -405,6 +526,11 @@ async def account_status(acct, fresh=False):
     if ds:
         st["direct"] = {k: ds.get(k) for k in ("supported", "version", "attached", "logged_in", "revoke",
                                                 "voice", "quote", "at")}
+        # 容器/微信重启后,微信停在「进入微信」页:库文件都在,后台 /api/status 仍说已登录,
+        # 但直发 agent 看得到微信进程里其实没登录。
+        if st["state"] in ("online", "keys_missing") and ds.get("attached") and ds.get("logged_in") is False:
+            st["state"] = "need_enter"
+            _schedule_auto_enter(acct)
     if bot:
         st["bot_running"] = bool(bot.get("running"))
     if mode:
@@ -461,6 +587,7 @@ async def api_create(request):
         "WXBOT_UI_AUTH": "1", "WXBOT_UI_USER": UI_USER, "WXBOT_UI_PASSWORD": UI_PASSWORD,
         "WXBOT_SECRET": secrets.token_hex(16), "VNC_PASSWORD": os.environ.get("VNC_PASSWORD", secrets.token_hex(8)),
         "WXBOT_SELF_CONTAINER": name, "WXBOT_BOT_AUTOSTART": "1", "WXBOT_SEND_MODE": "direct",
+        "WXBOT_API_TOKEN": secrets.token_hex(24),          # 每个号自己的发送接口 token(在「发送接口」页复制)
         "WXBOT_MEDIA_CAPTURE": os.environ.get("WXBOT_MEDIA_CAPTURE", "1"),
         "TZ": os.environ.get("TZ", "Asia/Shanghai"), "SCREEN": os.environ.get("SCREEN", "1920x1080x24"),
     }
@@ -513,6 +640,8 @@ async def api_action(request):
     except DockerError as e:
         return web.json_response({"ok": False, "error": e.message}, status=500)
     _status_cache.pop(acct["id"], None)
+    if op in ("start", "restart", "restart_wechat"):
+        _auto_enter_at.pop(acct["id"], None)          # 刚启动:微信起来后状态检查会自动点「进入微信」
     return web.json_response({"ok": True})
 
 

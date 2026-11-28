@@ -27,7 +27,9 @@
     catch (e) { view.innerHTML = `<div class="page"><div class="callout red">读取发送对象失败：${esc(e.message)}</div></div>`; return; }
     const rows = d.targets || [], token = d.token || '';
     const urlKey = `wx.api.url.${id}`;
-    let url = localStorage.getItem(urlKey) || d.url || '';
+    // 默认走控制台的公网/本机地址:/a/<账号>/api/send 带 token 就能调,不用登录控制台
+    const def = `${location.origin}/a/${id}/api/send`;
+    let url = localStorage.getItem(urlKey) || def;
     let kind = 'all', text = '';
     const snippets = {};
 
@@ -47,7 +49,9 @@
           ? `<span class="badge green">✓ 已配置 API token</span><div class="faint small">复制的命令里自动带上，页面不显示</div>`
           : `<span class="badge amber">没有配置 token</span><div class="faint small">容器没设 WXBOT_API_TOKEN，命令只能在登录后台的情况下用</div>`}</div>
       </div>
-      <div class="api-hint faint small">默认是这个微信容器在 Docker 网络里的地址（<span class="mono">${esc(d.url || '')}</span>）。从宿主机或别的机器调用时，改成映射出来的地址，例如 <span class="mono">http://127.0.0.1:&lt;映射端口&gt;/api/send</span>；改动只保存在这个浏览器里。
+      <div class="api-hint faint small">默认是控制台地址（你现在打开的这个域名），带 token 就能从任何地方调用，不用登录控制台；
+        也可以用 <span class="mono">${esc(location.origin)}/api/send</span> 加 <span class="mono">"account"</span>（微信号 / 昵称 / 备注）选号，不填 account 就用排第一的号。
+        同一个 Docker 网络里的程序也可以直连容器 <span class="mono">${esc(d.url || '')}</span>。改动只保存在这个浏览器里。
         <a href="#" id="apUrlReset">恢复默认</a></div></div>
       <div class="api-grid">
         <div class="card api-targets"><div class="card-head"><h2>发给谁</h2><span class="faint small" id="apCount"></span></div>
@@ -130,11 +134,11 @@
     $('#apText').oninput = () => { text = $('#apText').value; if (open) drawList(); };
     $$('#apKind button').forEach((b) => b.onclick = () => { kind = b.dataset.k; $$('#apKind button').forEach((x) => x.classList.toggle('on', x === b)); drawList(); });
     $('#apUrl').onchange = () => {
-      url = $('#apUrl').value.trim() || d.url || '';
+      url = $('#apUrl').value.trim() || def;
       if (url === d.url) localStorage.removeItem(urlKey); else localStorage.setItem(urlKey, url);
       $('#apUrl').value = url; buildSnippets(); drawList(); toast('接口地址已更新');
     };
-    $('#apUrlReset').onclick = (e) => { e.preventDefault(); $('#apUrl').value = d.url || ''; $('#apUrl').onchange(); };
+    $('#apUrlReset').onclick = (e) => { e.preventDefault(); localStorage.removeItem(urlKey); $('#apUrl').value = def; $('#apUrl').onchange(); };
     buildSnippets(); drawList();
   };
 })();

@@ -936,17 +936,29 @@ def api_persona_correct(slug):
     return jsonify({"ok": True, "persona": p.get("persona")})
 
 
+def _rules_locked(fn):
+    """规则文件的读-改-写接口串行执行(两个保存同时到达时曾把 bot_rules.json 写坏)。"""
+    from functools import wraps
+
+    @wraps(fn)
+    def run(*a, **kw):
+        with botmod.RULES_LOCK:
+            return fn(*a, **kw)
+    return run
+
+
 @app.post("/api/bot/learn_profiles")
+@_rules_locked
 def api_learn_profiles_set():
     body = request.get_json(force=True, silent=True) or {}
     rules = botmod.load_rules()
     rules["learn_profiles"] = bool(body.get("enabled"))
-    with open(botmod.rules_file(), "w", encoding="utf-8") as f:
-        json.dump(rules, f, ensure_ascii=False, indent=2)
+    botmod.save_rules(rules)
     return jsonify({"ok": True, "enabled": rules["learn_profiles"]})
 
 
 @app.post("/api/bot/watch")
+@_rules_locked
 def api_bot_watch():
     """设置机器人监听的会话列表(群+私聊)，以及是否回复自己发的消息。"""
     body = request.get_json(force=True, silent=True) or {}
@@ -955,12 +967,12 @@ def api_bot_watch():
     rules["watch"] = list(dict.fromkeys(watch))
     if "include_self" in body:
         rules["include_self"] = bool(body["include_self"])
-    with open(botmod.rules_file(), "w", encoding="utf-8") as f:
-        json.dump(rules, f, ensure_ascii=False, indent=2)
+    botmod.save_rules(rules)
     return jsonify({"ok": True, "watch": rules["watch"],
                     "include_self": bool(rules.get("include_self"))})
 
 @app.post("/api/bot/admins")
+@_rules_locked
 def api_bot_admins():
     """设置管理员名单(可在会话里发 /命令 触发系统功能)。只接受当前账号的真人联系人。"""
     admins = (request.get_json(force=True, silent=True) or {}).get("admins", [])
@@ -973,8 +985,7 @@ def api_bot_admins():
              if isinstance(a, str) and not a.endswith("@chatroom") and (known is None or a in known)]
     rules = botmod.load_rules()
     rules["admins"] = clean
-    with open(botmod.rules_file(), "w", encoding="utf-8") as f:
-        json.dump(rules, f, ensure_ascii=False, indent=2)
+    botmod.save_rules(rules)
     return jsonify({"ok": True, "admins": clean})
 
 
@@ -984,6 +995,7 @@ def api_bot_proactive_get():
     return jsonify(rules.get('proactive') or {})
 
 @app.post("/api/bot/proactive")
+@_rules_locked
 def api_bot_proactive_set():
     body = request.get_json(force=True, silent=True) or {}
     rules = botmod.load_rules()
@@ -994,8 +1006,7 @@ def api_bot_proactive_set():
     for k in ('after','gap','max','group_after','quiet_start','quiet_end'):
         if k in body: out[k] = max(0, int(body[k]))
     rules['proactive'] = out
-    with open(botmod.rules_file(), 'w', encoding='utf-8') as f:
-        json.dump(rules, f, ensure_ascii=False, indent=2)
+    botmod.save_rules(rules)
     return jsonify({'ok': True, 'proactive': out})
 
 
@@ -1030,6 +1041,7 @@ def api_bot_follow_get():
 
 
 @app.post("/api/bot/follow")
+@_rules_locked
 def api_bot_follow():
     """设置开启跟发的群 + 触发阈值(连续相同几次触发)。"""
     body = request.get_json(force=True, silent=True) or {}
@@ -1041,8 +1053,7 @@ def api_bot_follow():
             rules["follow_threshold"] = max(2, int(body["threshold"]))
         except (TypeError, ValueError):
             pass
-    with open(botmod.rules_file(), "w", encoding="utf-8") as f:
-        json.dump(rules, f, ensure_ascii=False, indent=2)
+    botmod.save_rules(rules)
     return jsonify({"ok": True, "groups": rules["follow_watch"],
                     "threshold": rules.get("follow_threshold", 3)})
 
@@ -1063,6 +1074,7 @@ def api_bot_push_get():
 
 
 @app.post("/api/bot/push")
+@_rules_locked
 def api_bot_push_set():
     """设置监听推送：enabled/sources(缺省=监听列表)/include_self/targets。
     targets: [{"type":"wechat","to":"好友名"},{"type":"webhook","url":"https://..."}]"""
@@ -1092,8 +1104,7 @@ def api_bot_push_set():
                               "enabled": t.get("enabled", True)})
         p["targets"] = clean
     rules["push"] = {**_default_push(), **p}
-    with open(botmod.rules_file(), "w", encoding="utf-8") as f:
-        json.dump(rules, f, ensure_ascii=False, indent=2)
+    botmod.save_rules(rules)
     return jsonify({"ok": True, "push": rules["push"]})
 
 
@@ -1204,13 +1215,13 @@ def api_agent_config_get():
 
 
 @app.post("/api/agent/config")
+@_rules_locked
 def api_agent_config_set():
     b = request.get_json(force=True, silent=True) or {}
     rules = botmod.load_rules()
     rules["agent"] = {"enabled": bool(b.get("enabled")),
                       "tools": b.get("tools") or []}
-    with open(botmod.rules_file(), "w", encoding="utf-8") as f:
-        json.dump(rules, f, ensure_ascii=False, indent=2)
+    botmod.save_rules(rules)
     return jsonify({"ok": True, "agent": rules["agent"]})
 
 
@@ -1358,6 +1369,41 @@ def api_greet():
     except Exception as e:  # noqa: BLE001
         return jsonify({"ok": False, "message": str(e)})
     return jsonify(res)
+
+
+@app.post("/api/schedule")
+def api_schedule_create():
+    """表单新建提醒任务。JSON:target(微信号/群号或名字)、title、prompt、cron 或 once_at(YYYY-MM-DD HH:MM)、
+    mention(群里 @ 谁)、use_llm、persona、enabled(默认 true)。"""
+    from core import schedule
+    d = request.get_json(force=True, silent=True) or {}
+    cron = (d.get("cron") or "").strip() or None
+    once_at = (d.get("once_at") or "").strip() or None
+    if cron and not schedule._valid_cron(cron):
+        return jsonify({"ok": False, "message": f"cron 不合法:{cron}"}), 400
+    t, err = schedule.add_task(d.get("title") or "", d.get("target") or "", d.get("prompt") or "",
+                               cron=cron, once_at=once_at, mention=(d.get("mention") or "").strip() or None,
+                               use_llm=bool(d.get("use_llm")), persona=(d.get("persona") or "").strip() or None)
+    if err:
+        return jsonify({"ok": False, "message": err}), 400
+    if d.get("enabled") is False:
+        t, _ = schedule.update_task(id=t["id"], fields={"enabled": False})
+    return jsonify({"ok": True, "task": t, "schedule_desc": schedule.describe_schedule(t)})
+
+
+@app.get("/api/schedule/fires")
+def api_schedule_fires():
+    """定时任务执行记录(新→旧)。query:task_id、chat、limit(默认 50)。"""
+    from core import schedule
+    try:
+        limit = max(1, min(500, int(request.args.get("limit", 50))))
+    except ValueError:
+        limit = 50
+    tid = request.args.get("task_id")
+    rows = schedule.recent_fires(chat=request.args.get("chat") or None, limit=2000)
+    if tid:
+        rows = [r for r in rows if str(r.get("task_id")) == str(tid)]
+    return jsonify({"fires": rows[:limit]})
 
 
 @app.post("/api/schedule/<int:tid>/delete")
@@ -1583,7 +1629,8 @@ def api_send_mode_set():
 
 @app.post("/api/direct/send_image")
 def api_direct_send_image():
-    """实验直发图片、视频或音频(按文件头自动判断;音频转成带声波画面的视频)。表单 file=文件;或 JSON path=/api/upload 返回的路径(仅限 work 下上传目录)。"""
+    """直发图片、视频、音频或任意文件(按文件头判断:图片/视频照常发;音频转声波视频或按配置发 mp3 文件;
+    其它文件、或表单 as_file=1 时发文件卡片)。表单 file=文件;或 JSON path=/api/upload 返回的路径(仅限 work 下上传目录)。"""
     from core import direct_send
     try:
         f = request.files.get("file")
@@ -1593,7 +1640,10 @@ def api_direct_send_image():
             label = os.path.basename(f.filename or "") or "图片"
             blob = f.read()
             from core import tts
-            if direct_send.media_kind(blob[:16]) == "audio" and tts.send_as() == "file":
+            mk = direct_send.media_kind(blob[:16])
+            if form.get("as_file") == "1" or mk is None:
+                kind, path = "file", direct_send.stage_file(blob, label)   # 文档等非媒体文件:发文件卡片
+            elif mk == "audio" and tts.send_as() == "file":
                 kind, path = "file", direct_send.stage_file(blob, label)   # 音频按配置发成 mp3 文件
             else:
                 kind, path = direct_send.stage_media(blob, label)

@@ -19,6 +19,8 @@ EXCLUDE_SUFFIXES = (".db-wal", ".db-shm")
 def allowed(rel):
     parts = rel.split(os.sep)
     if any(p in EXCLUDE_NAMES for p in parts): return False
+    # keys.json 的备份/临时文件(keys.json.bak-*、keys.json.tmp)同样能解密聊天记录,一律不导出
+    if any(p.startswith("keys.json") for p in parts): return False
     if any(rel.endswith(s) for s in EXCLUDE_SUFFIXES): return False
     return True
 

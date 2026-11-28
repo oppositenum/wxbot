@@ -1,0 +1,33 @@
+/* api 页面样式(发送接口) */
+.api-page { gap: 16px; }
+.api-conn { display: flex; align-items: flex-end; gap: 20px; padding-bottom: 8px; }
+.api-conn .input { font-size: 13px; }
+.api-token { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 240px; padding-bottom: 2px; }
+.api-hint { padding: 0 20px 16px; line-height: 1.6; }
+.api-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.api-targets { display: flex; flex-direction: column; }
+.api-tools { display: flex; gap: 10px; align-items: center; padding: 14px 20px; }
+.api-list { border-top: 1px solid var(--line-2); max-height: calc(100vh - 360px); min-height: 300px; overflow: auto; }
+.api-row { border-bottom: 1px solid var(--line-2); }
+.api-row:last-child { border-bottom: 0; }
+.api-row-main { display: flex; align-items: center; gap: 10px; padding: 9px 20px; }
+.api-row:hover, .api-row.open { background: #fafbfc; }
+.api-row-main .btn.ghost { color: var(--text-2); }
+.api-row b { font-size: 13px; }
+.api-row-code { margin: 0 20px 12px 62px; }
+.api-code { position: relative; }
+.api-code pre { margin: 0; padding: 12px 14px; background: #1f2430; color: #d7dde8; border-radius: 8px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-all; }
+.api-copy { position: absolute; top: 8px; right: 8px; background: rgba(255, 255, 255, .92); }
+.api-done { color: var(--brand-d) !important; }
+.api-ref code, .api-hint code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--gray-50); padding: 1px 5px; border-radius: 4px; }
+.api-fields { width: 100%; border-collapse: collapse; font-size: 13px; }
+.api-fields td { padding: 8px 0; border-bottom: 1px solid var(--line-2); vertical-align: top; line-height: 1.55; }
+.api-fields tr:last-child td { border-bottom: 0; }
+.api-fields td:first-child { width: 96px; white-space: nowrap; }
+.api-fields td:first-child .badge { margin-left: 4px; padding: 0 6px; font-size: 11px; }
+.api-fields td:last-child { color: var(--text-2); }
+.api-more > summary { cursor: pointer; list-style: none; border-bottom: 0; }
+.api-more > summary::-webkit-details-marker { display: none; }
+.api-more[open] > summary { border-bottom: 1px solid var(--line-2); }
+@media (max-width: 1100px) { .api-grid { grid-template-columns: 1fr; } .api-conn { flex-direction: column; align-items: stretch; } }
+.api-code > pre { padding-right: 72px; } .api-row-code > pre { padding-right: 14px; }

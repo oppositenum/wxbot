@@ -1,0 +1,30 @@
+/* direct 页面样式(直发测试) */
+.dr-page { gap: 16px; }
+.dr-status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 20px; }
+.dr-sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
+.dr-status-err { flex-basis: 100%; color: var(--red); }
+.dr-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.dr-target { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; background: var(--gray-50); }
+.dr-text { min-height: 150px !important; font-size: 14px; line-height: 1.55; }
+.dr-file { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border: 1px dashed var(--line); border-radius: 10px; background: #fcfcfd; }
+.dr-file img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; flex: none; }
+.dr-file-ico { width: 64px; height: 64px; border-radius: 8px; background: var(--gray-50); display: grid; place-items: center; font-size: 26px; flex: none; }
+.dr-opts { display: flex; gap: 12px; }
+.dr-opts .field { min-width: 0; }
+#drAtF { flex: 0 0 38%; }
+.dr-actions { gap: 10px; }
+.dr-result { min-height: 18px; color: var(--text-2); }
+.dr-result.ok, .dr-ok { color: var(--brand-d); }
+.dr-result.err, .dr-err { color: var(--red); }
+.dr-hist { position: sticky; top: 0; display: flex; flex-direction: column; max-height: calc(100vh - 210px); min-height: 420px; }
+.dr-hist .seg button { padding: 4px 12px; font-size: 12px; }
+.dr-hist-list { flex: 1; overflow: auto; }
+.dr-hist-foot { padding: 10px 20px; border-top: 1px solid var(--line-2); }
+.dr-h { display: flex; gap: 10px; padding: 11px 20px; border-bottom: 1px solid var(--line-2); cursor: pointer; }
+.dr-h:hover { background: #fafbfc; }
+.dr-h:last-child { border-bottom: 0; }
+.dr-h-ico { width: 30px; height: 30px; flex: none; border-radius: 8px; background: var(--gray-50); display: grid; place-items: center; font-size: 15px; }
+.dr-h-top { gap: 6px; }
+.dr-h-top b { font-size: 13px; }
+.dr-h-text { font-size: 13px; margin: 2px 0; white-space: pre-wrap; word-break: break-word; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+@media (max-width: 1100px) { .dr-grid { grid-template-columns: 1fr; } .dr-hist { position: static; max-height: 70vh; } }

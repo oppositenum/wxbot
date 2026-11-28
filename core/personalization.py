@@ -500,18 +500,18 @@ def detach_persona(slug):
     from core import bot
     rules_path = bot.rules_file()
     if os.path.exists(rules_path):
-        with open(rules_path, encoding='utf-8') as fp:
-            rules = json.load(fp)
-        changed = 0
-        for rule in rules.get('rules') or []:
-            action = rule.get('action') if isinstance(rule, dict) else None
-            if isinstance(action, dict) and action.get('type') == 'reply_ai' and action.get('persona') == slug:
-                action['persona'] = ''
-                changed += 1
-        if changed:
-            with open(rules_path, 'w', encoding='utf-8') as fp:
-                json.dump(rules, fp, ensure_ascii=False, indent=2)
-            released['rules'] = changed
+        with bot.RULES_LOCK:
+            with open(rules_path, encoding='utf-8') as fp:
+                rules = json.load(fp)
+            changed = 0
+            for rule in rules.get('rules') or []:
+                action = rule.get('action') if isinstance(rule, dict) else None
+                if isinstance(action, dict) and action.get('type') == 'reply_ai' and action.get('persona') == slug:
+                    action['persona'] = ''
+                    changed += 1
+            if changed:
+                bot.save_rules(rules)
+                released['rules'] = changed
     from core import schedule
     try:
         tasks = schedule.load_tasks()

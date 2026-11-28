@@ -649,9 +649,11 @@ def _voice_filename(text):
 
 
 def send_tts(chat, text, voice=None, name="", source="manual", send_as=None):
-    """文字 → 配置的音色合成 mp3 → 按配置发成声波视频或 mp3 文件。voice=音色 key,空=默认。"""
-    from core import tts
+    """文字 → 配置的音色合成 mp3 → 按配置发成声波视频或 mp3 文件。
+    voice=音色 key;空=这个会话单独设置的音色(语音回复里按好友设置),再没有就用默认音色。"""
+    from core import tts, voice_reply
     chat = _check_chat(chat)
+    voice = voice or voice_reply.voice_for(chat)
     mode = send_as or tts.send_as()
     if mode not in tts.SEND_AS:
         raise DirectSendError("bad_param", "send_as 只能是 video、file 或 voice_bar")

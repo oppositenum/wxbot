@@ -47,6 +47,20 @@ class VoiceReplyTest(unittest.TestCase):
         vr.set_global(mode="always")
         self.assertIn("60 字以内", vr.prompt("c", "你好"))
 
+    def test_per_contact_voice_used_for_manual_tts(self):
+        from core import direct_send
+        vr.set_chat("wxid_a", voice="")          # 先建会话覆盖再设音色(set_chat 会校验音色存在)
+        with patch("core.tts.get_voice", return_value={"key": "my", "label": "我"}):
+            vr.set_chat("wxid_a", voice="my")
+        self.assertEqual(vr.voice_for("wxid_a"), "my")
+        self.assertIsNone(vr.voice_for("wxid_b"))
+        seen = []
+        with patch.object(direct_send, "_send_voice_bar", side_effect=lambda c, t, v, n, s: seen.append(v)), \
+             patch.object(direct_send, "_check_chat", side_effect=lambda c: c):
+            direct_send.send_tts("wxid_a", "你好", send_as="voice_bar")
+            direct_send.send_tts("wxid_b", "你好", send_as="voice_bar")
+        self.assertEqual(seen, ["my", None])          # 没单独设置的好友用默认音色
+
     def test_too_long_stays_text(self):
         vr.set_global(enabled=True, mode="always", max_chars=10)
         self.assertEqual(vr.decide("c", "你好", "这句话肯定超过了十个字的长度啊")[1], "too_long")

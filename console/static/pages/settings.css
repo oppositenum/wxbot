@@ -1,0 +1,15 @@
+/* settings 页面样式 */
+.set-lists ul { margin: 6px 0 0; padding-left: 18px; color: var(--text-2); font-size: 13px; line-height: 1.8; }
+.set-lists code { background: var(--gray-50); padding: 0 5px; border-radius: 4px; font-size: 12px; }
+.set-lt { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+.set-lt.ok::before { content: '✓'; color: var(--brand-d); }
+.set-lt.no::before { content: '✕'; color: var(--red); }
+.set-drop { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 28px; border: 1.5px dashed var(--line); border-radius: 12px; cursor: pointer; background: #fafbfc; transition: .15s; text-align: center; }
+.set-drop:hover, .set-drop.over { border-color: var(--brand); background: var(--brand-50); }
+.set-drop-ico { font-size: 28px; }
+.set-sum { border: 1px solid var(--line-2); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.set-sum-h { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.set-sum code { background: var(--gray-50); padding: 0 5px; border-radius: 4px; font-size: 11px; }
+.set-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.set-table td { padding: 6px 0; border-top: 1px solid var(--line-2); }
+.set-table td:nth-child(2), .set-table td:nth-child(3) { text-align: right; color: var(--text-2); width: 90px; white-space: nowrap; }

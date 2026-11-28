@@ -1,0 +1,11 @@
+/* battle 页面样式 */
+.bt-hero { background: linear-gradient(135deg, #fff 0%, #fff6f3 100%); }
+.bt-ico { width: 44px; height: 44px; border-radius: 12px; background: var(--red-50); display: grid; place-items: center; font-size: 22px; flex: none; }
+.bt code { background: var(--gray-50); border-radius: 4px; padding: 0 5px; font-size: 12px; }
+.bt-chat { display: flex; align-items: center; gap: 12px; padding: 12px 20px; border-top: 1px solid var(--line-2); }
+.bt-chat:first-child { border-top: 0; }
+.bt-red pre { margin: 6px 0 0; white-space: pre-wrap; font: inherit; line-height: 1.7; }
+.bt-def { position: relative; }
+.bt-def summary { cursor: pointer; }
+.bt-def pre { position: absolute; right: 0; top: 24px; z-index: 5; width: min(520px, 80vw); margin: 0; padding: 12px 14px; background: #fff; border: 1px solid var(--line);
+  border-radius: 10px; box-shadow: var(--shadow-l); white-space: pre-wrap; font-size: 12px; line-height: 1.7; color: var(--text-2); }

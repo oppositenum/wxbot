@@ -146,4 +146,27 @@ def create_blueprint(authorize):
         data = m.asset(aid).read_bytes()
         return send_file(io.BytesIO(data), mimetype='image/jpeg', download_name='moments.jpg')
 
+    _media_cache = {}
+
+    @bp.get('/api/moments/media/<fid>/<int:idx>')
+    @guarded
+    def media(body, fid, idx):
+        """动态里第 idx 张图片(只数图片,不数视频)。图片在微信 CDN 上,加密的动态按 token 解密。"""
+        from core import moments_media
+        account = sessions.check()['account']
+        key = (account, str(fid), idx)
+        hit = _media_cache.get(key)
+        if hit is None:
+            sources = moments_media.image_sources(m.raw_content(fid) or '')
+            if not 0 <= idx < len(sources):
+                raise KeyError('没有这张图')
+            hit = moments_media.fetch_image(sources[idx])
+            if not hit:
+                return jsonify(error='图片暂时取不到'), 404
+            if len(_media_cache) >= 120:
+                _media_cache.pop(next(iter(_media_cache)))
+            _media_cache[key] = hit
+        data, mime = hit
+        return send_file(io.BytesIO(data), mimetype=mime, download_name='moments-image')
+
     return bp

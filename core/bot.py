@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
@@ -90,6 +91,19 @@ def _diag(chat, event, data):
         pass
 
 
+RULES_LOCK = threading.RLock()     # 规则文件「读-改-写」要串行(后台多个设置接口会并发保存)
+
+
+def save_rules(rules):
+    """原子写规则文件:先写临时文件再替换,机器人循环任何时候都读不到写了一半的文件。"""
+    f = rules_file()
+    os.makedirs(os.path.dirname(f), exist_ok=True)
+    tmp = f"{f}.tmp{os.getpid()}.{threading.get_ident()}"
+    with open(tmp, "w", encoding="utf-8") as fp:
+        json.dump(rules, fp, ensure_ascii=False, indent=2)
+    os.replace(tmp, f)
+
+
 def load_rules():
     f = rules_file()
     if not os.path.exists(f):
@@ -97,7 +111,7 @@ def load_rules():
         src = _GLOBAL_RULES if os.path.exists(_GLOBAL_RULES) else None
         data = json.load(open(src, encoding="utf-8")) if src else dict(_DEFAULT_RULES)
         os.makedirs(config.account_dir(), exist_ok=True)
-        json.dump(data, open(f, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+        save_rules(data)
         if src:                       # 迁移后把全局文件改名，避免新账号继承旧配置
             try:
                 os.rename(src, src + ".migrated")

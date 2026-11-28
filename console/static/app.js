@@ -82,22 +82,28 @@ const MENU = [
   [null, 'overview', '概览', '◉'],
   [null, 'chats', '消息', '💬'],
   [null, 'desktop', '扫码与桌面', '🖥'],
-  ['机器人', 'ai', '机器人与 AI', '🤖'],
-  ['机器人', 'persona', '画像与人设', '🎭'],
+  ['机器人', 'bot', '机器人与规则', '🤖'],
+  ['机器人', 'schedule', '定时任务', '⏰'],
+  ['机器人', 'ai', 'AI 模型与知识库', '🧠'],
+  ['机器人', 'persona', '人设与画像', '🎭'],
   ['机器人', 'battle', '战斗模式', '⚔️'],
   ['发送', 'send', '发送设置', '⚡'],
-  ['发送', 'direct', '直发与语音', '🎙'],
+  ['发送', 'direct', '直发测试', '✉️'],
   ['发送', 'api', '发送接口', '⌘'],
+  ['语音', 'voices', '音色与复刻', '🎙'],
+  ['语音', 'voicereply', '语音回复', '🔊'],
   ['内容', 'moments', '朋友圈', '🖼'],
+  ['设置', 'settings', '配置导入导出', '⚙️'],
 ];
+// 还没重做成新页面时,回退到旧版页面(经代理嵌入)
 const LEGACY = {
-  ai: ['/', '机器人与 AI', 'AI 模型、机器人规则、定时任务、推送、蒸馏等（旧版页面，正在重做）'],
-  persona: ['/personalization', '画像与人设', '联系人画像和人设（旧版页面）'],
-  battle: ['/battle', '战斗模式', '吵架/辩论模式（旧版页面）'],
-  direct: ['/direct-send', '直发与语音', '直发测试、文字转语音、复刻音色、语音厂商 key、机器人语音回复（旧版页面）'],
-  api: ['/send-curl', '发送接口', 'curl 发送命令（旧版页面）'],
-  moments: ['/moments', '朋友圈', '朋友圈浏览、评论、发布（旧版页面）'],
+  bot: ['/', '机器人与规则'], schedule: ['/', '定时任务'], ai: ['/', 'AI 模型与知识库'], settings: ['/', '配置导入导出'],
+  persona: ['/personalization', '人设与画像'], battle: ['/battle', '战斗模式'],
+  direct: ['/direct-send', '直发测试'], voices: ['/direct-send', '音色与复刻'], voicereply: ['/direct-send', '语音回复'],
+  api: ['/send-curl', '发送接口'], moments: ['/moments', '朋友圈'],
 };
+// 页面模块(pages/*.js)注册到这里:WXPAGES[菜单 key] = async (view, 账号id) => {...}
+window.WXPAGES = window.WXPAGES || {};
 function renderSide() {
   const r = route();
   $('#navHome').classList.toggle('active', r.page === 'home');
@@ -132,13 +138,14 @@ function onLeave(fn) { cleanup.push(fn); }
 function setTop(title, actions = '') { $('#topTitle').innerHTML = title; $('#topActions').innerHTML = actions; }
 async function render() {
   cleanup.forEach((f) => { try { f(); } catch (e) { /**/ } }); cleanup = [];
+  $$('.modal-bg, .lightbox').forEach((el) => el.remove());     // 换页时关掉上一页没关的弹窗
   $('#app').classList.remove('side-open');
   const r = route(); renderSide();
   const view = $('#view'); view.className = 'content'; view.innerHTML = '';
   if (r.page === 'home') return pageHome(view);
   if (r.page === 'add') return pageAdd(view);
   if (!acct(r.id)) { if (!accounts.length) await loadAccounts(); if (!acct(r.id)) { location.hash = '#/'; return; } }
-  const fn = {overview: pageAccount, chats: pageChats, desktop: pageDesktop, send: pageSend}[r.sub];
+  const fn = {overview: pageAccount, chats: pageChats, desktop: pageDesktop, send: pageSend}[r.sub] || window.WXPAGES[r.sub];
   if (fn) return fn(view, r.id);
   if (LEGACY[r.sub]) return pageLegacy(view, r.id, r.sub);
   location.hash = `#/a/${r.id}`;
@@ -231,7 +238,7 @@ function pageAdd(view) {
     } catch (e) { $('#klog').textContent = '读取密钥失败：' + e.message + '\n可以稍后在账号概览里点「刷新密钥」重试。'; }
     step = 4;
     draw(`<div class="card card-body stack" style="align-items:flex-start"><h2>✓ 添加完成</h2>
-      <div class="muted">机器人默认已启动。接下来可以在「机器人与 AI」里配置人设和规则。</div>
+      <div class="muted">机器人默认已启动。接下来可以在「机器人与规则」「人设与画像」里配置。</div>
       <a class="btn primary" href="#/a/${id}">打开这个微信</a></div>`);
     loadAccounts(true);
   }
@@ -258,7 +265,7 @@ function pageAccount(view, id) {
           <div class="row wrap" style="margin-top:14px"><button class="btn sm" id="keyBtn">刷新密钥</button><button class="btn sm" id="imgKeyBtn">抓图片密钥</button></div></div></div>
         <div class="card"><div class="card-head"><h2>机器人</h2><label class="switch"><input type="checkbox" id="botSw" ${s.bot_running ? 'checked' : ''}><span></span></label></div>
           <div class="card-body"><div class="muted small" style="margin-bottom:12px">${s.bot_running ? '正在监听新消息并按规则/人设自动回复' : '已停止：不会自动回复'}</div>
-          <div class="row wrap"><a class="btn sm" href="#/a/${id}/ai">机器人与 AI 设置</a><a class="btn sm" href="#/a/${id}/persona">画像与人设</a></div></div></div>
+          <div class="row wrap"><a class="btn sm" href="#/a/${id}/bot">机器人与规则</a><a class="btn sm" href="#/a/${id}/persona">人设与画像</a></div></div></div>
         <div class="card"><div class="card-head"><h2>发送</h2><span class="badge ${s.send_mode === 'direct' ? 'blue' : ''}">${s.send_mode === 'direct' ? '直发' : '界面发送'}</span></div>
           <div class="card-body"><dl class="kv"><dt>微信版本</dt><dd>${esc(d.version || '未适配')}</dd><dt>直发</dt><dd>${d.supported ? (d.attached ? '已连接' : '支持，未连接') : '这个版本/架构不支持'}</dd></dl>
           <div class="chips" style="margin:12px 0">${caps}</div><a class="btn sm" href="#/a/${id}/send">发送设置</a></div></div>
@@ -355,7 +362,7 @@ async function pageSend(view, id) {
     <div class="card"><div class="card-head"><h2>直发能力</h2></div><div class="card-body">
       <dl class="kv"><dt>微信版本</dt><dd>${esc(ds.version || '未适配')}</dd><dt>连接</dt><dd>${ds.attached ? '已连接' : '未连接'}${ds.logged_in ? ' · 已登录' : ''}</dd></dl>
       <div class="chips" style="margin-top:12px">${['revoke:撤回', 'voice:语音条', 'quote:引用回复', 'at:@提醒'].map((x) => { const [k, l] = x.split(':'); return `<span class="badge ${ds[k] ? 'green' : ''}">${ds[k] ? '✓' : '–'} ${l}</span>`; }).join('')}</div>
-      <div class="row" style="margin-top:14px"><a class="btn sm" href="#/a/${id}/direct">直发测试与语音设置</a></div></div></div></div>`;
+      <div class="row" style="margin-top:14px"><a class="btn sm" href="#/a/${id}/direct">直发测试</a><a class="btn sm" href="#/a/${id}/voices">音色与复刻</a></div></div></div></div>`;
   const seg = () => $$('#modeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.m === mode.mode));
   seg();
   const save = async (patch) => { try { mode = Object.assign(mode, await A(id, '/api/send_mode', {method: 'POST', json: patch})); seg(); toast('已保存'); loadAccounts(true); } catch (e) { toast(e.message, 'err'); } };
@@ -365,8 +372,8 @@ async function pageSend(view, id) {
 
 // ---------------- 旧版页面 ----------------
 function pageLegacy(view, id, key) {
-  const [path, title, desc] = LEGACY[key]; const s = acct(id);
-  setTop(`<div class="row">${avatar(s, 'sm')}<h1>${esc(title)}</h1><span class="faint small ellipsis">${esc(desc)}</span></div>`,
+  const [path, title] = LEGACY[key]; const s = acct(id);
+  setTop(`<div class="row">${avatar(s, 'sm')}<h1>${esc(title)}</h1><span class="faint small ellipsis">旧版页面</span></div>`,
     `<a class="btn sm ghost" href="/a/${id}${path}" target="_blank">新窗口打开 ↗</a>`);
   view.className = 'content flush';
   view.innerHTML = `<iframe class="frame" src="/a/${id}${path}"></iframe>`;
@@ -476,6 +483,38 @@ async function pageChats(view, id) {
   onLeave(() => { clearInterval(t1); clearInterval(t2); });
 }
 window.lightbox = lightbox;
+
+// ---------------- 公共组件:选择联系人/群 ----------------
+// 返回 {username, name, is_group} 或 null。opts.groups=false 只列联系人;opts.title 标题
+async function pickChat(id, opts = {}) {
+  const [contacts, groups] = await Promise.all([A(id, '/api/contacts').catch(() => []),
+    opts.groups === false ? [] : A(id, '/api/groups').catch(() => [])]);
+  const items = [...groups.map((g) => ({username: g.username, name: g.name || g.username, is_group: true, sub: `群 · ${g.member_count || '?'} 人`})),
+    ...contacts.map((c) => ({username: c.username, name: c.remark || c.name || c.nick_name || c.username, is_group: false, sub: c.alias || c.username}))];
+  return new Promise((resolve) => {
+    const bg = document.createElement('div'); bg.className = 'modal-bg';
+    bg.innerHTML = `<div class="modal" style="width:min(520px,calc(100vw - 32px))"><div class="mh"><h2>${esc(opts.title || '选择联系人或群')}</h2></div>
+      <div class="mb"><input class="input" placeholder="搜索名字、备注、微信号" id="pk-q"><div id="pk-l" style="max-height:52vh;overflow:auto;margin-top:10px"></div></div>
+      <div class="mf"><button class="btn" data-x>取消</button></div></div>`;
+    const draw = () => {
+      const q = $('#pk-q', bg).value.trim().toLowerCase();
+      const list = items.filter((x) => !q || x.name.toLowerCase().includes(q) || x.username.toLowerCase().includes(q) || (x.sub || '').toLowerCase().includes(q)).slice(0, 300);
+      $('#pk-l', bg).innerHTML = list.map((x, i) => `<div class="chat-item" data-i="${items.indexOf(x)}" style="border-radius:8px">
+        <img class="avatar sm" src="/a/${id}/api/avatar?username=${encodeURIComponent(x.username)}" onerror="this.style.visibility='hidden'">
+        <div class="grow"><div class="n ellipsis">${esc(x.name)}</div><div class="s ellipsis">${esc(x.sub || '')}</div></div></div>`).join('') || '<div class="empty">没有匹配的</div>';
+    };
+    bg.addEventListener('click', (e) => {
+      const it = e.target.closest('[data-i]');
+      if (it) { bg.remove(); resolve(items[+it.dataset.i]); return; }
+      if (e.target === bg || e.target.closest('[data-x]')) { bg.remove(); resolve(null); }
+    });
+    document.body.appendChild(bg); $('#pk-q', bg).oninput = draw; draw(); $('#pk-q', bg).focus();
+  });
+}
+
+// 给页面模块用的公共工具
+window.WX = {$, $$, esc, sleep, api, A, toast, modal, busy, lightbox, badge, avatar, acct: (id) => acct(id),
+  accounts: () => accounts, loadAccounts, setTop, onLeave, fmtTime, pickChat, STATE};
 
 // ---------------- 启动 ----------------
 $('#menuBtn').onclick = () => $('#app').classList.toggle('side-open');

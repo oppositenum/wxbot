@@ -671,9 +671,11 @@ def update_task(id, fields, creator_wxid=None):
             if not mw:
                 return None, f"群里找不到成员：{mention}"
             t["mention_wxid"], t["mention_display"] = mw, md
-    for k in ("title", "prompt", "persona"):
+    for k in ("title", "prompt"):
         if k in upd:
             t[k] = (upd[k] or "").strip() or (t.get(k) if k != "prompt" else "")
+    if "persona" in upd:                  # 传空 = 清掉任务人设,改用会话/全局人设
+        t["persona"] = (upd["persona"] or "").strip() or None
     if "use_llm" in upd:
         t["use_llm"] = bool(upd["use_llm"])
     if "quiet" in fields:                 # 免打扰窗口(陪伴问候用)

@@ -1,0 +1,42 @@
+/* schedule 页面样式 */
+.sch [hidden], .sch-sheet [hidden] { display: none !important; }
+.sch-ex { border: 1px solid var(--line); background: #fff; border-radius: 99px; padding: 4px 11px; font-size: 12px; color: var(--text-2); cursor: pointer; }
+.sch-ex:hover { border-color: var(--brand); color: var(--brand-d); }
+
+.sch-row { display: grid; grid-template-columns: 28px minmax(0, 1fr) 190px 38px auto; gap: 14px; align-items: center; padding: 14px 20px; border-top: 1px solid var(--line-2); }
+.sch-row:first-child { border-top: 0; }
+.sch-row.off .sch-main, .sch-row.off .avatar { opacity: .5; }
+.sch-row > .avatar { align-self: start; margin-top: 2px; }
+.sch-main { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.sch-main .n { font-weight: 600; }
+.sch-main .s { font-size: 12px; color: var(--text-2); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.sch-to { color: var(--text); }
+.sch-prompt { align-self: flex-start; max-width: 100%; font-size: 12px; color: var(--text-2); background: var(--gray-50); border-radius: 7px; padding: 5px 9px; white-space: pre-wrap; word-break: break-word;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.sch-when { font-size: 13px; display: flex; flex-direction: column; gap: 2px; }
+.sch-acts { display: flex; gap: 2px; }
+@media (max-width: 900px) {
+  .sch-row { grid-template-columns: 28px minmax(0, 1fr) 38px; }
+  .sch-when { grid-column: 2; } .sch-acts { grid-column: 2 / -1; }
+}
+
+.sch-hist { display: flex; flex-direction: column; border: 1px solid var(--line-2); border-radius: 10px; overflow: hidden; }
+.sch-hrow { display: flex; align-items: center; gap: 10px; padding: 8px 12px; font-size: 13px; border-top: 1px solid var(--line-2); }
+.sch-hrow:first-child { border-top: 0; }
+.sch-hrow .t { width: 110px; color: var(--text-2); flex: none; }
+.sch-pre { white-space: pre-wrap; line-height: 1.7; }
+.sch-log summary { cursor: pointer; font-size: 13px; color: var(--text-2); }
+.sch-log pre { margin: 8px 0 0; max-height: 220px; overflow: auto; background: var(--gray-50); border-radius: 8px; padding: 10px 12px; font: 12px/1.6 ui-monospace, Menlo, monospace; color: var(--text-2); white-space: pre-wrap; }
+
+.sch-sheet .mb { max-height: calc(100vh - 200px); overflow: auto; }
+.sch-sheet .sch-err { color: var(--red); }
+.sch-when-box { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
+.sch-days { display: flex; gap: 6px; flex-wrap: wrap; }
+.sch-days label { cursor: pointer; }
+.sch-days input { display: none; }
+.sch-days span { display: inline-grid; place-items: center; width: 38px; height: 32px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; color: var(--text-2); }
+.sch-days input:checked + span { background: var(--brand-50); border-color: var(--brand); color: var(--brand-d); font-weight: 600; }
+.sch-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 6px 3px 3px; border: 1px solid var(--line); border-radius: 9px; font-size: 13px; }
+.sch-chip .avatar.sm { width: 22px; height: 22px; }
+.sch-chip button { border: 0; background: none; cursor: pointer; color: var(--text-3); font-size: 15px; padding: 0 2px; }
+.sch code { background: var(--gray-50); border-radius: 4px; padding: 0 4px; }

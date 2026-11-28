@@ -235,6 +235,17 @@ class DirectSendRoutesTest(unittest.TestCase):
         stage.assert_called_once()
         send.assert_called_once_with("1@chatroom", "/w/direct_media/x.png", "群", "p.png")
 
+    def test_non_media_upload_goes_out_as_file_card(self):
+        import io
+        self.client.post("/api/auth/login", json={"username": "u", "password": "p"})
+        with patch("core.direct_send.stage_file", return_value="/w/direct_files/报告.pdf") as stage, \
+             patch("core.direct_send.send_file", return_value={"ok": True}) as send:
+            r = self.client.post("/api/direct/send_image", content_type="multipart/form-data", data={
+                "chat": "1@chatroom", "name": "群", "file": (io.BytesIO(b"%PDF-1.7 xx"), "报告.pdf")})
+        self.assertEqual(r.status_code, 200)
+        stage.assert_called_once_with(b"%PDF-1.7 xx", "报告.pdf")
+        send.assert_called_once_with("1@chatroom", "/w/direct_files/报告.pdf", "群", "报告.pdf")
+
 
 if __name__ == "__main__":
     unittest.main()

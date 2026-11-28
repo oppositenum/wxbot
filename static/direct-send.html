@@ -78,7 +78,7 @@ button.primary{background:#23815a;color:#fff;border-color:#23815a}button:disable
           <label>微软音色 <select id="vName"></select></label></div>
         <div class="line"><label>语速 <input type="range" id="vRate" min="-50" max="50" step="1"><span id="vRateT"></span></label>
           <label>音调 <input type="range" id="vPitch" min="-50" max="50" step="1"><span id="vPitchT"></span></label></div>
-        <div class="line"><button type="button" id="vSave">保存</button><button type="button" id="vDefault">设为默认</button><button type="button" id="vDel">删除/恢复预设</button>
+        <div class="line"><button type="button" id="vSave">保存</button><button type="button" id="vDefault">设为默认</button><button type="button" id="vDel">删除/恢复预设</button><button type="button" id="vHide">隐藏</button><button type="button" id="vUnhide" style="display:none">显示全部预设</button>
           <span style="flex:1"></span><input class="small" id="vNewKey" placeholder="新音色 key，如 my_voice" style="width:190px"><button type="button" id="vNew">新增</button></div>
         <div class="line" style="border-top:1px solid #eef2ef;padding-top:8px"><b style="font-size:13px">复刻音色</b>
           <span class="muted" style="font-size:13px">上传 10～60 秒的录音或视频（一个人说话、没有背景音乐），用阿里云百炼 CosyVoice 复刻成新音色。只能用本人或已获授权的声音。</span></div>
@@ -137,6 +137,8 @@ function fillVoice(){
   $('#vName').value=v.name;
   $('#vRate').value=parseInt(v.rate)||0;$('#vPitch').value=parseInt(v.pitch)||0;showRP();
   $('#vDel').textContent=v.builtin?'恢复预设':'删除';$('#vDel').disabled=v.builtin&&!v.changed;
+  $('#vHide').style.display=v.builtin?'':'none';
+  $('#vUnhide').style.display=(tts.hidden||[]).length?'':'none';$('#vUnhide').textContent='显示全部预设（已隐藏 '+(tts.hidden||[]).length+' 个）';
 }
 function showRP(){const r=+$('#vRate').value,p=+$('#vPitch').value;$('#vRateT').textContent=(r>=0?'+':'')+r+'%';$('#vPitchT').textContent=(p>=0?'+':'')+p+'Hz';}
 function editFields(){const r=+$('#vRate').value,p=+$('#vPitch').value;return {label:$('#vLabel').value.trim(),name:$('#vName').value,rate:(r>=0?'+':'')+r+'%',pitch:(p>=0?'+':'')+p+'Hz'};}
@@ -251,6 +253,8 @@ $('#cGo').onclick=async()=>{
 $('#vSave').onclick=()=>ttsCfg({voice:Object.assign({key:$('#voice').value},editFields())});
 $('#vDefault').onclick=()=>ttsCfg({default:$('#voice').value});
 $('#vDel').onclick=()=>{const v=curVoice();if(confirm(v.builtin?'恢复「'+v.label+'」的预设参数？':'删除音色「'+v.label+'」？'))ttsCfg({delete:v.key},v.builtin?v.key:'');};
+$('#vHide').onclick=()=>{const v=curVoice();if(v&&v.builtin&&confirm('隐藏内置音色「'+v.label+'」？之后可点「显示全部预设」找回。'))ttsCfg({hidden:(tts.hidden||[]).concat([v.key])});};
+$('#vUnhide').onclick=()=>ttsCfg({hidden:[]});
 $('#vNew').onclick=()=>{const k=$('#vNewKey').value.trim();if(!k){ttsMsg('先填新音色 key','bad');return;}const f=editFields();f.label=f.label+'（新）';ttsCfg({voice:Object.assign({key:k},f)},k);$('#vNewKey').value='';};
 $('#revoke').onclick=async()=>{
   if($('#revoke').disabled)return;

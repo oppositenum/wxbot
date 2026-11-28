@@ -1609,7 +1609,7 @@ def api_tts_config():
 @app.post("/api/tts/config")
 def api_tts_config_set():
     """JSON:{voice:{key,label,name,rate,pitch,volume}} 新增/修改;{delete:key} 删除或恢复预设;{default:key};
-    {send_as:"video"|"file"} 语音发送形式。"""
+    {send_as:"video"|"file"} 语音发送形式;{hidden:[预设key]} 隐藏内置音色;{keep_only:[key]} 只留这些音色。"""
     from core import tts
     data = request.get_json(silent=True) or {}
     try:
@@ -1618,6 +1618,10 @@ def api_tts_config_set():
             out = tts.save_voice(v.get("key"), v)
         elif data.get("delete"):
             out = tts.delete_voice(str(data["delete"]))
+        elif "keep_only" in data:
+            out = tts.keep_only([str(k) for k in data["keep_only"] or []])
+        elif "hidden" in data:
+            out = tts.set_hidden([str(k) for k in data["hidden"] or []])
         else:
             out = tts.get_config()
         if data.get("default"):

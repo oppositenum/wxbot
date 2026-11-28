@@ -71,9 +71,11 @@ def _write(d):
     os.replace(tmp, _path())
 
 
-def get_config():
-    """{default, voices:[{key,label,name,rate,pitch,volume,builtin,changed}]}。用户改动覆盖预设。"""
+def get_config(include_hidden=False):
+    """{default, send_as, hidden, voices:[{key,label,name,rate,pitch,volume,builtin,changed}]}。用户改动覆盖预设。
+    hidden 里的内置音色不出现在列表里(只隐藏,复刻音色合成失败时仍在后台拿 DEFAULT_KEY 兜底)。"""
     d = _read()
+    hidden = [k for k in (d.get("hidden") or []) if k in PRESETS]
     custom = d.get("voices") or {}
     voices = []
     for key, base in PRESETS.items():
@@ -83,10 +85,36 @@ def get_config():
     for key, v in custom.items():
         if key not in PRESETS:
             voices.append(dict({"volume": "+0%"}, **v, key=key, builtin=False, changed=True))
-    keys = {v["key"] for v in voices}
-    default = d.get("default") if d.get("default") in keys else DEFAULT_KEY
+    shown = [v for v in voices if v["key"] not in hidden]
+    keys = [v["key"] for v in shown] or [DEFAULT_KEY]
+    default = d.get("default") if d.get("default") in keys else (DEFAULT_KEY if DEFAULT_KEY in keys else keys[0])
     send_as = d.get("send_as") if d.get("send_as") in SEND_AS else "video"
-    return {"default": default, "send_as": send_as, "voices": voices}
+    return {"default": default, "send_as": send_as, "hidden": hidden,
+            "voices": voices if include_hidden else shown}
+
+
+def set_hidden(keys):
+    """隐藏这些内置音色(不在 PRESETS 里的 key 忽略);传空列表 = 全部显示。"""
+    keys = [k for k in dict.fromkeys(keys or []) if k in PRESETS]
+    with _lock:
+        d = _read()
+        if keys:
+            d["hidden"] = keys
+        else:
+            d.pop("hidden", None)
+        _write(d)
+    return get_config()
+
+
+def keep_only(keys):
+    """只留下这些音色:其余内置音色全部隐藏(自定义音色不受影响),默认音色设成第一个。"""
+    keys = list(keys or [])
+    for k in keys:
+        get_voice(k)
+    set_hidden([k for k in PRESETS if k not in keys])
+    if keys:
+        set_default(keys[0])
+    return get_config()
 
 
 def set_send_as(mode):
@@ -104,7 +132,7 @@ def send_as():
 
 
 def get_voice(key=None):
-    cfg = get_config()
+    cfg = get_config(include_hidden=True)      # 隐藏的音色也要能用(兜底、旧配置)
     key = key or cfg["default"]
     for v in cfg["voices"]:
         if v["key"] == key:

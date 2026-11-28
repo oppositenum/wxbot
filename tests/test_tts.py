@@ -41,6 +41,26 @@ class TTSConfigTest(unittest.TestCase):
         tts.delete_voice("mine")
         self.assertEqual(tts.get_config()["default"], tts.DEFAULT_KEY)
 
+    def test_keep_only_hides_presets_but_still_resolves_them(self):
+        tts.add_clone_voice("my_clone", "我的声音", "vid-1", "cosyvoice-v3.5-plus")
+        cfg = tts.keep_only(["my_clone"])
+        self.assertEqual([v["key"] for v in cfg["voices"]], ["my_clone"])
+        self.assertEqual(cfg["default"], "my_clone")
+        self.assertEqual(set(cfg["hidden"]), set(tts.PRESETS))
+        self.assertEqual(tts.get_voice()["key"], "my_clone")
+        self.assertEqual(tts.get_voice(tts.DEFAULT_KEY)["key"], tts.DEFAULT_KEY)   # 兜底仍可用
+        self.assertEqual(len(tts.get_config(include_hidden=True)["voices"]), len(tts.PRESETS) + 1)
+        cfg = tts.set_hidden([])
+        self.assertEqual(len(cfg["voices"]), len(tts.PRESETS) + 1)
+        self.assertEqual(cfg["default"], "my_clone")
+
+    def test_hidden_default_falls_back_to_visible(self):
+        tts.set_hidden(["warm_low", "nope"])
+        cfg = tts.get_config()
+        self.assertEqual(cfg["hidden"], ["warm_low"])
+        self.assertNotEqual(cfg["default"], "warm_low")
+        self.assertIn(cfg["default"], {v["key"] for v in cfg["voices"]})
+
     def test_validation(self):
         for bad in ({"rate": "fast"}, {"pitch": "-5%"}, {"name": "rm -rf /"}):
             with self.assertRaises(tts.TTSError):

@@ -1,3 +1,4 @@
+import unittest
 """bot 回复发送方式切换(界面自动化 / 直发):离线,不连真微信。"""
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -103,3 +104,19 @@ class SendModeTest(Isolated):
         with self.assertRaises(ValueError):
             send_mode.set('nope')
         self.assertEqual(send_mode.get()['mode'], 'ui')
+
+
+class VoiceGoesToUITest(unittest.TestCase):
+    def test_voice_is_handed_to_ui_adapter(self):
+        from core.direct_sender import DirectSendAdapter
+        calls = []
+
+        class UI:
+            def submit(self, *a, **k):
+                calls.append((a, k))
+                return {"ok": True, "status": "submitted", "reason": "legacy_ui_submitted"}
+
+        r = DirectSendAdapter(fallback=UI()).submit("小A", "wxid_a", "voice", "/w/x.wav", job_id="j1")
+        self.assertEqual(r["status"], "submitted")
+        self.assertEqual(calls[0][0], ("小A", "wxid_a", "voice", "/w/x.wav"))
+        self.assertEqual(calls[0][1]["job_id"], "j1")

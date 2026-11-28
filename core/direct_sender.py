@@ -42,6 +42,10 @@ class DirectSendAdapter:
         from core import direct_send, reply_policy
         args = (display, chat, kind, payload)
         kw = dict(job_id=job_id, session=session, proactive_ticket=proactive_ticket)
+        # 语音条只能在界面里录(点「发语音」+ 虚拟麦克风),直发做不了:整单交给界面,
+        # 不看「回退」开关(那个开关管的是直发失败时要不要改走界面)。
+        if kind == 'voice' and self.fallback:
+            return self.fallback.submit(*args, **kw)
         token = session or sessions.capture()
         jid = job_id or send_ledger.next_id()
         kw['job_id'] = jid

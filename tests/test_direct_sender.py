@@ -131,6 +131,40 @@ class SendModeTest(Isolated):
             self.assertFalse(bot._quote_reply('g@chatroom', dict(msg, is_self=True)))
             self.assertFalse(bot._quote_reply('g@chatroom', {'is_self': False}))
 
+    def test_group_at_only_when_switched_on_and_several_people_talk(self):
+        from core import bot
+        now = 1000
+        msg = {'local_id': 9, 'is_self': False, 'sender': 'wxid_b', 'sender_name': '黎深', 'create_time': now}
+        alone = [dict(msg, local_id=8)]
+        crowd = alone + [{'sender': 'wxid_c', 'is_self': False, 'create_time': now - 60}]
+        old = [{'sender': 'wxid_c', 'is_self': False, 'create_time': now - 3600}]
+        send_mode.set('direct')
+        with patch('core.direct_send.at_supported', return_value=True):
+            self.assertIsNone(bot._group_at_target('g@chatroom', msg, crowd))          # 默认关
+            send_mode.set(group_at=True)
+            self.assertEqual(bot._group_at_target('g@chatroom', msg, crowd), ('wxid_b', '黎深'))
+            self.assertIsNone(bot._group_at_target('g@chatroom', msg, alone))          # 只有一个人在说
+            self.assertIsNone(bot._group_at_target('g@chatroom', msg, old))            # 别人说话太久了
+            self.assertIsNone(bot._group_at_target('wxid_b', msg, crowd))              # 私聊
+        self.assertIsNone(bot._group_at_target('g@chatroom', msg, crowd))              # 版本不支持 @
+
+    def test_draw_notice_quotes_request_only_when_switched_on(self):
+        from core import bot
+        msg = {'local_id': 9, 'is_self': False}
+        send_mode.set('direct')
+        with patch.object(sender, 'send_quote') as q, patch.object(sender, 'send_text') as t, \
+             patch('core.direct_send.quote_supported', return_value=True):
+            bot._draw_notice('wxid_a', 'A', msg, '在画了。')
+            bot._draw_notice('wxid_a', 'A', msg, '在画了。', plain=False)
+            q.assert_not_called(); t.assert_called_once()
+            send_mode.set(draw_quote=True)
+            bot._draw_notice('wxid_a', 'A', msg, '在画了。', plain=False)
+            q.assert_called_once_with('A', 'wxid_a', 9, '在画了。')
+
+    def test_unknown_flag_is_rejected(self):
+        with self.assertRaises(ValueError):
+            send_mode.set(nope=True)
+
     def test_injected_adapter_is_not_replaced(self):
         send_mode.set('direct')
         other = object()

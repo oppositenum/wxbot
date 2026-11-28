@@ -1559,10 +1559,9 @@ def api_send_mode_set():
     """机器人回复的发送方式:ui=界面自动化,direct=直发。立即生效。"""
     from core import send_mode
     data = request.get_json(silent=True) or {}
-    fallback, gq = data.get("fallback"), data.get("group_quote")
+    flags = {k: data[k] for k in send_mode.FLAGS if isinstance(data.get(k), bool)}
     try:
-        cur = send_mode.set(data.get("mode"), fallback if isinstance(fallback, bool) else None,
-                            gq if isinstance(gq, bool) else None)
+        cur = send_mode.set(data.get("mode"), **flags)
     except ValueError as e:
         return jsonify(error=str(e)), 400
     return jsonify(cur)

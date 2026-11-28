@@ -418,7 +418,7 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
         q = (batch[-1].get("content") or "").strip()
         if _wants_image(q):
             return _niu_draw(q, chat_username,
-                             _recent_inbound_image(chat_username, context_msgs, batch))
+                             _recent_inbound_image(chat_username, context_msgs, batch), msg=batch[-1])
         role = (persona.get("persona") or "")[:400]
         sys_n = (
             "你在微信里被「牛来」点名。只根据当前角色用一两句口语回答问题。\n"
@@ -558,7 +558,7 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
     if wants_image:
         # 触发出图就真画真发，不把生图丢给模型自由发挥（会编外链或说发不出）。
         return _draw_then_chat(system, ask, turns, chat_username, persona,
-                               _recent_inbound_image(chat_username, context_msgs, batch))
+                               _recent_inbound_image(chat_username, context_msgs, batch), msg=msg)
     wants_lookup = _wants_lookup(inbound or direct or ask)
     # 闲聊不挂工具。只有对方明确要查，并且这个会话允许 agent 时才查。
     if wants_lookup and agent_allowed and not is_group:
@@ -684,7 +684,35 @@ def _recent_inbound_image(chat_username, context_msgs, batch_msgs):
     return None
 
 
-def _niu_draw(ask, chat_username, reference=None):
+def _flag(name):
+    try:
+        from core import send_mode
+        return bool(send_mode.get().get(name))
+    except Exception:
+        return False
+
+
+def _quotable(chat_username, msg):
+    return bool(msg and msg.get('local_id') and not msg.get('is_self')
+                and sender.supports(chat_username, 'quote'))
+
+
+def _draw_notice(chat_username, display, msg, text, plain=True):
+    """画图前那句「在画了」:draw_quote 开着且做得了引用时,引用对方要图的那条消息;
+    否则 plain=True 照旧发普通文字,plain=False 不发。"""
+    token = send_ledger._operation.set(None)
+    try:
+        if _flag('draw_quote') and _quotable(chat_username, msg):
+            return sender.send_quote(display, chat_username, msg['local_id'], text)
+        if plain:
+            return sender.send_text(display, text, chat_username=chat_username)
+    except Exception:
+        return None
+    finally:
+        send_ledger._operation.reset(token)
+
+
+def _niu_draw(ask, chat_username, reference=None, msg=None):
     """牛来要图：先回一句在画，再生图发到本会话。"""
     from core import read_access
     prompt = " ".join((ask or "").split())[:800] or "simple illustration"
@@ -696,14 +724,7 @@ def _niu_draw(ask, chat_username, reference=None):
         display = send_name_for(chat_username)
     except Exception:
         display = chat_username
-    try:
-        token = send_ledger._operation.set(None)
-        try:
-            sender.send_text(display, niu_mode.stamp("在画了。"), chat_username=chat_username)
-        finally:
-            send_ledger._operation.reset(token)
-    except Exception:
-        pass
+    _draw_notice(chat_username, display, msg, niu_mode.stamp("在画了。"))
     cfg = llm.load_cfg()
     ctx = {"chat": chat_username, "cfg": cfg, "display_name": display,
            "reference": reference, "read_access": read_access.issue(chat_username)}
@@ -716,7 +737,7 @@ def _niu_draw(ask, chat_username, reference=None):
     return "画不了：" + drawn[:80]
 
 
-def _draw_then_chat(system, ask, turns, chat_username, persona, reference=None):
+def _draw_then_chat(system, ask, turns, chat_username, persona, reference=None, msg=None):
     """联系人关掉全文 Agent 时，要图仍走画图工具，聊天继续走当前模型。"""
     from core import read_access
     prompt = llm.chat(
@@ -733,6 +754,7 @@ def _draw_then_chat(system, ask, turns, chat_username, persona, reference=None):
         display = send_name_for(chat_username)
     except Exception:
         display = chat_username
+    _draw_notice(chat_username, display, msg, "在画了，稍等。", plain=False)
     ctx = {"chat": chat_username, "cfg": llm.load_cfg(),
            "display_name": display, "reference": reference,
            "read_access": read_access.issue(chat_username)}
@@ -1164,8 +1186,12 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
                 log(f"  [拟人] 打字延迟 {_td:.1f}s")
                 time.sleep(_td)
             jid = send_ledger.stable_id(sessions.capture()['account'], chat_username, 'reply_part', [msg.get('local_id'), index])
+            at_who = _group_at_target(chat_username, msg, context_msgs, batch_msgs) if index == 1 else None
             if index == 1 and _quote_reply(chat_username, msg):
-                r = sender.send_quote(target, chat_username, msg['local_id'], part, job_id=jid)
+                r = sender.send_quote(target, chat_username, msg['local_id'], part, job_id=jid,
+                                      at=[at_who[0]] if at_who else None)
+            elif at_who:
+                r = sender.send_at(target, chat_username, at_who[0], at_who[1], part, job_id=jid)
             else:
                 r = sender.send_text(target, part, chat_username=chat_username, job_id=jid)
             log(f"  AI回复[{persona['name']}] 第{index}条 -> {target}: {part!r} => {r}")
@@ -1182,13 +1208,32 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
     return r if kind in ("reply", "forward", "reply_ai") else {"ok": False, "status": "failed", "reason": "unknown_action"}
 
 
+GROUP_AT_WINDOW = 600     # 看最近 10 分钟里有几个人在说话
+
+
+def _group_at_target(chat_username, msg, context_msgs=None, batch_msgs=None):
+    """group_at 开着、群里最近有两个以上的人在说话时,回复要 @ 的人 (wxid, 名字);否则 None。"""
+    if not (chat_username or '').endswith('@chatroom') or not msg or msg.get('is_self'):
+        return None
+    who = msg.get('sender')
+    if not who or not _flag('group_at') or not sender.supports(chat_username, 'at'):
+        return None
+    now = msg.get('create_time') or time.time()
+    talkers = {m.get('sender') for m in list(context_msgs or []) + list(batch_msgs or [msg])
+               if m.get('sender') and not m.get('is_self')
+               and now - (m.get('create_time') or now) <= GROUP_AT_WINDOW}
+    if len(talkers | {who}) < 2:
+        return None
+    return who, msg.get('sender_name') or ''
+
+
 def _quote_reply(chat_username, msg):
     """群里回复要不要引用对方那句:开关打开、对方不是自己、这条有 local_id、当前发送方式做得了引用。"""
     if not (chat_username or '').endswith('@chatroom') or not msg or msg.get('is_self') or not msg.get('local_id'):
         return False
     try:
         from core import send_mode
-        return bool(send_mode.get().get('group_quote')) and sender.supports(chat_username, 'quote')
+        return bool(send_mode.get().get('group_quote')) and _quotable(chat_username, msg)
     except Exception:
         return False
 

@@ -50,7 +50,10 @@ button.primary{background:#23815a;color:#fff;border-color:#23815a}button:disable
     <label class="opt" id="opt-direct"><input type="radio" name="mode" value="direct"> <b>直发（实验）</b><span class="sub">直接调用微信底层发送，不操作界面，更快</span></label>
   </div>
   <label class="sub"><input type="checkbox" id="fallback"> 直发确定没发出时（未连接、未登录等）自动改用界面自动化；结果不确定时不回退，避免重复发送</label>
-  <label class="sub"><input type="checkbox" id="groupQuote"> 群里回复某人时，第一条引用对方那句话（直发 + 微信 4.1.13 才能做，做不到就照常发文字）</label>
+  <label class="sub"><input type="checkbox" id="groupQuote"> 群里回复某人时，第一条引用对方那句话</label>
+  <label class="sub"><input type="checkbox" id="groupAt"> 群里最近有多个人在说话时，回复第一条 @ 要回答的那个人</label>
+  <label class="sub"><input type="checkbox" id="drawQuote"> 画图时，发图前那句「在画了」引用对方要图的那条消息</label>
+  <div class="sub muted" style="font-size:12px">以上三项只有直发 + 微信 4.1.13 才能做，做不到时照常发文字。</div>
   <div class="sub" id="modeMsg" style="margin-top:6px"></div>
 </section>
 <div class="warn">支持文字和图片（PNG / JPG / GIF / WEBP，20MB 以内）。「已交给微信发送」只代表微信已接收；图片要等微信后台上传完才算真正发出，是否送达请在手机或 VNC 里看有没有红色感叹号。</div>
@@ -309,7 +312,7 @@ async function loadMode(){
   if(!r.ok){$('#modeMsg').textContent='读取失败';return;}
   document.querySelectorAll('input[name=mode]').forEach(x=>x.checked=x.value===d.mode);
   $('#opt-ui').classList.toggle('on',d.mode==='ui');$('#opt-direct').classList.toggle('on',d.mode==='direct');
-  $('#fallback').checked=!!d.fallback; $('#groupQuote').checked=!!d.group_quote;
+  $('#fallback').checked=!!d.fallback; $('#groupQuote').checked=!!d.group_quote; $('#groupAt').checked=!!d.group_at; $('#drawQuote').checked=!!d.draw_quote;
   $('#modeMsg').textContent='当前：'+(d.mode==='direct'?'直发':'界面自动化')+(d.updated?' · 修改于 '+fmt(d.updated):'');
 }
 async function saveMode(body){
@@ -321,6 +324,8 @@ async function saveMode(body){
 document.querySelectorAll('input[name=mode]').forEach(x=>x.onchange=()=>saveMode({mode:x.value}));
 $('#fallback').onchange=e=>saveMode({fallback:e.target.checked});
 $('#groupQuote').onchange=e=>saveMode({group_quote:e.target.checked});
+$('#groupAt').onchange=e=>saveMode({group_at:e.target.checked});
+$('#drawQuote').onchange=e=>saveMode({draw_quote:e.target.checked});
 loadMode();loadStatus();loadHistory();loadTTS().then(loadVR);setInterval(loadStatus,15000);setInterval(loadHistory,15000);
 </script>
 <script src="/static/nav.js"></script></html>

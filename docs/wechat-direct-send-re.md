@@ -291,7 +291,7 @@ Ghidra 全量分析 130MB 约 45 分钟（8 核，10G 内存），`PreFast.java`
 - Msg → 消息行：`0x5f09c2c(x8=行, x0=const Msg&)`。定位方法：消息行 vtable 的 GOT 槽(`.rela.dyn` 里 addend=`0xa1d8850` 的那条，槽 `0xa437a08`)有 30 多处 ADRP+LDR 引用，全挂上只记"参数 vtable"的计数钩子(`frida/hook_vt.js`)，界面切几次会话，收到 Msg 的那个就是。
 - 探测脚本 `frida/probe_msg.js` + `probe_run.py`：在协程里取服务、调 GetMsg、转消息行并导出，用来核对字段。
 
-**接口**：`direct_send.send(chat, text, at=[wxid] | "auto", quote=local_id)`；`at="auto"` 把正文里写的「@成员名」变成真 @(机器人直发时默认这样)。`sender.send_quote()`、`sender.send_at()` 在直发 + 4.1.13 下走底层，做不到时明确返回不支持(不悄悄降级成普通文字)。`/api/direct/send`、`/api/send` 都收 `at`/`quote`；直发页能选 @ 谁、引用哪条；「群里引用回复」开关在 `send_mode.json` 的 `group_quote`。
+**接口**：`direct_send.send(chat, text, at=[wxid] | "auto", quote=local_id)`；`at="auto"` 把正文里写的「@成员名」变成真 @(机器人直发时默认这样)。`sender.send_quote()`、`sender.send_at()` 在直发 + 4.1.13 下走底层，做不到时明确返回不支持(不悄悄降级成普通文字)。`/api/direct/send`、`/api/send` 都收 `at`/`quote`；直发页能选 @ 谁、引用哪条。机器人有三个开关(`send_mode.json`，默认全关，直发页可勾选)：`group_quote` 群里回复第一条引用对方那句；`group_at` 群里最近 10 分钟有两人以上在说话时，回复第一条 @ 要回答的人(和 group_quote 同时开就是引用+@)；`draw_quote` 画图发图前那句「在画了」引用对方要图的消息(引用回复只能是文字，图片本身带不了引用)。
 
 ### 3.15 数据库密钥（4.1.13，2026-11-28）
 

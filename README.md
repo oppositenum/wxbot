@@ -1,22 +1,26 @@
 # wxbot — Ubuntu 微信机器人
 
-单个 Ubuntu 24.04 容器同时运行 Linux 微信、XFCE/noVNC 桌面和管理后台。
-支持 `amd64`、`arm64`，可远程扫码登录、读取私聊和群聊、发送文本/图片并运行机器人。
+单个 Ubuntu 24.04 容器同时运行 Linux 微信（锁定 4.1.13.29）、XFCE/noVNC 桌面和管理后台。
+支持 `amd64`、`arm64`，可远程扫码登录、读取私聊和群聊、发送消息并运行 AI 机器人。
+
+发送有两种方式：**界面自动化**（模拟鼠标键盘，任何版本都能用）和 **直发**（在微信进程里直接调用发送函数，
+arm64 + 4.1.13，更快更稳，还能撤回、真 @、引用回复、发语音条），见下面「直发」一节。
 
 ## 架构
 
 ```
-┌─ Ubuntu 24.04 容器 ────────────────────────────────────┐
-│  XFCE + Xvfb + x11vnc + noVNC :6080                    │
-│  Linux 微信（/home/wechat 数据卷，保存登录态）           │
-│  密钥提取 + 解密 + 读取 + UI 发送                       │
-│  Flask API + Web 管理后台 :5100                         │
-│  /app/accounts 数据卷保存账号配置和解密数据              │
-└────────────────────────────────────────────────────────┘
+┌─ Ubuntu 24.04 容器 ──────────────────────────────────────────┐
+│  XFCE + Xvfb + x11vnc + noVNC :6080   PulseAudio 虚拟麦克风      │
+│  Linux 微信 4.1.13（/home/wechat 数据卷，保存登录态）            │
+│    └─ Frida 注入：直发 / 撤回 / @ / 引用 / 语音条 / 抓密钥       │
+│  密钥 + 解密 + 读取；界面发送（xdotool，直发不可用时的后备）      │
+│  Flask API + Web 管理后台 :5100（机器人、语音、朋友圈…）          │
+│  /app/accounts 数据卷保存账号密钥、人设、规则和解密数据           │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-镜像以普通用户运行微信，通过 `SYS_PTRACE` 读取同一容器内的数据库密钥；发送使用容器桌面里的
-`xdotool`。Compose 保存微信 Home 和应用账号目录，容器更新不会删除登录态和业务配置。
+镜像以普通用户运行微信，通过 `SYS_PTRACE` 附加同一容器内的微信进程（读库密钥、注入直发）。
+Compose 保存微信 Home 和应用账号目录，容器更新不会删除登录态和业务配置。
 
 ## 目录
 
@@ -26,9 +30,15 @@ docker/
   start.sh              容器入口：桌面/VNC/微信/后台
   linux_keys.py         取密钥(容器内)
   wx_send.py            xdotool 发送(容器内)
+  wechat-deb/           可选：固定版本的微信 deb（离线构建）
 core/
   decrypt.py  db.py  contacts.py  messages.py  avatars.py  protobuf.py
-  docker_wx.py          微信状态、密钥和发送接口
+  docker_wx.py          微信状态、密钥和界面发送
+  db_keys.py            数据库/图片密钥：验证、合并、4.1.13 用 hook 抓
+  direct_send.py        直发（Python 侧）  direct_send_agent.js  注入微信的 agent
+  direct_send_profiles.py  各微信版本的偏移（按 sha256 选）
+  sender.py  direct_sender.py  legacy_sender.py   发送调度：直发 / 界面 / 回退
+  bot.py                机器人  tts.py voice_*.py  语音与复刻音色
 config.py               数据和账号路径配置
 server.py               后台 API + 前端
 static/index.html       单页 UI
@@ -70,6 +80,35 @@ run.sh                  deploy.sh 的兼容别名
 
 默认端口只绑定 `127.0.0.1`。远程服务器通过 SSH 隧道访问；不要把无鉴权的后台直接暴露到公网。
 
+## 直发（底层发送）
+
+在微信进程里直接调用微信自己的发送函数，不动界面。**只在 arm64 + 微信 4.1.13.29（或 4.1.8）上可用**，
+其它情况自动停用并改走界面发送。
+
+| 能力 | 说明 |
+| --- | --- |
+| 文字 / 图片 / 视频 / 文件 | 一条约 0.1 秒；图片会等微信上传成功才算发出 |
+| 语音条 | 文字转语音（可用复刻音色）或音频文件，编成 SILK 直发，对方收到正常语音条 |
+| 撤回 | 自己发的、2 分钟内 |
+| @ 提醒 | 群里 @ 成员，对方收到「有人@我」；正文写「@成员名」自动变真 @ |
+| 引用回复 | 引用某条消息回复 |
+
+开启：后台「直发测试」页 → 发送方式选「直发」（建议同时勾「失败回退」）。机器人回复、定时消息、`/api/send`
+都会跟着走直发。群里自动 @ / 引用回复 / 画图引用请求是三个独立开关，默认关闭。
+
+需要知道的：
+
+- **一次图片/视频上传失败后，微信之后所有媒体上传都会失败，直到重启微信。** 机器人日志会提示；重启微信后在 noVNC 点「进入微信」。
+- 微信升级后偏移失效会自动停用直发；镜像锁定 4.1.13.29 就是为此。重新适配见 [docs/wechat-direct-send-re.md](docs/wechat-direct-send-re.md)。
+- 完整说明、接口参数、开关和排障见 **[docs/direct-send.md](docs/direct-send.md)**。
+
+## 语音
+
+- 文字转语音：内置免费微软音色；也可上传本人（或已授权）的录音/视频复刻音色，支持阿里云百炼、MiniMax、
+  火山引擎、ElevenLabs，每家可配多个 API Key 轮询，额度用完自动换下一个。见 [docs/voice-providers.md](docs/voice-providers.md)。
+- 机器人语音回复：可设为对方要求时 / 模型判断适合时 / 每条都用语音，可按会话单独设置；对方说「发语音」「别发语音」会自动切换。
+- 发送形式：真语音条（推荐，直发或界面录音）、声波视频、mp3 文件。
+
 ## API
 
 | 方法 | 路径 | 说明 |
@@ -84,6 +123,8 @@ run.sh                  deploy.sh 的兼容别名
 | GET  | `/api/avatar?username=` | 头像 |
 | POST | `/api/send` `{to, type:text|image, content|path}` | 发送 |
 | POST | `/api/upload` (multipart) | 上传图片，返回宿主路径供 send 用 |
+| GET/POST | `/api/direct/*` `/api/send_mode` | 直发、撤回、发送方式，见 [docs/direct-send.md](docs/direct-send.md) |
+| GET/POST | `/api/tts/*` `/api/voice/*` `/api/voice_reply` | 语音、复刻音色、厂商 key、语音回复设置 |
 
 完整字段、异步任务状态、图片上传和 curl 示例见 [docs/api-send.md](docs/api-send.md)。
 
@@ -115,7 +156,7 @@ run.sh                  deploy.sh 的兼容别名
 - `action.type`：`reply`(回当前会话)｜`forward`(转发到 `to`)；`text` 支持 `{content}{sender}{groupN}`
 - `include_self=false`：只对**他人**消息触发（机器人不回自己）
 - `watch`：监听哪些会话（联系人 wxid 或 群 `@chatroom`）
-- 引擎轮询解密库（**已叠加 WAL，秒级**）检测新消息，命中即经容器 `xdotool` 发送
+- 引擎轮询解密库（**已叠加 WAL，秒级**）检测新消息，命中后按「发送方式」直发或经容器 `xdotool` 界面发送
 - 前端「机器人」按钮启停；命令行： `python3 -m core.bot`
 
 机器人核心：`core/bot.py`（规则匹配 + 状态跟踪 `work/bot_state.json`，只处理启动后的新消息）。
@@ -187,7 +228,9 @@ docker exec wxbot python3 /usr/local/bin/wx_send.py image "某群名"  /tmp/pic.
 - **消息延迟**：微信用 WAL，宿主读的是已 checkpoint 的主库，最新几条可能有秒/分钟级延迟；后台每 10s 增量解密。
 - **发送目标**：对真实联系人/群，搜索名字回车即打开首个匹配并发送；`文件传输助手` 等**系统功能**因搜索首项是「搜一搜」网页结果，需特殊处理（真实机器人目标一般用不到）。
 - **单设备登录**：小号登录容器期间不能同时在别处登录该小号。
-- **密钥时效**：微信重启后密钥变化，需重新 `linux_keys.py`（后台「刷新密钥」按钮）。
+- **密钥**：数据库密钥在微信重启后不变；微信重建某个库（如升级时）会换新密钥，点「刷新密钥」即可。4.1.13 内存里扫不到密钥，
+  刷新时会改用 hook 抓（往自己的文件传输助手发几条测试消息触发读库）。刷新只合并验证通过的密钥，不会清掉已有的。
+- **媒体上传卡死**：一次图片/视频上传失败后微信之后的媒体全部失败，要重启微信（见「直发」一节）。
 - **窗口坐标**：`wx_send.py` 用固定窗口几何偏移点击侧栏搜索/文件按钮；若手动改了容器窗口大小可能需微调偏移。
 
 ## 构建并推送镜像（Docker Hub）
@@ -203,6 +246,9 @@ docker login                                         # 一次
 # 新机器:
 git clone <仓库> && cd wxbot && ./deploy.sh <Docker Hub 用户名>/wxbot:latest
 ```
+
+也可以推到私有仓库：把 `<用户名>/wxbot` 换成 `<仓库地址>/wxbot-wechat`（先 `docker login <仓库地址>`）。
+`.env` 里的 `WXBOT_IMAGE` 是 `deploy.sh` 默认拉取的镜像地址。
 
 镜像里只有程序和微信，不含 `.env`、账号密钥、聊天数据（`.dockerignore` 排除了 `accounts/ work/ llm_config.json`）。
 登录状态在数据卷 `wxdata` 里，账号密钥/人设/规则在 `appdata` 里，升级镜像不丢。
@@ -224,7 +270,7 @@ git clone <仓库> && cd wxbot && ./deploy.sh <Docker Hub 用户名>/wxbot:lates
 发送用屏幕自动化不够稳。正式部署只使用 Ubuntu 容器，相关代码保留备查。
 
 
-## 本轮修复后的路由、媒体与读取授权（代码待部署）
+## 模型路由、媒体读取与读取授权
 
 - 普通 `chat` 使用主 `provider` 及该 provider 原有的模型字段。工具调用默认也使用该路由；存在另一套凭据不构成切换授权。
 - 可显式设置 `tools_provider` 和/或 `tools_model`，AI 设置页展示并保存这两个字段。`tools_provider` 留空跟随主 provider；`tools_model` 留空使用所选 provider 的模型。工具轮和工具后的最终回复固定在同一条路由。不改写任何中转模型名称。

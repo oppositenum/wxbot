@@ -19,11 +19,13 @@ ENV DISPLAY=:0 \
 
 # 语音:ffmpeg 把音频转成声波视频;edge-tts 做免费的文字转语音
 USER root
+# EGL/GLES:微信 4.1.13 发视频要用它生成封面,缺了视频必失败,而且会把之后所有图片/文件上传拖坏
 # 基础镜像里 python3.12 带 cap_sys_ptrace(让 wechat 用户的 Frida 能附加微信),
 # buildkit 构建沙箱不允许执行带额外 capability 的程序(Operation not permitted),
 # 所以装包期间先去掉,装完再恢复。
 RUN setcap -r /usr/bin/python3.12 \
     && apt-get update && apt-get install -y --no-install-recommends ffmpeg python3-pip \
+       libegl1 libgles2 libgl1 libegl-mesa0 \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m pip install --break-system-packages --no-cache-dir --ignore-installed typing_extensions edge-tts dashscope \
     && setcap cap_sys_ptrace=ep /usr/bin/python3.12

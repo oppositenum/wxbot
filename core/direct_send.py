@@ -18,9 +18,9 @@ import time
 import config
 
 WECHAT_BIN = os.environ.get("WXBOT_WECHAT_BIN", "/opt/wechat/wechat")
-SUPPORTED_SHA256 = {
-    "e40116597803a5e0d9fc4a2b727df4b8f7a3dd6de1c336140ea373be2b6626e9": "4.1.8 aarch64",
-}
+from core.direct_send_profiles import PROFILES
+
+SUPPORTED_SHA256 = {sha: p["name"] for sha, p in PROFILES.items()}
 # /home/wechat 在数据卷里,装在这里重建容器也不丢;/tmp/fr 是早期手动装的位置
 FRIDA_PATHS = [p for p in (os.environ.get("WXBOT_FRIDA_PATH"), "/home/wechat/.wxbot/frida", "/tmp/fr",
                            os.path.join(config.WORK_DIR, "frida")) if p]
@@ -34,7 +34,7 @@ NOT_SENT_CODES = frozenset({
     "no_frida", "no_wechat", "unsupported", "not_running", "attach_failed", "agent_error",
     "not_logged_in", "request_mismatch", "bad_chat", "empty", "too_long", "no_file",
     "bad_image", "bad_video", "bad_audio", "no_ffmpeg", "convert_failed", "tts_failed", "bad_param", "too_large", "step_failed",
-    "not_found", "not_mine", "not_sent_ok", "too_old", "already_revoked",
+    "not_found", "not_mine", "not_sent_ok", "too_old", "already_revoked", "revoke_unsupported",
 })
 
 REVOKE_WINDOW = 120   # 微信普通消息 2 分钟内可撤回(服务端最终说了算)
@@ -123,7 +123,7 @@ def _ensure_script():
         return _state["script"]
     _drop()
     with open(AGENT_JS, encoding="utf-8") as f:
-        source = f.read()
+        source = "const PROFILE = " + json.dumps(PROFILES[sha]) + ";\n" + f.read()
     session = dev.attach(pid)
     try:
         script = session.create_script(source)
@@ -347,7 +347,8 @@ def _dispatch(row, call, wait=WAIT_SECONDS):
             if not r.get("ok"):
                 code = r.get("error") or "failed"
                 msg = {"not_logged_in": "微信还没登录完成(停在登录页?)",
-                       "request_mismatch": "请求对象校验失败,未发送"}.get(code, code)
+                       "request_mismatch": "请求对象校验失败,未发送",
+                       "revoke_unsupported": "当前微信版本还没适配底层撤回"}.get(code, code)
                 raise DirectSendError(code, msg)
             deadline = time.time() + wait
             step, p = 0, {}

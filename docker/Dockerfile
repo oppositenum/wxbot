@@ -34,6 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         fcitx5 fcitx5-chinese-addons fcitx5-frontend-gtk3 \
         fonts-noto-cjk fonts-noto-color-emoji \
         libatomic1 libpulse0 libasound2t64 libnss3 libgbm1 \
+        libegl1 libgles2 libgl1 libegl-mesa0 \
         libxkbcommon-x11-0 libxcb-xkb1 libxcb-icccm4 libxcb-image0 \
         libxcb-render-util0 libxcb-keysyms1 libxcb-cursor0 libxcb-shape0 \
         libxcb-randr0 libxcb-sync1 libxcb-shm0 libatk1.0-0t64 \

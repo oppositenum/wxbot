@@ -215,8 +215,10 @@ def key(*keys):
 
 
 def clipget():
-    r = x("xclip", "-selection", "clipboard", "-o", "-target", "UTF8_STRING")
-    return r.stdout if r.returncode == 0 else ""
+    # 剪贴板里可能还是刚发的图片(PNG 字节),按 UTF-8 严格解码会直接抛异常
+    r = sp.run(["xclip", "-selection", "clipboard", "-o", "-target", "UTF8_STRING"],
+               env={"DISPLAY": DISPLAY, "PATH": "/usr/bin:/bin"}, capture_output=True)
+    return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else ""
 
 
 def close_overlays():

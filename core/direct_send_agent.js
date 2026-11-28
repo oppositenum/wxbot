@@ -1,8 +1,8 @@
 'use strict';
 /*
  * 直发 agent:在微信进程内直接调用 SendMessage(不经过界面)。
- * 仅适配 WeChat Linux 4.1.8 aarch64(sha256 e40116597803…),偏移见
- * docs/记忆 wechat-send-interface-re。Python 侧(core/direct_send.py)先校验哈希再加载。
+ * 按微信版本注入偏移(core/direct_send_profiles.py),Python 侧先校验二进制 sha256 再加载。
+ * 过程与重新定位方法见 docs/wechat-direct-send-re.md。
  *
  * 约束(实测踩坑):
  *  - SendMessage 必须在协程里调,所以用 co_launch 把 C 回调投递到业务执行器。
@@ -11,32 +11,19 @@
  */
 const B = Process.getModuleByName('wechat').base;
 
-const OFF = {
-  sendMessage: 0x4baee74,  // SendMessage(svc, const shared_ptr<Req>&) -> x8
-  svcA: 0x483104c, svcB: 0x4950c40, svcC: 0x496004c,  // 服务定位链,均经 x8 返回
-  svcVt: 0x7f1fb80,
-  opNew: 0x7d7e420,
-  makeReq: 0x39deee4,      // make_shared<文字Req>(vt 0x7e1b790),块 0x18+0x410,对象在 blk+0x18
-  makeImgReq: 0x39dee1c,   // make_shared<图片Req>(vt 0x7e07a18),块 0x18+0x450
-  videoCtor: 0x40f95f8,    // 视频Req 构造(vt 0x7e8bfb8,对象 0x410);微信自己是内联 make_shared,见 0x4225c84
-  videoBlkVtGot: 0x80e5430,
-  makeFileReq: 0x40f97dc,  // make_shared<文件Req>(vt 0x7e07948),块 0x18+0x3e0;工厂里随后写 +0x94/+0x98 = 49/6(appmsg 文件) // 视频 make_shared 控制块 vtable 组所在 GOT 槽,块头 = *GOT + 0x10
-  revokeSvc: 0x4bbe8bc,    // 撤回服务定位第3步(前两步同 svcA/svcB),x8 返回 shared_ptr
-  revokeSvcVt: 0x7f4b030,
-  revoke: 0x5081554,
-  msgByLocalId: 0x4bc9fe4, // GetMsgByLocalId(x8=输出{Msg 0x1f8; bool 找到@+0x1f8}, x0=消息服务(=svcC), x1=&会话string, w2=local_id, w3=create_time 选分库)       // Revoke(x8=结果{u8 ok,…}, x0=svc, x1=const 消息行&),须在协程里
-  strAssign: 0x3639df8,    // libc++ std::string 拷贝赋值
-  coLaunch: 0x49bf7bc,
-  appCtx: 0x82bb2a8,       // *(B+appCtx)+0x290 = 业务执行器
-  typeInfo: 0x7f6a440,
-};
+// 偏移和字段布局按微信版本由 core/direct_send.py 注入(core/direct_send_profiles.py):const PROFILE = {...};
+const P = PROFILE;
+const F = P.fields;
+const RV = P.revoke;   // 没适配撤回的版本为 null
 
 const G = Memory.alloc(0x400);  // g[1]=&sp g[2]=done g[3]=calls g[11]=step
 const VT = Memory.alloc(9 * 8);
 
+const TRAMPS = [];   // 跳板页必须一直被引用,否则 Frida GC 会回收,调用时访问违规
 function sret(target) {
   // 很多函数经 x8 返回结构体,TinyCC 不会设 x8:跳板 mov x8,x4; br target
   const code = Memory.alloc(Process.pageSize);
+  TRAMPS.push(code);
   Memory.protect(code, Process.pageSize, 'rwx');
   const w = new Arm64Writer(code);
   w.putMovRegReg('x8', 'x4'); w.putLdrRegAddress('x16', target); w.putBrReg('x16'); w.flush();
@@ -93,22 +80,28 @@ void* f_target_type(struct F* s){ return (void*)g_ti; }
 uint64_t do_launch(void* ex, void* loc, void* fnstore, uint64_t* out){
   ((x8_fn)g_launch)(ex, loc, fnstore, (void*)1, (void*)&out[3]); return 1; }
 `, {
-  g_send: sret(B.add(OFF.sendMessage)), g_ta: sret(B.add(OFF.svcA)), g_tb: sret(B.add(OFF.svcB)),
-  g_tc: sret(B.add(OFF.svcC)), g_launch: sret(B.add(OFF.coLaunch)),
-  g_tr: sret(B.add(OFF.revokeSvc)), g_mbl: sret(B.add(OFF.msgByLocalId)), g_rv: sret(B.add(OFF.revoke)), g_rvvt: B.add(OFF.revokeSvcVt),
-  g_svcvt: B.add(OFF.svcVt), g_new: B.add(OFF.opNew), g_ti: B.add(OFF.typeInfo), g: G,
+  g_send: sret(B.add(P.sendMessage)), g_ta: sret(B.add(P.svcA)), g_tb: sret(B.add(P.svcB)),
+  g_tc: sret(B.add(P.svcC)), g_launch: sret(B.add(P.coLaunch)),
+  // 没适配撤回时这几个符号不会被调用(rpc.revoke 直接返回 revoke_unsupported)
+  g_tr: RV ? sret(B.add(RV.revokeSvc)) : B, g_mbl: RV ? sret(B.add(RV.msgByLocalId)) : B,
+  g_rv: RV ? sret(B.add(RV.revoke)) : B, g_rvvt: RV ? B.add(RV.revokeSvcVt) : B,
+  g_svcvt: B.add(P.svcVt), g_new: B.add(P.opNew), g_ti: B.add(P.typeInfo), g: G,
 });
 ['f_dtor', 'f_ddtor', 'f_clone0', 'f_clone1', 'f_destroy', 'f_destroy_dealloc', 'f_call', 'f_target', 'f_target_type']
   .forEach((n, i) => VT.add(i * 8).writePointer(cm[n]));
 
 const doLaunch = new NativeFunction(cm.do_launch, 'uint64', ['pointer', 'pointer', 'pointer', 'pointer']);
-const opNew = new NativeFunction(B.add(OFF.opNew), 'pointer', ['size_t']);
-const makeReq = new NativeFunction(B.add(OFF.makeReq), 'void', ['pointer']);
-const makeImgReq = new NativeFunction(B.add(OFF.makeImgReq), 'void', ['pointer']);
-const videoCtor = new NativeFunction(B.add(OFF.videoCtor), 'void', ['pointer']);
-const makeFileReq = new NativeFunction(B.add(OFF.makeFileReq), 'void', ['pointer']);
+const opNew = new NativeFunction(B.add(P.opNew), 'pointer', ['size_t']);
 const memsetZero = (p, n) => { for (let o = 0; o < n; o += 8) p.add(o).writeU64(0); };
-const strAssign = new NativeFunction(B.add(OFF.strAssign), 'pointer', ['pointer', 'pointer']);
+const strAssign = new NativeFunction(B.add(P.strAssign), 'pointer', ['pointer', 'pointer']);
+const fn1 = off => new NativeFunction(B.add(off), 'void', ['pointer']);
+// x8 返回 shared_ptr 的创建函数:经跳板把第 5 个参数放进 x8
+const fnX8 = off => new NativeFunction(sret(B.add(off)), 'void', ['pointer', 'pointer', 'pointer', 'pointer', 'pointer']);
+const MAKERS = {};
+for (const kind of ['text', 'image', 'video', 'file']) {
+  const r = P.req[kind];
+  MAKERS[kind] = P.req.style === 'maker' ? fnX8(r.maker) : fn1(r.make || r.ctor);
+}
 
 // 每次发送用到的 Frida 内存都挂在这里,保留最近 256 次,防 GC 释放仍在用的缓冲区(图片上传是异步的)。
 const KEEP = [];
@@ -129,9 +122,9 @@ function longStr(s, keep) {  // libc++ 长串布局: cap|1, size, data
   return n;
 }
 function executor() {
-  const ctx = B.add(OFF.appCtx).readPointer();
+  const ctx = B.add(P.appCtx).readPointer();
   if (ctx.isNull()) return null;
-  return ctx.add(0x290).readPointer();
+  return ctx.add(P.execOff).readPointer();
 }
 
 function readStr(p) {  // libc++ std::string
@@ -139,52 +132,55 @@ function readStr(p) {  // libc++ std::string
 }
 function loggedIn(ex) { return !!ex && !ex.isNull() && !ex.add(0x10).readPointer().isNull(); }
 
-// 字段布局(文字/图片/视频共用基类,实测自界面发送):
-// +0x6c=1 +0x70=7 +0x78 收件人 +0x94 类型(1 文字/3 图片/43 视频) +0xe8 正文字节数或文件大小
-// 文字 +0x3e0 正文;图片/视频 +0xa0 本地文件路径;视频 +0x3e0(u8) 界面发送时为 1
+// 字段布局见 core/direct_send_profiles.py(实测自界面发送)。
 const KINDS = {
-  text: { type: 1, field: 0x3e0 },
-  image: { type: 3, field: 0xa0 },
-  video: { type: 43, field: 0xa0 },
-  file: { type: 49, field: 0xa0 },  // appmsg,子类型 +0x98=6
+  text: { type: 1, field: 'content' },
+  image: { type: 3, field: 'path' },
+  video: { type: 43, field: 'path' },
+  file: { type: 49, field: 'path' },  // appmsg,子类型 6=文件
 };
+// 返回 {obj, sp}:sp 是 16 字节 shared_ptr {obj, 控制块}
 function newReq(kind) {
-  if (kind === 'video') {  // 照抄微信工厂 0x4225c84 里的内联 make_shared
-    const blk = opNew(0x428);
-    blk.writePointer(B.add(OFF.videoBlkVtGot).readPointer().add(0x10));
+  const r = P.req[kind];
+  if (P.req.style === 'maker') {
+    const sp = Memory.alloc(16);
+    MAKERS[kind](NULL, NULL, NULL, NULL, sp);
+    return { obj: sp.readPointer(), sp };
+  }
+  const blk = opNew(r.blk);
+  if (r.ctrlGot) {  // 4.1.8 视频:照抄微信工厂里的内联 make_shared
+    blk.writePointer(B.add(r.ctrlGot).readPointer().add(0x10));
     blk.add(8).writeU64(0); blk.add(16).writeU64(0);
-    memsetZero(blk.add(0x18), 0x410);
-    videoCtor(blk.add(0x18));
-    return blk;
+    memsetZero(blk.add(0x18), r.blk - 0x18);
+    MAKERS[kind](blk.add(0x18));
+  } else {
+    if (r.zero) memsetZero(blk, r.blk);   // 4.1.8 文件:构造函数不清零
+    MAKERS[kind](blk);
   }
-  if (kind === 'file') {  // 构造函数不清零,先自己清
-    const blk = opNew(0x3f8);
-    memsetZero(blk, 0x3f8);
-    makeFileReq(blk);
-    return blk;
-  }
-  const blk = opNew(kind === 'image' ? 0x468 : 0x428);
-  (kind === 'image' ? makeImgReq : makeReq)(blk);
-  return blk;
+  const sp = Memory.alloc(16); sp.writePointer(blk.add(0x18)); sp.add(8).writePointer(blk);
+  return { obj: blk.add(0x18), sp };
 }
+function basename(p) { const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(i + 1) : p; }
 function build(kind, to, payload, size) {
   const keep = [];
   const k = KINDS[kind];
-  const blk = newReq(kind);
-  const obj = blk.add(0x18);
-  strAssign(obj.add(0x78), longStr(to, keep));
-  strAssign(obj.add(k.field), longStr(payload, keep));
-  obj.add(0x6c).writeU32(1); obj.add(0x70).writeU32(7);
-  obj.add(0x94).writeU32(k.type);
-  if (kind === 'file') obj.add(0x98).writeU32(6);
-  obj.add(0xe8).writeU32(kind === 'text' ? utf8len(payload) : size);
-  if (kind === 'video') obj.add(0x3e0).writeU8(1);
-  if (readStr(obj.add(0x78)) !== to || readStr(obj.add(k.field)) !== payload) return null;
-  return { obj, blk, keep };
+  const { obj, sp } = newReq(kind);
+  if (!obj || obj.isNull()) return null;
+  const field = F[k.field];
+  strAssign(obj.add(F.to), longStr(to, keep));
+  strAssign(obj.add(field), longStr(payload, keep));
+  if (F.filename && kind !== 'text') strAssign(obj.add(F.filename), longStr(basename(payload), keep));
+  obj.add(F.one).writeU32(1); obj.add(F.seven).writeU32(7);
+  obj.add(F.type).writeU32(k.type);
+  if (kind === 'file') obj.add(F.sub).writeU32(6);
+  obj.add(F.len).writeU32(kind === 'text' ? utf8len(payload) : size);
+  if (kind === 'video') for (const [off, v] of F.video_flags) obj.add(off).writeU8(v);
+  if (readStr(obj.add(F.to)) !== to || readStr(obj.add(field)) !== payload) return null;
+  return { obj, sp, keep };
 }
 
 function launch(ex, req) {
-  const sp = Memory.alloc(16); if (req.obj) { sp.writePointer(req.obj); sp.add(8).writePointer(req.blk); }
+  const sp = req.sp || Memory.alloc(16);
   const fobj = Memory.alloc(16); fobj.writePointer(VT);
   const fstore = Memory.alloc(0x40); fstore.add(0x20).writePointer(fobj);
   const file = Memory.allocUtf8String('bot_direct.cc'); const func = Memory.allocUtf8String('BotDirectSend');
@@ -233,7 +229,7 @@ function sendKind(kind, to, payload, size) {
 
 rpc.exports = {
   ready() {
-    return { attached: true, logged_in: loggedIn(executor()) };
+    return { attached: true, logged_in: loggedIn(executor()), profile: P.name, revoke: !!RV };
   },
   send(to, content) { return sendKind('text', to, content, 0); },
   sendImage(to, path, size) { return sendKind('image', to, path, size); },
@@ -241,6 +237,7 @@ rpc.exports = {
   sendFile(to, path, size) { return sendKind('file', to, path, size); },
   // r = {type, sender, chat, localId, serverId(十进制字符串), sortSeq(字符串), createTime, status, content, source}
   revoke(r) {
+    if (!RV) return { ok: false, error: 'revoke_unsupported' };
     const ex = executor();
     if (!loggedIn(ex)) return { ok: false, error: 'not_logged_in' };
     const b = buildRow(r);
@@ -254,8 +251,8 @@ rpc.exports = {
   // 只构造不发送,返回对象字节(十六进制),用来和界面发的请求逐字段对比
   dryBuild(kind, to, path, size) {
     const r = build(kind, to, path, size); if (!r) return null;
-    hold(r.keep, r.blk);
-    return { vt: r.obj.readPointer().sub(B).toString(16), hex: Array.from(new Uint8Array(r.obj.readByteArray(kind === 'file' ? 0x3e0 : 0x410))).map(b => b.toString(16).padStart(2, '0')).join('') };
+    hold(r.keep, r.sp);
+    return { vt: r.obj.readPointer().sub(B).toString(16), hex: Array.from(new Uint8Array(r.obj.readByteArray(F.objSize))).map(b => b.toString(16).padStart(2, '0')).join('') };
   },
   poll() {
     return { step: G.add(11 * 8).readU64().toNumber(), calls: G.add(3 * 8).readU64().toNumber(),

@@ -28,7 +28,7 @@ class DirectSendAdapter:
         self.fallback = fallback  # 界面自动化适配器(LegacySearchAdapter)
 
     def capability(self, chat, kind='text'):
-        return '' if kind in ('text', 'image') else 'direct_payload_not_supported'
+        return '' if kind in ('text', 'image', 'voice') else 'direct_payload_not_supported'
 
     def receipt(self, jid):
         return None
@@ -42,9 +42,9 @@ class DirectSendAdapter:
         from core import direct_send, reply_policy
         args = (display, chat, kind, payload)
         kw = dict(job_id=job_id, session=session, proactive_ticket=proactive_ticket)
-        # 语音条只能在界面里录(点「发语音」+ 虚拟麦克风),直发做不了:整单交给界面,
+        # 语音条:当前微信版本能直发(4.1.9+ 且已适配)就直发,否则整单交给界面录音;
         # 不看「回退」开关(那个开关管的是直发失败时要不要改走界面)。
-        if kind == 'voice' and self.fallback:
+        if kind == 'voice' and self.fallback and not direct_send.voice_supported():
             return self.fallback.submit(*args, **kw)
         token = session or sessions.capture()
         jid = job_id or send_ledger.next_id()
@@ -82,6 +82,8 @@ class DirectSendAdapter:
             if not isinstance(payload, str) or not payload.strip():
                 return ledger.view(ledger.update(jid, 'not_sent', 'missing_content'))
             staged = None
+            if kind == 'voice' and not os.path.isfile(payload):
+                return ledger.view(ledger.update(jid, 'not_sent', 'file_unavailable'))
             if kind == 'image':
                 if not os.path.isfile(payload):
                     return ledger.view(ledger.update(jid, 'not_sent', 'file_unavailable'))
@@ -109,6 +111,8 @@ class DirectSendAdapter:
                     if kind == 'image':
                         direct_send.send_image(chat, staged, display or '', os.path.basename(payload),
                                                source='bot')
+                    elif kind == 'voice':
+                        direct_send.send_voice_msg(chat, payload, display or '', source='bot')
                     else:
                         direct_send.send(chat, payload, display or '', source='bot')
                 except direct_send.DirectSendError as e:

@@ -97,6 +97,18 @@ const strAssign = new NativeFunction(B.add(P.strAssign), 'pointer', ['pointer', 
 const fn1 = off => new NativeFunction(B.add(off), 'void', ['pointer']);
 // x8 返回 shared_ptr 的创建函数:经跳板把第 5 个参数放进 x8
 const fnX8 = off => new NativeFunction(sret(B.add(off)), 'void', ['pointer', 'pointer', 'pointer', 'pointer', 'pointer']);
+// 第 6 个参数放进 x8 的跳板:语音的创建函数自己要用 x1~x4 传参
+function sret5(target) {
+  const code = Memory.alloc(Process.pageSize);
+  TRAMPS.push(code);
+  Memory.protect(code, Process.pageSize, 'rwx');
+  const w = new Arm64Writer(code);
+  w.putMovRegReg('x8', 'x5'); w.putLdrRegAddress('x16', target); w.putBrReg('x16'); w.flush();
+  return code;
+}
+const VOICE_MAKER = (P.voice && P.req.voice)
+  ? new NativeFunction(sret5(B.add(P.req.voice.maker)), 'void', ['pointer', 'pointer', 'pointer', 'pointer', 'pointer', 'pointer'])
+  : null;
 const MAKERS = {};
 for (const kind of ['text', 'image', 'video', 'file']) {
   const r = P.req[kind];
@@ -219,6 +231,28 @@ function buildRow(r) {
   return { row, keep };
 }
 
+// 语音条:silk 是微信格式的 SILK 文件(\x02#!SILK_V3 开头),ms 时长毫秒
+function buildVoice(to, silkPath, ms) {
+  const keep = [];
+  const bytes = File.readAllBytes(silkPath);
+  const n = bytes.byteLength;
+  const buf = Memory.alloc(n); buf.writeByteArray(bytes); keep.push(buf);
+  const data = Memory.alloc(24); keep.push(data);           // libc++ 长串 {cap|1, size, ptr},构造函数会拷走
+  data.writeU64(uint64((n + 16) | 1)); data.add(8).writeU64(uint64(n)); data.add(16).writePointer(buf);
+  const msp = Memory.alloc(8); msp.writeU32(ms); keep.push(msp);
+  const [fmt, a, b] = P.req.voice.info;
+  const info = Memory.alloc(0x30); keep.push(info);           // {u32 fmt, u32 a, u64 b, u8 0, string ""}
+  info.writeU32(fmt); info.add(4).writeU32(a); info.add(8).writeU64(uint64(b));
+  const sp = Memory.alloc(16);
+  VOICE_MAKER(NULL, longStr(to, keep), data, msp, info, sp);
+  const obj = sp.readPointer();
+  if (obj.isNull()) return null;
+  obj.add(F.one).writeU32(1); obj.add(F.seven).writeU32(7);
+  obj.add(F.type).writeU32(34);
+  if (readStr(obj.add(F.to)) !== to || obj.add(F.voiceData + 8).readU64().toNumber() !== n) return null;
+  return { obj, sp, keep };
+}
+
 function sendKind(kind, to, payload, size) {
   const ex = executor();
   if (!loggedIn(ex)) return { ok: false, error: 'not_logged_in' };
@@ -229,12 +263,20 @@ function sendKind(kind, to, payload, size) {
 
 rpc.exports = {
   ready() {
-    return { attached: true, logged_in: loggedIn(executor()), profile: P.name, revoke: !!RV };
+    return { attached: true, logged_in: loggedIn(executor()), profile: P.name, revoke: !!RV, voice: !!VOICE_MAKER };
   },
   send(to, content) { return sendKind('text', to, content, 0); },
   sendImage(to, path, size) { return sendKind('image', to, path, size); },
   sendVideo(to, path, size) { return sendKind('video', to, path, size); },
   sendFile(to, path, size) { return sendKind('file', to, path, size); },
+  sendVoice(to, silkPath, ms) {
+    if (!VOICE_MAKER) return { ok: false, error: 'voice_unsupported' };
+    const ex = executor();
+    if (!loggedIn(ex)) return { ok: false, error: 'not_logged_in' };
+    const req = buildVoice(to, silkPath, ms);
+    if (!req) return { ok: false, error: 'request_mismatch' };
+    return launch(ex, req);
+  },
   // r = {type, sender, chat, localId, serverId(十进制字符串), sortSeq(字符串), createTime, status, content, source}
   revoke(r) {
     if (!RV) return { ok: false, error: 'revoke_unsupported' };

@@ -267,6 +267,13 @@ Ghidra 全量分析 130MB 约 45 分钟（8 核，10G 内存），`PreFast.java`
 - **坑(环境)**：4.1.13 发视频要 EGL/GLES 生成封面，容器缺 `libEGL.so.1` 时视频必失败，**而且之后所有图片/文件上传都会失败直到重启微信**。镜像已加装 `libegl1 libgles2 libgl1 libegl-mesa0`。
 - **撤回(未完成)**：批量撤回 `0x6869584(x8, 撤回服务 vt 0xa22d7e8, vector<Row>&, …)`，逐行 `0x686be94`(含时限校验 `0x66c3878`/`0x66c7c78`)、`0x686d2c8`(用消息服务链)、`0x686e4b4`。消息行变成带 vtable 的对象(`0xa1d8860`，0x350 字节)：`+0x8` 类型、`+0x10/+0x40` 发送者、`+0x28/+0x58` 会话、`+0x74` local_id、`+0x90` server_id、`+0xa0` sort_seq、`+0xa8` 时间、`+0xac` 状态、`+0xb8` 正文、`+0xd0` msgsource。还需要：消息行构造函数、撤回服务定位链(看 `0x6869584` 的调用者 `0x6db61a4`/`0x6db7744`/`0x6db81f4`)、按 local_id 取消息的新函数。
 
+### 3.14 直发语音条（4.1.13，2026-11-28）
+
+- 界面录音发送也走核心 `0x6306088`：语音请求 vtable `0xa3143c8`，类型 `+0xe4 = 34`，没有文件路径；`+0x5c8` 是装着 SILK 字节的 `std::string`（之前误以为是两个长度，其实是 cap|1 和 size），`+0x5e0` 时长毫秒，`+0x5e8` 起是附加信息 `{u32 4(格式), u32 3, u64 30000, u8 0, string ""}`。数据开头 `\x02#!SILK_V3`，每帧 20ms。
+- 构造：`0x7db96e8(obj, &收件人, &SILK string, 时长, &附加信息)`；外层创建函数 `0x7db9548` 是 **x8=输出，x1~x4 = 收件人/数据/时长地址/附加信息**，所以 agent 另做了一个"第 6 个参数进 x8"的跳板。
+- 编码：`pilk.encode(pcm, silk, pcm_rate=24000, tencent=True)`，PCM 用 ffmpeg 转 24k 单声道 s16le；时长 = 帧数 × 20ms。pilk 是 C 扩展，镜像构建时临时装 gcc/python3-dev 编译。
+- 接入：`direct_send.send_voice_msg`；直发模式下 `DirectSendAdapter` 对 `voice` 先判 `voice_supported()`（配置有 voice 且能 import pilk），否则整单交给界面录音。实测语音转文字与 TTS 文本一致。
+
 ---
 
 ## 4. 微信升级后怎么重新定位

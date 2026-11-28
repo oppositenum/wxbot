@@ -116,7 +116,8 @@ class VoiceGoesToUITest(unittest.TestCase):
                 calls.append((a, k))
                 return {"ok": True, "status": "submitted", "reason": "legacy_ui_submitted"}
 
-        r = DirectSendAdapter(fallback=UI()).submit("小A", "wxid_a", "voice", "/w/x.wav", job_id="j1")
+        with patch("core.direct_send.voice_supported", return_value=False):
+            r = DirectSendAdapter(fallback=UI()).submit("小A", "wxid_a", "voice", "/w/x.wav", job_id="j1")
         self.assertEqual(r["status"], "submitted")
         self.assertEqual(calls[0][0], ("小A", "wxid_a", "voice", "/w/x.wav"))
         self.assertEqual(calls[0][1]["job_id"], "j1")

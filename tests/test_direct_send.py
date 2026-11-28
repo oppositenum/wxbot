@@ -423,3 +423,23 @@ class DirectVoiceTest(unittest.TestCase):
             self.assertEqual(kind, "voice")
             with open(path, "rb") as f:
                 self.assertEqual(direct_send.media_kind(f.read(16)), "video")
+
+
+class DirectVoiceMsgTest(unittest.TestCase):
+    def test_voice_unsupported_on_418_profile(self):
+        from core import direct_send
+        with patch("core.direct_send.binary_version",
+                   return_value=("e40116597803a5e0d9fc4a2b727df4b8f7a3dd6de1c336140ea373be2b6626e9", "4.1.8")):
+            self.assertFalse(direct_send.voice_supported())
+
+    @unittest.skipUnless(__import__("importlib").util.find_spec("pilk") and __import__("shutil").which("ffmpeg"),
+                         "需要 pilk 和 ffmpeg")
+    def test_encode_silk_header_and_duration(self):
+        import subprocess
+        from core import direct_send
+        with tempfile.TemporaryDirectory() as d, patch("core.direct_send.MEDIA_DIR", d):
+            wav = os.path.join(d, "a.wav")
+            subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "sine=duration=2", wav], check=True)
+            silk, ms = direct_send.encode_silk(wav)
+            self.assertTrue(open(silk, "rb").read().startswith(b"\x02#!SILK_V3"))
+            self.assertAlmostEqual(ms, 2000, delta=60)

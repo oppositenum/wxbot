@@ -26,6 +26,7 @@ PROFILES = {
         "fields": {"one": 0x6c, "seven": 0x70, "to": 0x78, "type": 0x94, "sub": 0x98, "len": 0xe8,
                    "content": 0x3e0, "path": 0xa0, "filename": None, "video_flags": [[0x3e0, 1]],
                    "objSize": 0x410},
+        "voice": False,      # 4.1.8 没有发语音条的代码
         "revoke": {
             "revokeSvc": 0x4bbe8bc, "revokeSvcVt": 0x7f4b030, "revoke": 0x5081554, "msgByLocalId": 0x4bc9fe4,
         },
@@ -44,10 +45,15 @@ PROFILES = {
             "image": {"maker": 0x4973c48},   # vt 0xa1da688,块 0x658
             "video": {"maker": 0x53110a8},   # vt 0xa1da6d8,块 0x628
             "file": {"maker": 0x5246238},    # vt 0xa1da5e8(基类),块 0x5e0;工厂 0x530e40c 随后写 +0xe4/+0xe8 = 49/6
+            # 语音:x8=输出, x1=&收件人 string, x2=&SILK 字节 string, x3=&时长毫秒(u32), x4=&附加信息
+            # {u32 格式=4, u32 3, u64 30000, u8 0, string ""}(界面录音实测)。vt 0xa3143c8,块 0x630
+            "voice": {"maker": 0x7db9548, "info": [4, 3, 30000]},
         },
         "fields": {"one": 0x7c, "seven": 0x84, "to": 0x90, "type": 0xe4, "sub": 0xe8, "len": 0x170,
                    "content": 0x5c8, "path": 0xf0, "filename": 0x158, "video_flags": [[0x5dc, 4]],
+                   "voiceData": 0x5c8,      # 语音请求里 SILK 字节的 std::string(和文字正文同一偏移)
                    "objSize": 0x5f0},
         "revoke": None,      # 4.1.13 撤回链被拆成多个函数,待定位
+        "voice": True,       # 4.1.9+ 才有语音条
     },
 }

@@ -35,6 +35,7 @@ NOT_SENT_CODES = frozenset({
     "not_logged_in", "request_mismatch", "bad_chat", "empty", "too_long", "no_file",
     "bad_image", "bad_video", "bad_audio", "no_ffmpeg", "convert_failed", "tts_failed", "bad_param", "too_large", "step_failed",
     "not_found", "not_mine", "not_sent_ok", "too_old", "already_revoked", "revoke_unsupported",
+    "voice_unsupported", "no_silk_encoder", "encode_failed",
 })
 
 REVOKE_WINDOW = 120   # 微信普通消息 2 分钟内可撤回(服务端最终说了算)
@@ -348,7 +349,8 @@ def _dispatch(row, call, wait=WAIT_SECONDS):
                 code = r.get("error") or "failed"
                 msg = {"not_logged_in": "微信还没登录完成(停在登录页?)",
                        "request_mismatch": "请求对象校验失败,未发送",
-                       "revoke_unsupported": "当前微信版本还没适配底层撤回"}.get(code, code)
+                       "revoke_unsupported": "当前微信版本还没适配底层撤回",
+                       "voice_unsupported": "当前微信版本不能直发语音条"}.get(code, code)
                 raise DirectSendError(code, msg)
             deadline = time.time() + wait
             step, p = 0, {}
@@ -602,3 +604,73 @@ def _send_voice_bar(chat, text, voice, name, source):
     if not ok:
         raise DirectSendError(row["code"], row["error"])
     return row
+
+
+VOICE_MAX_MS = 59000
+
+
+def encode_silk(audio_path):
+    """任意音频 → 微信格式 SILK(\\x02#!SILK_V3,24kHz)。返回 (silk 路径, 时长毫秒)。
+
+    pilk 是 C 扩展,容器里由镜像安装;没有就报 no_silk_encoder,调用方改走界面录音。"""
+    try:
+        import pilk
+    except ImportError:
+        raise DirectSendError("no_silk_encoder", "没有 pilk(SILK 编码器)")
+    import struct
+    import subprocess
+    os.makedirs(MEDIA_DIR, exist_ok=True)
+    base = os.path.join(MEDIA_DIR, f"{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(3).hex()}")
+    pcm, silk = base + ".pcm", base + ".silk"
+    r = subprocess.run(["ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-i", audio_path,
+                        "-t", str(VOICE_MAX_MS / 1000), "-ac", "1", "-ar", "24000", "-f", "s16le", pcm],
+                       capture_output=True, timeout=120)
+    if r.returncode != 0 or not os.path.getsize(pcm):
+        raise DirectSendError("encode_failed", "音频转 PCM 失败")
+    try:
+        pilk.encode(pcm, silk, pcm_rate=24000, tencent=True)
+    except Exception as e:  # noqa: BLE001
+        raise DirectSendError("encode_failed", f"SILK 编码失败:{e}")
+    finally:
+        try:
+            os.remove(pcm)
+        except OSError:
+            pass
+    with open(silk, "rb") as f:
+        d = f.read()
+    if not d.startswith(b"\x02#!SILK_V3"):
+        raise DirectSendError("encode_failed", "SILK 文件头不对")
+    i, frames = 10, 0
+    while i + 2 <= len(d):
+        n = struct.unpack_from("<h", d, i)[0]
+        if n <= 0 or i + 2 + n > len(d):
+            break
+        i += 2 + n
+        frames += 1
+    ms = frames * 20                       # SILK 每帧 20 毫秒
+    if ms < 1000:
+        raise DirectSendError("encode_failed", "语音太短(不到 1 秒)")
+    return silk, ms
+
+
+def send_voice_msg(chat, audio_path, name="", label="", source="manual"):
+    """直发语音条(微信 4.1.9+):本地编码 SILK,直接构造语音请求交给微信,不经过界面录音。"""
+    chat = _check_chat(chat)
+    if not os.path.isfile(audio_path or ""):
+        raise DirectSendError("no_file", "音频不存在")
+    silk, ms = encode_silk(audio_path)
+    row = {"t": int(time.time()), "kind": "voice_bar", "chat": chat, "name": name, "source": source,
+           "content": label or "语音条", "seconds": round(ms / 1000, 1), "via": "direct"}
+    return _dispatch(row, lambda ex: ex.send_voice(chat, silk, ms))
+
+
+def voice_supported():
+    """当前微信版本能不能直发语音条(不附加,只看配置)。"""
+    sha, _ver = binary_version()
+    if not (sha and PROFILES.get(sha, {}).get("voice")):
+        return False
+    try:
+        import pilk  # noqa: F401  没有编码器就交给界面录音
+    except ImportError:
+        return False
+    return True

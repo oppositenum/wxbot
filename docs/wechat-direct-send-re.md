@@ -254,6 +254,19 @@ Ghidra 全量分析 130MB 约 45 分钟（8 核，10G 内存），`PreFast.java`
 
 界面往输入框粘贴 mp3 发送时抓到：同样走 `0x4baee74`,Req vtable `0x7e07948`,`+0x94=49`、`+0x98=6`、`+0xa0` 路径、`+0xe8` 大小。工厂 `0x4225c84` 的"其它文件"分支是 `operator new(0x3f8)` + `0x40f97dc(blk)`,再写 `+0xac`(=对象 +0x94)8 字节 `(49, 6)`(常量在 `0x1a6e808`)。这个构造函数**不 memset**,界面那份 `+0x118` 之后全是堆残留,agent 先清零再构造。直发后库里 appmsg XML 的 `totallen`/`md5`/`cdnattachurl`/`aeskey` 与界面发送一致。对方看到的文件名就是本地文件名，所以 `stage_file` 按原名存在 `work/direct_files/<时间戳>/` 下。
 
+### 3.13 适配 4.1.13.29（2026-11-28）
+
+按第 4 节流程做了一遍，偏移都在 `core/direct_send_profiles.py`，agent 按 sha256 选配置。要点：
+
+- **发送链**：界面改走批量接口 `0x6311da4(x8, svc, vector<shared_ptr<Req>>&, flags)`，逐条调核心 `0x6306088(svc, &sp, 1)` → `0x6308dcc`(会递归，对应旧 `0x4bb09a4`) → `0x633ff80`(写库，字符串 `StartSendMessageSyncStage`/`GetAddSendMessageToDb`)。旧的单条 `SendMessage` 还在：`0x6305fe8`(140 字节，参数同旧版)，直发继续用它。定位方法：在核心函数入口挂"只记返回地址"的钩子，界面发一条，看调用者。
+- **服务链**：`0x5eee3dc()` → `0x602d068(a)` → `0x603c5cc(b)`，svc vtable `0xa1fdad8`(从界面调用批量接口前的三层调用读出)。
+- **co_launch** `0x60d093c`：旧版 co_launch 里有两条 xlog 加密字符串，按原始字节在新版搜到同样的字符串再 xref。执行器：界面代码是 `0x5eed5b0()`(返回全局 `0xa68ac00` 的值) + `0x5eee4c8`(读 `+0x290`)，与旧版字段相同。
+- **std::string 赋值 `0x449bf38`、operator new `0x9f9f2e0`**：拿旧版函数开头 48/32 字节在新版里按字节搜(注意文件偏移 +0x10000 才是虚拟地址)。
+- **请求对象带 enable_shared_from_this**：不能再手动 new+构造，改调微信的创建函数(x8 返回 shared_ptr)：文字 `0x4973de8`、图片 `0x4973c48`、视频 `0x53110a8`、文件 `0x5246238`(媒体工厂 `0x530e40c` 的文件分支用它，`0x48e15a4` 是表情等别的子类)。字段：one `+0x7c`、seven `+0x84`、收件人 `+0x90`、类型 `+0xe4`、子类型 `+0xe8`、大小 `+0x170`、正文 `+0x5c8`、路径 `+0xf0`、**新增文件名 `+0x158`**，视频 `+0x5dc=4`。
+- **坑**：`NativeFunction` 指向的跳板页要保留引用，否则被 Frida GC 回收，调用时访问违规(页对齐地址)。
+- **坑(环境)**：4.1.13 发视频要 EGL/GLES 生成封面，容器缺 `libEGL.so.1` 时视频必失败，**而且之后所有图片/文件上传都会失败直到重启微信**。镜像已加装 `libegl1 libgles2 libgl1 libegl-mesa0`。
+- **撤回(未完成)**：批量撤回 `0x6869584(x8, 撤回服务 vt 0xa22d7e8, vector<Row>&, …)`，逐行 `0x686be94`(含时限校验 `0x66c3878`/`0x66c7c78`)、`0x686d2c8`(用消息服务链)、`0x686e4b4`。消息行变成带 vtable 的对象(`0xa1d8860`，0x350 字节)：`+0x8` 类型、`+0x10/+0x40` 发送者、`+0x28/+0x58` 会话、`+0x74` local_id、`+0x90` server_id、`+0xa0` sort_seq、`+0xa8` 时间、`+0xac` 状态、`+0xb8` 正文、`+0xd0` msgsource。还需要：消息行构造函数、撤回服务定位链(看 `0x6869584` 的调用者 `0x6db61a4`/`0x6db7744`/`0x6db81f4`)、按 local_id 取消息的新函数。
+
 ---
 
 ## 4. 微信升级后怎么重新定位

@@ -25,7 +25,7 @@ USER root
 RUN setcap -r /usr/bin/python3.12 \
     && apt-get update && apt-get install -y --no-install-recommends ffmpeg python3-pip \
     && rm -rf /var/lib/apt/lists/* \
-    && python3 -m pip install --break-system-packages --no-cache-dir edge-tts \
+    && python3 -m pip install --break-system-packages --no-cache-dir --ignore-installed typing_extensions edge-tts dashscope \
     && setcap cap_sys_ptrace=ep /usr/bin/python3.12
 
 COPY --chown=wechat:wechat config.py server.py /app/

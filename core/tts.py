@@ -146,6 +146,11 @@ def save_voice(key, fields):
                 voices[key] = clean
             else:
                 voices.pop(key, None)
+        elif (voices.get(key) or {}).get("provider") == "cosyvoice":
+            # 复刻音色只能改显示名;语速音调由样本决定
+            label = str((fields or {}).get("label") or "").strip()[:30]
+            if label:
+                voices[key]["label"] = label
         else:
             merged = dict(voices.get(key) or {}, **clean)
             if not merged.get("name") or not merged.get("label"):
@@ -155,8 +160,29 @@ def save_voice(key, fields):
     return get_config()
 
 
+def add_clone_voice(key, label, voice_id, model, sample_seconds=None):
+    """登记一个复刻音色(core/voice_clone.py 创建)。"""
+    if not KEY_RE.match(key or ""):
+        raise TTSError("bad_key", "音色 key 只能用小写字母、数字、下划线")
+    with _lock:
+        d = _read()
+        d.setdefault("voices", {})[key] = {
+            "label": (label or key)[:30], "provider": "cosyvoice", "voice_id": voice_id, "model": model,
+            "name": "cosyvoice:" + model, "rate": "+0%", "pitch": "+0Hz", "volume": "+0%",
+            "created": int(time.time()), "sample_seconds": sample_seconds}
+        _write(d)
+    return get_config()
+
+
 def delete_voice(key):
-    """自定义音色删掉;内置音色恢复预设。"""
+    """自定义音色删掉(复刻音色同时删掉百炼上的音色);内置音色恢复预设。"""
+    v = (_read().get("voices") or {}).get(key) or {}
+    if v.get("provider") == "cosyvoice" and v.get("voice_id"):
+        try:
+            from core import voice_clone
+            voice_clone.delete_voice(v["voice_id"])
+        except Exception:
+            pass
     with _lock:
         d = _read()
         (d.get("voices") or {}).pop(key, None)
@@ -207,11 +233,21 @@ def synth(text, voice=None, rate=None, pitch=None, volume=None, out_dir=None):
     if len(text) > MAX_TEXT:
         raise TTSError("too_long", f"文字超过 {MAX_TEXT} 字")
     v = get_voice(voice)
+    out_dir = out_dir or os.path.join(config.WORK_DIR, "direct_media")
+    os.makedirs(out_dir, exist_ok=True)
+    if v.get("provider") == "cosyvoice":
+        from core import voice_clone
+        path = os.path.join(out_dir, f"{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(4).hex()}.clone.mp3")
+        try:
+            return voice_clone.synth(text, v["voice_id"], v.get("model") or voice_clone.MODEL, path)
+        except voice_clone.CloneError as e:
+            # 额度用完/网络问题时退回默认的免费音色,别让语音功能整个停掉
+            print(f"[tts] 复刻音色「{v.get('label')}」合成失败,改用默认音色:{e.message}", flush=True)
+            v = get_voice(DEFAULT_KEY)      # 内置微软音色,不会再是复刻音色
+            rate = pitch = volume = None
     params = _clean({"rate": rate or v.get("rate"), "pitch": pitch or v.get("pitch"),
                      "volume": volume or v.get("volume")})
     edge = _edge()
-    out_dir = out_dir or os.path.join(config.WORK_DIR, "direct_media")
-    os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(4).hex()}.tts.mp3")
     comm = edge.Communicate(text, v["name"], rate=params.get("rate", "+0%"),
                             pitch=params.get("pitch", "+0Hz"), volume=params.get("volume", "+0%"))

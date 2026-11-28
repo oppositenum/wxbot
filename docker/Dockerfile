@@ -65,7 +65,7 @@ RUN set -eux; \
 
 # Live media capture is part of the image. SILK voice decoding is optional
 # because pilk may need architecture-specific build tooling.
-RUN pip3 install --break-system-packages --no-cache-dir frida==17.17.0 edge-tts
+RUN pip3 install --break-system-packages --no-cache-dir frida==17.17.0 edge-tts dashscope
 RUN pip3 install --break-system-packages --no-cache-dir pilk || true
 
 RUN useradd --create-home --shell /bin/bash wechat \

@@ -1629,6 +1629,27 @@ def api_tts_config_set():
     return jsonify(dict(out, ok=True))
 
 
+@app.post("/api/tts/clone")
+def api_tts_clone():
+    """上传录音(音频或视频,本人或已授权的声音)复刻音色。表单:file, label, consent=1。"""
+    from core import voice_clone, tts
+    f = request.files.get("file")
+    if f is None:
+        return jsonify(ok=False, error="缺少录音文件"), 400
+    if request.form.get("consent") != "1":
+        return jsonify(ok=False, error="请确认这是本人或已获授权的声音"), 400
+    label = (request.form.get("label") or "").strip()[:30] or "复刻音色"
+    d = os.path.join(config.WORK_DIR, "voice_clone")
+    os.makedirs(d, exist_ok=True)
+    src = os.path.join(d, time.strftime("%Y%m%d-%H%M%S") + "-upload" + os.path.splitext(f.filename or "")[1][:8])
+    f.save(src)
+    try:
+        key, vid, secs = voice_clone.create_voice(src, label)
+    except voice_clone.CloneError as e:
+        return jsonify(ok=False, code=e.code, error=e.message), 400
+    return jsonify(dict(tts.get_config(), ok=True, key=key, sample_seconds=round(secs, 1)))
+
+
 @app.post("/api/tts/preview")
 def api_tts_preview():
     """试听:返回 mp3。JSON:text, voice, 可选 rate/pitch/volume 临时覆盖(不保存)。"""

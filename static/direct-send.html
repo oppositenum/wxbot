@@ -80,6 +80,10 @@ button.primary{background:#23815a;color:#fff;border-color:#23815a}button:disable
           <label>音调 <input type="range" id="vPitch" min="-50" max="50" step="1"><span id="vPitchT"></span></label></div>
         <div class="line"><button type="button" id="vSave">保存</button><button type="button" id="vDefault">设为默认</button><button type="button" id="vDel">删除/恢复预设</button>
           <span style="flex:1"></span><input class="small" id="vNewKey" placeholder="新音色 key，如 my_voice" style="width:190px"><button type="button" id="vNew">新增</button></div>
+        <div class="line" style="border-top:1px solid #eef2ef;padding-top:8px"><b style="font-size:13px">复刻音色</b>
+          <span class="muted" style="font-size:13px">上传 10～60 秒的录音或视频（一个人说话、没有背景音乐），用阿里云百炼 CosyVoice 复刻成新音色。只能用本人或已获授权的声音。</span></div>
+        <div class="line"><input class="small" id="cLabel" placeholder="音色名字" style="width:140px"><input type="file" id="cFile" accept="audio/*,video/*">
+          <label><input type="checkbox" id="cConsent"> 这是本人或已获授权的声音</label><button type="button" id="cGo">开始复刻</button></div>
       </details>
     </div>
     <div class="card tts" style="margin-top:18px" id="vrCard">
@@ -139,7 +143,7 @@ function editFields(){const r=+$('#vRate').value,p=+$('#vPitch').value;return {l
 function drawVoices(keep){
   $('#sendAs').value=tts.send_as||'video';
   const k=keep||$('#voice').value||tts.default;
-  $('#voice').innerHTML=tts.voices.map(v=>`<option value="${esc(v.key)}">${esc(v.label)}${v.key===tts.default?'（默认）':''}</option>`).join('');
+  $('#voice').innerHTML=tts.voices.map(v=>`<option value="${esc(v.key)}">${v.provider==='cosyvoice'?'🎙 ':''}${esc(v.label)}${v.key===tts.default?'（默认）':''}</option>`).join('');
   $('#voice').value=tts.voices.some(v=>v.key===k)?k:tts.default; fillVoice();
 }
 async function loadTTS(keep){const [r,d]=await j('/api/tts/config');if(r.ok){tts=d;drawVoices(keep);if(d.edge_error)ttsMsg('取微软音色列表失败：'+d.edge_error,'bad');}}
@@ -235,6 +239,15 @@ $('#vrChance').oninput=()=>{$('#vrChanceT').textContent=$('#vrChance').value+'%'
 $('#vrSave').onclick=()=>vrPost({global:{enabled:$('#vrOn').checked,mode:$('#vrMode').value,chance:(+$('#vrChance').value)/100,max_chars:+$('#vrMax').value,voice:$('#vrVoice').value}});
 $('#vrChatSave').onclick=()=>{if(!sel)return;const m=$('#vrChatMode').value,v=$('#vrChatVoice').value;
   if(!m&&!v)vrPost({chat:sel.chat,clear:true});else{const set={};if(m)set.mode=m;set.voice=v;if(m)set.enabled=true;vrPost({chat:sel.chat,set});}};
+$('#cGo').onclick=async()=>{
+  const f=$('#cFile').files[0];if(!f){ttsMsg('先选录音文件','bad');return;}
+  if(!$('#cConsent').checked){ttsMsg('请先确认这是本人或已获授权的声音','bad');return;}
+  const fd=new FormData();fd.append('file',f);fd.append('label',$('#cLabel').value.trim()||'复刻音色');fd.append('consent','1');
+  ttsMsg('复刻中（整理样本、上传、创建音色，约半分钟）…');$('#cGo').disabled=true;
+  try{const [r,d]=await j('/api/tts/clone',{method:'POST',body:fd});
+    if(!r.ok||!d.ok){ttsMsg('✗ '+(d.error||'复刻失败'),'bad');}else{tts=Object.assign(tts,d);drawVoices(d.key);ttsMsg('✓ 已复刻，样本 '+d.sample_seconds+' 秒，选中后点「试听」','ok');}}
+  finally{$('#cGo').disabled=false;}
+};
 $('#vSave').onclick=()=>ttsCfg({voice:Object.assign({key:$('#voice').value},editFields())});
 $('#vDefault').onclick=()=>ttsCfg({default:$('#voice').value});
 $('#vDel').onclick=()=>{const v=curVoice();if(confirm(v.builtin?'恢复「'+v.label+'」的预设参数？':'删除音色「'+v.label+'」？'))ttsCfg({delete:v.key},v.builtin?v.key:'');};

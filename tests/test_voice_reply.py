@@ -36,9 +36,20 @@ class VoiceReplyTest(unittest.TestCase):
         self.assertEqual(vr.decide("c", "晚安", "[[VOICE]]晚安呀", rnd=lambda: 0.9), (False, "model_marked"))
         self.assertEqual(vr.decide("c", "晚安", "晚安呀")[0], False)
 
+    def test_explicit_ask_tells_model_and_allows_longer(self):
+        vr.set_global(enabled=True, mode="request", max_chars=60)
+        p = vr.prompt("c", "用语音发给我")
+        self.assertIn("语音条发出", p)
+        self.assertIn("150", p)
+        self.assertEqual(vr.prompt("c", "用语音发给我，算了别发语音了打字吧"), "")
+        self.assertEqual(vr.decide("c", "用语音发给我", "好" * 95), (True, "asked_for_voice"))
+        self.assertEqual(vr.decide("c", "用语音发给我", "好" * 200), (False, "too_long"))
+        vr.set_global(mode="always")
+        self.assertIn("60 字以内", vr.prompt("c", "你好"))
+
     def test_too_long_stays_text(self):
         vr.set_global(enabled=True, mode="always", max_chars=10)
-        self.assertEqual(vr.decide("c", "发语音", "这句话肯定超过了十个字的长度啊")[1], "too_long")
+        self.assertEqual(vr.decide("c", "你好", "这句话肯定超过了十个字的长度啊")[1], "too_long")
         self.assertTrue(vr.decide("c", "", "好的")[0])
 
     def test_chat_override_and_voice(self):

@@ -554,7 +554,7 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
         system += (f"\n\n【连发】对方这句要你连着发。必须输出 {burst} 条独立微信，"
                    "条与条用单独一行 [[NEXT]] 分隔；每条换角度、换词，直接做，不要问她怎么弄，"
                    "不要在正文里写第几条。")
-    system += voice_reply.prompt(chat_username)
+    system += voice_reply.prompt(chat_username, inbound)
     if wants_image:
         # 触发出图就真画真发，不把生图丢给模型自由发挥（会编外链或说发不出）。
         return _draw_then_chat(system, ask, turns, chat_username, persona,

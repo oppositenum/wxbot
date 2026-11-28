@@ -150,9 +150,26 @@ def active(chat):
     return bool(c["enabled"]) and c["mode"] != "off" and available()
 
 
-def prompt(chat):
-    """auto 模式时给模型的说明(其余模式不靠模型判断)。"""
+ASKED_LIMIT = 150         # 对方明确要语音时放宽字数(约 40 秒,语音条上限 60 秒)
+
+SPEAK_PROMPT = ("\n\n【语音】这条回复会用语音条发出(你的真实声音,TTS 读出来)。"
+                "你能发语音,不要说只能发文字、发不了语音。"
+                "正文写成直接说出口的话,{n} 字以内,别用表情符号、颜文字、列表和链接。")
+
+
+def wants_voice(chat, inbound):
+    """这一批消息是否确定要用语音回(对方要求,或会话设成 always)。"""
+    if not active(chat) or DENY_RE.search(inbound or ""):
+        return False
+    return bool(ASK_RE.search(inbound or "")) or chat_cfg(chat)["mode"] == "always"
+
+
+def prompt(chat, inbound=""):
+    """给模型的说明:确定要说语音时让它写短口语;auto 模式时让它自己判断加不加 [[VOICE]]。"""
     c = chat_cfg(chat)
+    if wants_voice(chat, inbound):
+        n = ASKED_LIMIT if ASK_RE.search(inbound or "") else c["max_chars"]
+        return SPEAK_PROMPT.format(n=n)
     return PROMPT if active(chat) and c["mode"] == "auto" else ""
 
 
@@ -196,10 +213,13 @@ def decide(chat, inbound, reply, rnd=random.random):
     words = spoken(reply)
     if not words:
         return False, "empty"
+    if ASK_RE.search(inbound):
+        # 对方点名要语音:放宽字数,只防超出语音条时长
+        if len(words) > max(ASKED_LIMIT, c["max_chars"]):
+            return False, "too_long"
+        return True, "asked_for_voice"
     if len(words) > c["max_chars"]:
         return False, "too_long"
-    if ASK_RE.search(inbound):
-        return True, "asked_for_voice"
     if c["mode"] == "always":
         return True, "always"
     if c["mode"] == "auto" and MARK in (reply or ""):

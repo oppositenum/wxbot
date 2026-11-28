@@ -58,6 +58,13 @@ run.sh                  deploy.sh 的兼容别名
 
 1. 管理后台 `http://127.0.0.1:5100`，账号密码是 `.env` 里的 `WXBOT_UI_USER` / `WXBOT_UI_PASSWORD`（首次部署会生成，不要写进代码）。
 2. 微信扫码：`http://127.0.0.1:6080/vnc.html`，密码是 `.env` 里的 `VNC_PASSWORD`。进桌面扫码后，在后台点一次「刷新密钥」。
+   微信 4.1.13 起内存里扫不到数据库密钥，「刷新密钥」会自动改用 hook 抓：期间往**自己的文件传输助手**直发一条文字、
+   一段 1 秒视频、一条 2 秒语音（让微信读写各个库，可删除），约一分钟。还缺的库会列出来，点开几个会话后再刷新一次。
+   图片密钥（看收到的图片要用）点「抓图片密钥」，会自动点开会话列表前几个会话让微信显示图片。
+
+镜像锁定微信 **4.1.13.29**（`docker/Dockerfile` 里的 `WECHAT_VERSION` + 两个架构的 sha256）。腾讯官网的下载地址永远是最新版，
+官网升级后直接构建会校验失败并提示：把 4.1.13.29 的 deb 放进 `docker/wechat-deb/` 即可离线构建（见那里的 README）。
+直发（不走界面的底层发送）只适配了 **arm64**（Apple Silicon / ARM 服务器）；amd64 上自动改用界面发送。
 
 之后升级和重启仍然执行同一个 `./deploy.sh`。改登录账号只改 `.env` 再重新 `./deploy.sh`（或 `docker compose up -d`）。
 
@@ -183,20 +190,32 @@ docker exec wxbot python3 /usr/local/bin/wx_send.py image "某群名"  /tmp/pic.
 - **密钥时效**：微信重启后密钥变化，需重新 `linux_keys.py`（后台「刷新密钥」按钮）。
 - **窗口坐标**：`wx_send.py` 用固定窗口几何偏移点击侧栏搜索/文件按钮；若手动改了容器窗口大小可能需微调偏移。
 
-## GitHub Runner 构建镜像
+## 构建并推送镜像（Docker Hub）
 
-部署机器只需要运行 `./deploy.sh`。镜像由 GitHub Runner 构建时，在项目根目录执行：
+推到 Docker Hub 后，新机器不用本地构建（省掉十几分钟和下载微信安装包），一条命令部署：
 
 ```bash
-docker buildx build --platform linux/amd64,linux/arm64 \
-  -f docker/Dockerfile \
-  -t <your-registry>/wxbot-wechat:ubuntu-24.04 \
-  -t <your-registry>/wxbot-wechat:latest \
-  --push .
+docker login                                         # 一次
+./tools/publish_image.sh <Docker Hub 用户名>/wxbot    # 构建 arm64 + amd64 并推送 :<微信版本>-<git哈希> 和 :latest
+# 国内网络构建时要代理:BUILD_PROXY=http://host.docker.internal:7890 ./tools/publish_image.sh ...
+# 只构建本机架构先测:PLATFORMS=linux/arm64 NO_PUSH=1 ./tools/publish_image.sh <用户名>/wxbot
+
+# 新机器:
+git clone <仓库> && cd wxbot && ./deploy.sh <Docker Hub 用户名>/wxbot:latest
 ```
 
-Runner 需要启用 QEMU 和 Docker Buildx，并拥有 registry 登录权限。首次部署时把完整镜像地址
-作为 `deploy.sh` 参数传入即可，脚本会保存到 `.env`；之后升级仍然只运行 `./deploy.sh`。
+镜像里只有程序和微信，不含 `.env`、账号密钥、聊天数据（`.dockerignore` 排除了 `accounts/ work/ llm_config.json`）。
+登录状态在数据卷 `wxdata` 里，账号密钥/人设/规则在 `appdata` 里，升级镜像不丢。
+
+## 本机现有的两个容器（旧数据卷兼容入口）
+
+| 容器 | 编排 | 后台 / noVNC |
+| --- | --- | --- |
+| `wxbot-ubuntu-manual`（主号） | `docker compose -p wxbot-main -f docker/ubuntu-manual/compose.yaml` | 5100 / 6082 |
+| `wxbot-second`（第二个号） | `docker compose -p wxbot-second -f docker/ubuntu-manual/compose.second.yaml` | 5101 / 6083 |
+
+两者都用 `wxbot-ubuntu-manual:wechat-4.1.13`（`docker/ubuntu-manual/Dockerfile` 叠在 `wxbot-wechat-base:4.1.13` 上）。
+`/app/work` 不在数据卷里，重建容器前先 `docker cp <容器>:/app/work` 备份、重建后拷回。
 
 ## macOS 本机方案（历史代码）
 

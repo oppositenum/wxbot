@@ -3,7 +3,7 @@
 FROM ubuntu:24.04
 
 ARG TARGETARCH
-ARG WECHAT_DEB_BASE=https://dldir1.qq.com/weixin/Universal/Linux
+ARG WECHAT_DEB_BASE=https://dldir1v6.qq.com/weixin/Universal/Linux
 
 LABEL org.opencontainers.image.base.name="ubuntu:24.04" \
       com.oppositenum.wxbot.runtime="ubuntu-24.04"
@@ -51,23 +51,43 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && echo "${TZ}" > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
+# 微信版本锁定:直发(core/direct_send_profiles.py)按微信二进制 sha256 适配,装成别的版本直发会自动停用。
+# 腾讯的下载地址永远指向「最新版」,所以下载后校验 sha256;官网升级后这里会构建失败并提示,而不是悄悄换版本。
+#   - 离线/固定版本:把 WeChatLinux_arm64.deb / WeChatLinux_x86_64.deb 放进 docker/wechat-deb/ 再构建
+#   - 确认要用新版(直发会停用,等重新适配):--build-arg WECHAT_ALLOW_UNPINNED=1
+ARG WECHAT_VERSION=4.1.13.29
+ARG WECHAT_SHA256_ARM64=b9ee12ba417ff68840d57020ef7014abb23c7b4f4c00ce807672b100c90bc853
+ARG WECHAT_SHA256_AMD64=d5b21c6e21186a58b2c2fd41712a4ef90f9452735931a6b8500e85c5b0913b0b
+ARG WECHAT_ALLOW_UNPINNED=0
+LABEL com.oppositenum.wxbot.wechat="${WECHAT_VERSION}"
+COPY docker/wechat-deb/ /tmp/wechat-deb/
 RUN set -eux; \
     case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
-      amd64) deb=WeChatLinux_x86_64.deb ;; \
-      arm64) deb=WeChatLinux_arm64.deb ;; \
+      amd64) deb=WeChatLinux_x86_64.deb; want="${WECHAT_SHA256_AMD64}" ;; \
+      arm64) deb=WeChatLinux_arm64.deb; want="${WECHAT_SHA256_ARM64}" ;; \
       *) echo "unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
-    curl -fSL --retry 8 --retry-delay 3 --retry-all-errors \
-      "${WECHAT_DEB_BASE}/${deb}" -o /tmp/wechat.deb; \
+    if [ -f "/tmp/wechat-deb/${deb}" ]; then cp "/tmp/wechat-deb/${deb}" /tmp/wechat.deb; \
+    else curl -fSL --retry 8 --retry-delay 3 --retry-all-errors "${WECHAT_DEB_BASE}/${deb}" -o /tmp/wechat.deb; fi; \
+    got="$(sha256sum /tmp/wechat.deb | cut -d' ' -f1)"; \
+    if [ "$got" != "$want" ]; then \
+      if [ "${WECHAT_ALLOW_UNPINNED}" = "1" ]; then echo "WARNING: wechat.deb sha256 $got != pinned ${WECHAT_VERSION}; direct send will be disabled"; \
+      else echo "ERROR: wechat.deb sha256 $got is not the pinned WeChat ${WECHAT_VERSION} ($want)." >&2; \
+           echo "Tencent probably released a newer version. Put the ${WECHAT_VERSION} deb into docker/wechat-deb/," >&2; \
+           echo "or build with --build-arg WECHAT_ALLOW_UNPINNED=1 (direct send stays off until re-adapted)." >&2; exit 1; fi; \
+    fi; \
     apt-get update; \
     (apt-get install -y /tmp/wechat.deb || apt-get -f install -y); \
-    rm -f /tmp/wechat.deb; \
-    rm -rf /var/lib/apt/lists/*
+    dpkg-query -W -f='${Version}\n' wechat | tee /etc/wxbot-wechat-version; \
+    rm -rf /tmp/wechat.deb /tmp/wechat-deb /var/lib/apt/lists/*
 
 # Live media capture is part of the image. SILK voice decoding is optional
 # because pilk may need architecture-specific build tooling.
-RUN pip3 install --break-system-packages --no-cache-dir frida==17.17.0 edge-tts dashscope
-RUN pip3 install --break-system-packages --no-cache-dir pilk || true
+RUN pip3 install --break-system-packages --no-cache-dir frida==17.23.3 edge-tts dashscope
+# pilk(把音频编成微信 SILK,直发语音条用)是 C 扩展:临时装编译器,装完卸掉
+RUN apt-get update && apt-get install -y --no-install-recommends gcc python3-dev \
+    && pip3 install --break-system-packages --no-cache-dir pilk \
+    && apt-get purge -y gcc python3-dev && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --shell /bin/bash wechat \
     && mkdir -p /app/accounts /app/work /home/wechat/Desktop /home/wechat/Pictures \

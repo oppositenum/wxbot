@@ -1,0 +1,48 @@
+# 第二个微信号(wxbot-second):和主号同一个镜像(微信 4.1.13),独立数据卷和端口。
+# 重建/升级(数据卷 wxbot-second-home 保留,登录状态不丢):
+#   docker compose -p wxbot-second -f docker/ubuntu-manual/compose.second.yaml up -d --force-recreate
+# 后台 http://127.0.0.1:5101   noVNC http://127.0.0.1:6083   VNC 127.0.0.1:5903
+# 注意:/app/work 不在数据卷里,重建前先 docker cp wxbot-second:/app/work 备份,重建后拷回。
+services:
+  ubuntu-wechat:
+    image: ${WXBOT_IMAGE_SECOND:-wxbot-ubuntu-manual:wechat-4.1.13}
+    container_name: wxbot-second
+    init: true
+    restart: unless-stopped
+    hostname: ubuntu-pc-b
+    mac_address: 00:1b:21:4c:8a:21
+    shm_size: 1gb
+    security_opt:
+      - seccomp=unconfined
+    cap_add:
+      - SYS_PTRACE
+    env_file:
+      - ../../.env
+    environment:
+      DISPLAY: ":0"
+      SCREEN: 1920x1080x24
+      TZ: Asia/Shanghai
+      LANG: zh_CN.UTF-8
+      LANGUAGE: zh_CN:zh
+      LC_ALL: zh_CN.UTF-8
+      WXBOT_LOCAL: "1"
+      WXBOT_BIND: 0.0.0.0
+      WXBOT_XWECHAT_ROOT: /home/wechat/xwechat_files
+      WXBOT_LLM_CONFIG: /home/wechat/llm_config.json
+      WXBOT_BOT_AUTOSTART: "0"
+      WXBOT_MEDIA_CAPTURE: "0"
+      WXBOT_SELF_CONTAINER: wxbot-second
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - 127.0.0.1:5101:5100
+      - 127.0.0.1:6083:6080
+      - 127.0.0.1:5903:5900
+    volumes:
+      - second-home:/home/wechat
+      - ../../accounts:/app/accounts
+      - ../../output/ubuntu-manual-images:/home/wechat/Pictures
+
+volumes:
+  second-home:
+    name: wxbot-second-home
+    external: true

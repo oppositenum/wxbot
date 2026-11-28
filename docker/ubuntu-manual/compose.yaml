@@ -2,10 +2,13 @@
 # New installations use ../../deploy.sh and ../../docker-compose.yml.
 services:
   ubuntu-wechat:
-    image: ${WXBOT_IMAGE:-wxbot-ubuntu-manual:24.04}
+    # 独立变量:.env 里的 WXBOT_IMAGE 是给根目录 deploy.sh 用的,别让主号跟着它换镜像
+    image: ${WXBOT_IMAGE_MAIN:-wxbot-ubuntu-manual:wechat-4.1.13}
     build:
       context: ../..
       dockerfile: docker/ubuntu-manual/Dockerfile
+      args:
+        WXBOT_BASE_IMAGE: ${WXBOT_BASE_IMAGE:-wxbot-wechat-base:4.1.13}
     container_name: wxbot-ubuntu-manual
     init: true
     restart: unless-stopped

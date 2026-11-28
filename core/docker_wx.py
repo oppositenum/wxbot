@@ -139,7 +139,50 @@ def _newest_image_dat():
     return newest[0]
 
 
+def _chat_list_points():
+    """[(会话 x, y, 消息区 x, y)] 会话列表前 5 个。按微信主窗口实际位置算。"""
+    r = _exec("bash", "-lc", "DISPLAY=:0 python3 -c 'import sys; sys.path.insert(0, \"/usr/local/bin\"); "
+              "import wx_send_legacy as L; w = L.win_id(); print(*L.win_geom(w), int(L.new_layout()))'")
+    try:
+        px, py, w, h, new = (int(v) for v in (r.stdout or "").split()[-5:])
+    except ValueError:
+        px, py, w, h, new = 0, 0, 1000, 700, 0
+    if new:     # 4.1.13:会话列表 x≈窗口+190,第一项 y≈窗口+117,行高 68
+        rows = [(px + 190, py + 117 + 68 * i) for i in range(5)]
+    else:       # 4.1.8
+        rows = [(px + 340, py + y) for y in (160, 232, 300, 370, 440)]
+    msg = (px + int(w * 0.65), py + int(h * 0.45))
+    return [(x, y, msg[0], msg[1]) for x, y in rows]
+
+
+def _ui_show_images():
+    """依次点开会话列表前几个会话、在消息区往上滚,让微信显示(解密)几张图片。"""
+    import time as _t
+    for cx, cy, mx, my in _chat_list_points():
+        _exec("bash", "-lc", f"DISPLAY=:0 xdotool mousemove {cx} {cy} click 1")
+        _t.sleep(0.8)
+        _exec("bash", "-lc", f"DISPLAY=:0 xdotool mousemove {mx} {my}; "
+              "for j in 1 2 3 4 5 6 7 8; do DISPLAY=:0 xdotool click 4; sleep 0.2; done")
+        _t.sleep(0.4)
+
+
 def _capture_img_key_locked(log=lambda m: None, trigger=True):
+    from core import db_keys
+    if LOCAL and db_keys.img_hook_supported():
+        # 4.1.13+:Frida hook 软件 AES 设置密钥(gdb 脚本在 4.1.13 上会把微信弄崩)
+        try:
+            key = db_keys.capture_img_key(trigger=_ui_show_images if trigger else None, log=log)
+        except Exception as e:  # noqa: BLE001
+            return False, f"抓图片密钥失败:{e}"
+        if not key:
+            return False, "未抓到:在微信里点开有图片的会话(没看过的图片)后再试"
+        db_keys.merge({"_img_key": key})
+        log("图片密钥已抓取并保存")
+        return True, key
+    return _capture_img_key_gdb(log, trigger)
+
+
+def _capture_img_key_gdb(log=lambda m: None, trigger=True):
     """注入微信抓账号级图片 AES 密钥(存 keys.json 的 _img_key)。切号后可重跑。
     需在抓取期间触发图片显示(冷缓存时打开会话即可)。返回 (ok, key_hex_or_msg)。"""
     import json
@@ -171,12 +214,14 @@ def _capture_img_key_locked(log=lambda m: None, trigger=True):
             break
         _t.sleep(1)
     if trigger and not os.environ.get("WXBOT_IMGKEY_DAT"):
-        with UI_LOCK:
-            for y in (160, 232, 300, 370, 440):
-                _exec("bash", "-lc", f"DISPLAY=:0 xdotool mousemove 340 {y} click 1")
-                _t.sleep(0.7)
-                _exec("bash", "-lc", "DISPLAY=:0 xdotool mousemove 800 400; "
-                      "for j in 1 2 3 4; do DISPLAY=:0 xdotool click 4; sleep 0.15; done")
+        # 让微信显示几张还没缓存的图片:依次点开会话列表前几个会话,在消息区往上滚。
+        # 坐标按主窗口实际位置算(4.1.8 窗口贴左上角;4.1.13 居中,会话列表在窗口左侧 ~190 处)。
+        for cx, cy, mx, my in _chat_list_points():
+            _exec("bash", "-lc", f"DISPLAY=:0 xdotool mousemove {cx} {cy} click 1")
+            _t.sleep(0.8)
+            _exec("bash", "-lc", f"DISPLAY=:0 xdotool mousemove {mx} {my}; "
+                  "for j in 1 2 3 4 5 6; do DISPLAY=:0 xdotool click 4; sleep 0.2; done")
+            _t.sleep(0.4)
     for _ in range(20):                       # 等抓取结果
         out = _exec("bash", "-lc", f"cat {imgkey_file!r} "
                     "2>/dev/null").stdout.strip()
@@ -233,9 +278,9 @@ def _refresh_keys_locked():
         return False, "未检测到已登录账号"
     dbs = f"{_xwechat_base()}/{wxid}/db_storage" if LOCAL \
         else f"/root/xwechat_files/{wxid}/db_storage"
-    out_keys = config.keys_json() if LOCAL else "/root/keys.json"
     if LOCAL:
-        os.makedirs(os.path.dirname(out_keys), exist_ok=True)
+        return _refresh_keys_local(dbs)
+    out_keys = "/root/keys.json"
     img = _preserve_img_key(config.keys_json())          # 刷新前记住图片密钥
     r = _exec("python3", "/usr/local/bin/linux_keys.py", dbs, out_keys, timeout=120)
     # The extractor prints a summary even when it found zero keys.  Treat
@@ -253,6 +298,34 @@ def _refresh_keys_locked():
     if ok:
         _restore_img_key(config.keys_json(), img)        # 刷新后补回图片密钥
     return ok, (r.stdout + r.stderr)[-500:]
+
+
+def _refresh_keys_local(dbs):
+    """容器内:内存扫描写临时文件 → 只合并验证通过的密钥 → 还缺的用 AES hook 抓(4.1.13+)。
+    绝不覆盖/删除已有的密钥(以前扫描失败会把整份 keys.json 清空)。"""
+    from core import db_keys
+    lines = []
+    log = lines.append
+    tmp = "/tmp/wxbot_linux_keys.json"
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    r = _exec("python3", "/usr/local/bin/linux_keys.py", dbs, tmp, timeout=120)
+    summary = re.search(r"命中\s+(\d+)\s*/\s*(\d+)", r.stdout + r.stderr)
+    log("内存扫描:" + (f"命中 {summary.group(1)}/{summary.group(2)}" if summary else "没有结果"))
+    try:
+        ok, need = db_keys.refresh(dbs, linux_keys_out=tmp if os.path.exists(tmp) else None, log=log)
+    except Exception as e:  # noqa: BLE001 hook 不可用(没 frida/微信没跑)时如实报告
+        need = db_keys.missing(db_keys.load(), dbs)
+        ok = not any(rel in need for rel in (config.CORE_DBS["message"], config.CORE_DBS["contact"],
+                                              config.CORE_DBS["session"]))
+        log(f"hook 抓密钥失败:{e}")
+    if need:
+        log("还缺:" + ", ".join(need) + "(在微信里点开几个会话、收发一条消息后再刷新一次)")
+    else:
+        log("所有库的密钥都齐了")
+    return ok, "\n".join(lines)[-800:]
 
 
 def send_text(name, text):

@@ -28,7 +28,7 @@ RUN setcap -r /usr/bin/python3.12 \
     && apt-get update && apt-get install -y --no-install-recommends ffmpeg python3-pip \
        libegl1 libgles2 libgl1 libegl-mesa0 \
     && rm -rf /var/lib/apt/lists/* \
-    && python3 -m pip install --break-system-packages --no-cache-dir --ignore-installed typing_extensions edge-tts dashscope \
+    && python3 -m pip install --break-system-packages --no-cache-dir --ignore-installed typing_extensions edge-tts dashscope frida==17.23.3 \
     && apt-get update && apt-get install -y --no-install-recommends gcc python3-dev \
     && python3 -m pip install --break-system-packages --no-cache-dir pilk \
     && apt-get purge -y gcc python3-dev && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* \

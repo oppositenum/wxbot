@@ -15,7 +15,6 @@ import json
 import os
 import sys
 import threading
-import functools
 
 from Crypto.Cipher import AES
 
@@ -132,20 +131,57 @@ def load_keys():
         return json.load(f)
 
 
-_refresh_lock = threading.RLock()
+# 每个解密库一把锁(按目标路径):同一个库的 .tmp 不能被两个线程同时写,
+# 但不同库互不相干——别让一个解不出来的库(比如密钥过期)把读消息也堵住。
+_locks_guard = threading.Lock()
+_locks = {}
+# 解密失败的库:{目标路径: (失败时的源库时间戳, 失败时间)}。源库没变就先别重试,
+# 免得每次调用都白跑一遍全库解密 + 重试。
+_failed = {}
+FAIL_BACKOFF = 60          # 源库没变时,失败后至少隔这么久再试(秒)
+RETRIES = 4                # 微信同步中易读到不一致快照 → 重试几次拿到一致快照
 
 
-def _serialized(fn):
-    @functools.wraps(fn)
-    def wrapped(*args, **kwargs):
-        # Every caller shares the .tmp destination, including the background
-        # inbox reader, bot, web sync and media readers.
-        with _refresh_lock:
-            return fn(*args, **kwargs)
-    return wrapped
+def _lock_for(dst):
+    with _locks_guard:
+        return _locks.setdefault(dst, threading.RLock())
 
 
-@_serialized
+def _src_stamp(src):
+    """库与 -wal 的 (最新 mtime, 大小)。新消息常只改 -wal。"""
+    stamp = [os.path.getmtime(src), os.path.getsize(src)]
+    wal = src + "-wal"
+    if os.path.exists(wal):
+        stamp[0] = max(stamp[0], os.path.getmtime(wal))
+        stamp[1] += os.path.getsize(wal)
+    return tuple(stamp)
+
+
+def _refresh_one(src, key_hex, dst, force):
+    import time as _t
+    with _lock_for(dst):
+        stamp = _src_stamp(src)
+        if not force and os.path.exists(dst) and os.path.getmtime(dst) >= stamp[0]:
+            return "cached"
+        fail = _failed.get(dst)
+        if not force and fail and fail[0] == stamp and _t.time() - fail[1] < FAIL_BACKOFF:
+            return "stale-kept" if os.path.exists(dst) else "err:backoff"
+        last_err = None
+        for attempt in range(RETRIES):
+            try:
+                decrypt_db(src, key_hex, dst)
+                _failed.pop(dst, None)
+                return "ok"
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                if attempt + 1 < RETRIES:
+                    _t.sleep(0.25)
+        _failed[dst] = (_src_stamp(src), _t.time())
+        if os.path.exists(dst):
+            return "stale-kept"      # 保留上一份可用库
+        return f"err:{last_err}"
+
+
 def run(force=False, only=None):
     """解密核心库（config.CORE_DBS）。only 可指定 key 子集。"""
     config.ensure_dirs()
@@ -165,33 +201,7 @@ def run(force=False, only=None):
         if not os.path.exists(src):
             results[key_name] = "no-src"
             continue
-        # 取 db 与 -wal 的最新 mtime（新消息常只改 -wal）
-        srcm = os.path.getmtime(src)
-        wal = src + "-wal"
-        if os.path.exists(wal):
-            srcm = max(srcm, os.path.getmtime(wal))
-        if (not force and os.path.exists(dst)
-                and os.path.getmtime(dst) >= srcm):
-            results[key_name] = "cached"
-            continue
-        # 微信同步中易读到不一致快照 → 重试几次拿到一致快照
-        ok = False
-        last_err = None
-        for attempt in range(4):
-            try:
-                decrypt_db(src, keys[rel], dst)
-                ok = True
-                break
-            except Exception as e:  # noqa: BLE001
-                last_err = e
-                import time as _t
-                _t.sleep(0.25)
-        if ok:
-            results[key_name] = "ok"
-        elif os.path.exists(dst):
-            results[key_name] = "stale-kept"      # 保留上一份可用库
-        else:
-            results[key_name] = f"err:{last_err}"
+        results[key_name] = _refresh_one(src, keys[rel], dst, force)
     return results
 
 

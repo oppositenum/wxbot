@@ -265,7 +265,7 @@ Ghidra 全量分析 130MB 约 45 分钟（8 核，10G 内存），`PreFast.java`
 - **请求对象带 enable_shared_from_this**：不能再手动 new+构造，改调微信的创建函数(x8 返回 shared_ptr)：文字 `0x4973de8`、图片 `0x4973c48`、视频 `0x53110a8`、文件 `0x5246238`(媒体工厂 `0x530e40c` 的文件分支用它，`0x48e15a4` 是表情等别的子类)。字段：one `+0x7c`、seven `+0x84`、收件人 `+0x90`、类型 `+0xe4`、子类型 `+0xe8`、大小 `+0x170`、正文 `+0x5c8`、路径 `+0xf0`、**新增文件名 `+0x158`**，视频 `+0x5dc=4`。
 - **坑**：`NativeFunction` 指向的跳板页要保留引用，否则被 Frida GC 回收，调用时访问违规(页对齐地址)。
 - **坑(环境)**：4.1.13 发视频要 EGL/GLES 生成封面，容器缺 `libEGL.so.1` 时视频必失败，**而且之后所有图片/文件上传都会失败直到重启微信**。镜像已加装 `libegl1 libgles2 libgl1 libegl-mesa0`。
-- **撤回(未完成)**：批量撤回 `0x6869584(x8, 撤回服务 vt 0xa22d7e8, vector<Row>&, …)`，逐行 `0x686be94`(含时限校验 `0x66c3878`/`0x66c7c78`)、`0x686d2c8`(用消息服务链)、`0x686e4b4`。消息行变成带 vtable 的对象(`0xa1d8860`，0x350 字节)：`+0x8` 类型、`+0x10/+0x40` 发送者、`+0x28/+0x58` 会话、`+0x74` local_id、`+0x90` server_id、`+0xa0` sort_seq、`+0xa8` 时间、`+0xac` 状态、`+0xb8` 正文、`+0xd0` msgsource。还需要：消息行构造函数、撤回服务定位链(看 `0x6869584` 的调用者 `0x6db61a4`/`0x6db7744`/`0x6db81f4`)、按 local_id 取消息的新函数。
+- **撤回(已完成，见 3.16)**：批量撤回 `0x6869584(x8, 撤回服务 vt 0xa22d7e8, vector<Row>&, …)`，逐行 `0x686be94`(含时限校验 `0x66c3878`/`0x66c7c78`)、`0x686d2c8`(用消息服务链)、`0x686e4b4`。消息行变成带 vtable 的对象(`0xa1d8860`，0x350 字节)：`+0x8` 类型、`+0x10/+0x40` 发送者、`+0x28/+0x58` 会话、`+0x74` local_id、`+0x90` server_id、`+0xa0` sort_seq、`+0xa8` 时间、`+0xac` 状态、`+0xb8` 正文、`+0xd0` msgsource。还需要：消息行构造函数、撤回服务定位链(看 `0x6869584` 的调用者 `0x6db61a4`/`0x6db7744`/`0x6db81f4`)、按 local_id 取消息的新函数。
 
 ### 3.14 直发语音条（4.1.13，2026-11-28）
 
@@ -275,6 +275,23 @@ Ghidra 全量分析 130MB 约 45 分钟（8 核，10G 内存），`PreFast.java`
 - 接入：`direct_send.send_voice_msg`；直发模式下 `DirectSendAdapter` 对 `voice` 先判 `voice_supported()`（配置有 voice 且能 import pilk），否则整单交给界面录音。实测语音转文字与 TTS 文本一致。
 
 ---
+
+### 3.16 撤回、@ 提醒、引用回复（4.1.13，2026-11-28）
+
+都是"界面上真实操作一次 + Frida 抓请求"定位的。界面操作用 `tools/wechat_re/ui_drive.py`(容器里 xdotool:开会话、截图、点击、粘贴)，抓包用 `frida/hook_sendmessage.js`(挂核心发送 `0x6306088`，导出请求里的字符串和整数)和 `frida/hook_ra.js`(记录调用者返回地址)。
+
+**@ 提醒**：就是普通文字请求，多一个字段。正文 `+0x5c8` 写成 `@名字\u2005正文`(名字后是 U+2005 四分之一空格)，`+0x5e0` 是被 @ 的 wxid(多个用逗号)。微信据此在 msgsource 里生成 `<atuserlist>`，对方收到"有人@我"。
+
+**引用回复**：仍是文字请求(同一个 vtable)，改成 appmsg：`+0xe4 = 49`、`+0xe8 = 57`；被引用消息的「消息行」(vtable `0xa1d8860`，0x350 字节)放在 `+0x1d8` 的 optional 里(有值标志 `+0x528 = 1`)；另外 `+0x190` 会话、`+0x1a8` 时间、`+0x1ac` local_id、`+0x1b0` sort_seq、`+0x1d0 = 1`、`+0x568` 空串 md5。微信按消息行自己拼 `<refermsg>`(svrid、chatusr、原文、msgsource)。displayname 界面发出来也是空的，接收方按 chatusr 显示名字。
+
+**撤回**：界面调用点 `0x6db81f4`：`svcA → svcB → 0x6306de0`(x8 返回撤回服务，vt `0xa22d7e8`)，把消息行拷贝构造(`0x46b2154`)进只有一个元素的 vector，调批量撤回 `0x6869584(x8=结果, x0=撤回服务, x1=&vector)`。结果首字节 1 = 成功(其余字节未初始化，是 0xaa)。
+
+**取消息行**(撤回和引用都要)：
+- `GetMsgByLocalId 0x6313cd0`：和 4.1.8 的 `0x4bc9fe4` 逐条指令对应(两个函数里同一串 xlog 加密字符串 `\xa12100\xb1E680FA…`，在新版里按原始字节搜到再 xref)。参数不变(x8=输出, x0=消息服务, x1=&会话, w2=local_id, w3=create_time)，Msg 现在 0x278 字节(vt `0xa1d79a0`)，找到标志在 `+0x278`。
+- Msg → 消息行：`0x5f09c2c(x8=行, x0=const Msg&)`。定位方法：消息行 vtable 的 GOT 槽(`.rela.dyn` 里 addend=`0xa1d8850` 的那条，槽 `0xa437a08`)有 30 多处 ADRP+LDR 引用，全挂上只记"参数 vtable"的计数钩子(`frida/hook_vt.js`)，界面切几次会话，收到 Msg 的那个就是。
+- 探测脚本 `frida/probe_msg.js` + `probe_run.py`：在协程里取服务、调 GetMsg、转消息行并导出，用来核对字段。
+
+**接口**：`direct_send.send(chat, text, at=[wxid] | "auto", quote=local_id)`；`at="auto"` 把正文里写的「@成员名」变成真 @(机器人直发时默认这样)。`sender.send_quote()`、`sender.send_at()` 在直发 + 4.1.13 下走底层，做不到时明确返回不支持(不悄悄降级成普通文字)。`/api/direct/send`、`/api/send` 都收 `at`/`quote`；直发页能选 @ 谁、引用哪条；「群里引用回复」开关在 `send_mode.json` 的 `group_quote`。
 
 ### 3.15 数据库密钥（4.1.13，2026-11-28）
 

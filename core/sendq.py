@@ -38,6 +38,10 @@ def _run():
             if item["kind"] == "text":
                 res = sender.send_text(item["to"], item["content"],
                                        chat_username=item["chat"], job_id=jid, session=item["session"])
+            elif item["kind"] == "quote":
+                q = item["content"]
+                res = sender.send_quote(item["to"], item["chat"], q["local_id"], q["text"], at=q.get("at"),
+                                        job_id=jid, session=item["session"])
             else:
                 res = sender.send_image(item["to"], item["path"],
                                         chat_username=item["chat"], job_id=jid, session=item["session"])
@@ -81,9 +85,8 @@ def enqueue(kind, to, chat=None, content=None, path=None):
         jid = send_ledger.next_id()
     ahead = _q.qsize() + (1 if any(v.get("status") == "running"
                                    for v in _jobs.values()) else 0)
-    send_ledger.Ledger().prepare(jid, token, chat, kind,
-        send_ledger.stable_id(content if kind == 'text' else path),
-        content if kind == 'text' else path)
+    payload = content if kind in ('text', 'quote') else path   # quote 的 content 是 {text, local_id[, at]}
+    send_ledger.Ledger().prepare(jid, token, chat, kind, send_ledger.stable_id(payload), payload)
     _jobs[jid] = {"status": "queued", "position": _q.qsize() + 1, "to": to}
     _q.put({"id": jid, "kind": kind, "to": to, "chat": chat,
             "content": content, "path": path, "session": token})

@@ -21,7 +21,7 @@ function lstr(p) {
     if ((b & 1) === 0) { const n = b >> 1; return n > 22 ? null : p.add(1).readUtf8String(n); }
     const n = p.add(8).readU64().toNumber();
     if (n < 0 || n > 8192) return null;
-    return p.add(16).readPointer().readUtf8String(Math.min(n, 300));
+    return p.add(16).readPointer().readUtf8String(Math.min(n, CFG.maxStr || 300));
   } catch (e) { return null; }
 }
 const q = [];
@@ -48,7 +48,7 @@ setInterval(() => {
         const v = buf.add(o).readU64();
         if (!v.equals(0)) words['+' + o.toString(16)] = v.toString(16);
         const s = lstr(buf.add(o));
-        if (s && /^[\x20-\x7e -￿]+$/.test(s)) strs['+' + o.toString(16)] = s;
+        if (s && /^[\x09\x0a\x0d\x20-\x7e\u00a0-\uffff]+$/.test(s)) strs['+' + o.toString(16)] = s;
       }
       r.words = words; r.strs = strs;
     }

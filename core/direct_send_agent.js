@@ -15,6 +15,8 @@ const B = Process.getModuleByName('wechat').base;
 const P = PROFILE;
 const F = P.fields;
 const RV = P.revoke;   // 没适配撤回的版本为 null
+const BATCH = !!(RV && RV.style === 'batch');   // 4.1.13:GetMsg → 消息行 → 批量撤回
+const Q = BATCH ? (P.quote || null) : null;     // 引用回复要用同一套取消息行
 
 const G = Memory.alloc(0x400);  // g[1]=&sp g[2]=done g[3]=calls g[11]=step
 const VT = Memory.alloc(9 * 8);
@@ -37,7 +39,9 @@ typedef void* (*new_fn)(unsigned long);
 extern char g_send[]; extern char g_new[]; extern char g_ti[]; extern uint64_t g[];
 extern char g_ta[]; extern char g_tb[]; extern char g_tc[]; extern char g_svcvt[]; extern char g_launch[];
 extern char g_tr[]; extern char g_rv[]; extern char g_rvvt[]; extern char g_mbl[];
+extern char g_cv[]; extern char g_rc[]; extern char g_sa[];
 typedef void (*x8_fn3)(void*, void*, uint64_t, uint64_t, void*);
+typedef void (*fn2)(void*, void*);
 struct F { void** vt; };
 void f_dtor(struct F* s){}
 void f_ddtor(struct F* s){}
@@ -52,6 +56,28 @@ void f_call(struct F* s){ g[3]++;
   uint64_t* a=&w[0]; uint64_t* b=&w[8]; uint64_t* c=&w[16];
   ((x8_fn)g_ta)(0,0,0,0,a); if(!a[0]){ g[11]=1; return; }
   ((x8_fn)g_tb)((void*)a[0],0,0,0,b); if(!b[0]){ g[11]=2; return; }
+  if(g[16]==2 || g[16]==3){
+    /* 4.1.13:2=撤回 3=引用回复。g[30]=&会话 g[31]=local_id g[32]=create_time g[33]=Msg 缓冲 g[34]=行缓冲
+       g[35]=vector 缓冲 g[36]=文字请求 g[37]=显示名 string(可 0) g[40..] 偏移(见 JS launch) */
+    unsigned char* m=(unsigned char*)g[33]; unsigned char* row=(unsigned char*)g[34];
+    ((x8_fn)g_tc)((void*)b[0],0,0,0,c); if(!c[0]){ g[11]=3; return; }
+    if(*(uint64_t*)c[0] != (uint64_t)g_svcvt){ g[11]=4; return; }
+    ((x8_fn3)g_mbl)((void*)c[0],(void*)g[30],g[31],g[32],(void*)m);
+    if(!m[g[40]]){ g[11]=5; return; }
+    ((x8_fn)g_cv)((void*)m,0,0,0,(void*)row);
+    if(g[37]) ((fn2)g_sa)((void*)(row+g[44]),(void*)g[37]);
+    if(g[16]==2){
+      uint64_t* r=&w[24]; uint64_t* vec=(uint64_t*)g[35];
+      ((x8_fn)g_tr)((void*)b[0],0,0,0,r); if(!r[0]){ g[11]=6; return; }
+      if(*(uint64_t*)r[0] != (uint64_t)g_rvvt){ g[11]=7; return; }
+      vec[0]=(uint64_t)row; vec[1]=(uint64_t)(row+g[41]); vec[2]=vec[1];
+      ((x8_fn)g_rv)((void*)r[0],(void*)vec,0,0,(void*)&w[32]);
+      g[12]=w[32]; g[13]=w[33]; g[14]=w[34]; g[2]++; g[11]=9; return; }
+    unsigned char* q=(unsigned char*)g[36];
+    ((fn2)g_rc)((void*)(q+g[42]),(void*)row); q[g[43]]=1;
+    *(uint32_t*)(q+g[48])=*(uint32_t*)(row+g[45]); *(uint32_t*)(q+g[49])=*(uint32_t*)(row+g[46]);
+    *(uint64_t*)(q+g[50])=*(uint64_t*)(row+g[47]); q[g[51]]=1;
+    ((x8_fn)g_send)((void*)c[0],(void*)g[1],0,0,(void*)&w[32]); g[2]++; g[11]=9; return; }
   if(g[16]==1){  /* 撤回:g[17]=消息行 g[18]=local_id g[19]=Msg缓冲(0x400) g[20]=假控制块 g[21]=create_time;结果首字节=成功 */
     uint64_t* row=(uint64_t*)g[17]; unsigned char* m=(unsigned char*)g[19]; uint64_t* ctl=(uint64_t*)g[20];
     ((x8_fn)g_tc)((void*)b[0],0,0,0,c); if(!c[0]){ g[11]=3; return; }
@@ -84,7 +110,8 @@ uint64_t do_launch(void* ex, void* loc, void* fnstore, uint64_t* out){
   g_tc: sret(B.add(P.svcC)), g_launch: sret(B.add(P.coLaunch)),
   // 没适配撤回时这几个符号不会被调用(rpc.revoke 直接返回 revoke_unsupported)
   g_tr: RV ? sret(B.add(RV.revokeSvc)) : B, g_mbl: RV ? sret(B.add(RV.msgByLocalId)) : B,
-  g_rv: RV ? sret(B.add(RV.revoke)) : B, g_rvvt: RV ? B.add(RV.revokeSvcVt) : B,
+  g_rv: RV ? sret(B.add(RV.style === 'batch' ? RV.batch : RV.revoke)) : B, g_rvvt: RV ? B.add(RV.revokeSvcVt) : B,
+  g_cv: BATCH ? sret(B.add(RV.toRow)) : B, g_rc: Q ? B.add(Q.rowCopy) : B, g_sa: B.add(P.strAssign),
   g_svcvt: B.add(P.svcVt), g_new: B.add(P.opNew), g_ti: B.add(P.typeInfo), g: G,
 });
 ['f_dtor', 'f_ddtor', 'f_clone0', 'f_clone1', 'f_destroy', 'f_destroy_dealloc', 'f_call', 'f_target', 'f_target_type']
@@ -205,6 +232,16 @@ function launch(ex, req) {
   G.add(11 * 8).writeU64(0); G.add(12 * 8).writeU64(0);
   G.add(16 * 8).writeU64(req.mode || 0); G.add(17 * 8).writePointer(req.row || NULL);
   if (req.mode === 1) { G.add(18 * 8).writeU64(req.localId); G.add(19 * 8).writePointer(req.msg); G.add(20 * 8).writePointer(req.ctl); G.add(21 * 8).writeU64(req.createTime); }
+  if (req.mode === 2 || req.mode === 3) {
+    const L = req.load;
+    G.add(30 * 8).writePointer(L.chat); G.add(31 * 8).writeU64(L.localId); G.add(32 * 8).writeU64(L.createTime);
+    G.add(33 * 8).writePointer(L.msg); G.add(34 * 8).writePointer(L.row); G.add(35 * 8).writePointer(L.vec);
+    G.add(36 * 8).writePointer(req.obj || NULL); G.add(37 * 8).writePointer(L.name || NULL);
+    const R = RV.row;
+    [RV.msgFound, RV.rowSize, Q ? Q.rowOff : 0, Q ? Q.rowSet : 0, R.displayName, R.time, R.localId, R.sortSeq,
+     Q ? Q.time : 0, Q ? Q.localId : 0, Q ? Q.sortSeq : 0, Q ? Q.flag : 0]
+      .forEach((v, i) => G.add((40 + i) * 8).writeU64(v));
+  }
   const calls = G.add(3 * 8).readU64().toNumber();
   doLaunch(ex, loc, fstore, out);
   return { ok: true, calls };
@@ -253,6 +290,15 @@ function buildVoice(to, silkPath, ms) {
   return { obj, sp, keep };
 }
 
+// 4.1.13:协程里按 local_id 取消息、转成消息行要用的缓冲区(都永久保留:微信可能还持有行里的引用)
+function loadBufs(chat, localId, createTime, name) {
+  const keep = [];
+  const L = { chat: longStr(chat, keep), localId, createTime, msg: Memory.alloc(0x400),
+              row: Memory.alloc(RV.rowSize + 0x40), vec: Memory.alloc(0x20), name: name ? longStr(name, keep) : null };
+  FOREVER.push(L, keep);
+  return L;
+}
+
 function sendKind(kind, to, payload, size) {
   const ex = executor();
   if (!loggedIn(ex)) return { ok: false, error: 'not_logged_in' };
@@ -263,9 +309,32 @@ function sendKind(kind, to, payload, size) {
 
 rpc.exports = {
   ready() {
-    return { attached: true, logged_in: loggedIn(executor()), profile: P.name, revoke: !!RV, voice: !!VOICE_MAKER };
+    return { attached: true, logged_in: loggedIn(executor()), profile: P.name, revoke: !!RV, voice: !!VOICE_MAKER,
+             quote: !!Q, at: !!F.atList };
   },
-  send(to, content) { return sendKind('text', to, content, 0); },
+  // opts = {at: [wxid...], quote: {localId, createTime, name}}:@ 提醒 / 引用回复(4.1.13)
+  send(to, content, opts) {
+    opts = opts || {};
+    const ex = executor();
+    if (!loggedIn(ex)) return { ok: false, error: 'not_logged_in' };
+    if (opts.at && opts.at.length && !F.atList) return { ok: false, error: 'at_unsupported' };
+    if (opts.quote && !Q) return { ok: false, error: 'quote_unsupported' };
+    const req = build('text', to, content, 0);
+    if (!req) return { ok: false, error: 'request_mismatch' };
+    if (opts.at && opts.at.length) {
+      const list = opts.at.join(',');
+      strAssign(req.obj.add(F.atList), longStr(list, req.keep));
+      if (readStr(req.obj.add(F.atList)) !== list) return { ok: false, error: 'request_mismatch' };
+    }
+    if (!opts.quote) return launch(ex, req);
+    const q = opts.quote;
+    req.obj.add(F.type).writeU32(Q.type); req.obj.add(F.sub).writeU32(Q.sub);
+    strAssign(req.obj.add(Q.chat), longStr(to, req.keep));
+    strAssign(req.obj.add(Q.md5), longStr('d41d8cd98f00b204e9800998ecf8427e', req.keep));  // 空串 md5,界面就是这样
+    FOREVER.push(req.keep, req.sp);
+    return launch(ex, { mode: 3, obj: req.obj, sp: req.sp, keep: req.keep,
+                        load: loadBufs(to, q.localId, q.createTime, q.name || '') });
+  },
   sendImage(to, path, size) { return sendKind('image', to, path, size); },
   sendVideo(to, path, size) { return sendKind('video', to, path, size); },
   sendFile(to, path, size) { return sendKind('file', to, path, size); },
@@ -282,6 +351,7 @@ rpc.exports = {
     if (!RV) return { ok: false, error: 'revoke_unsupported' };
     const ex = executor();
     if (!loggedIn(ex)) return { ok: false, error: 'not_logged_in' };
+    if (BATCH) return launch(ex, { mode: 2, keep: [], load: loadBufs(r.chat, r.localId, r.createTime, '') });
     const b = buildRow(r);
     if (!b) return { ok: false, error: 'request_mismatch' };
     // Msg 缓冲(微信把找到的 Msg 移动构造进来)和假控制块都永久保留:撤回后微信可能还持有引用
@@ -298,6 +368,7 @@ rpc.exports = {
   },
   poll() {
     return { step: G.add(11 * 8).readU64().toNumber(), calls: G.add(3 * 8).readU64().toNumber(),
-             result: G.add(12 * 8).readU64().toNumber() };
+             result: G.add(12 * 8).readU64().toNumber(),
+             raw: [12, 13, 14].map(i => G.add(i * 8).readU64().toString(16)) };
   },
 };

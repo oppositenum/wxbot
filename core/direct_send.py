@@ -35,8 +35,10 @@ NOT_SENT_CODES = frozenset({
     "not_logged_in", "request_mismatch", "bad_chat", "empty", "too_long", "no_file",
     "bad_image", "bad_video", "bad_audio", "no_ffmpeg", "convert_failed", "tts_failed", "bad_param", "too_large", "step_failed",
     "not_found", "not_mine", "not_sent_ok", "too_old", "already_revoked", "revoke_unsupported",
-    "voice_unsupported", "no_silk_encoder", "encode_failed",
+    "voice_unsupported", "no_silk_encoder", "encode_failed", "at_unsupported", "quote_unsupported", "bad_at",
 })
+
+AT_SEP = "\u2005"   # 微信 @名字 后面的四分之一空格(界面发 @ 实测)
 
 REVOKE_WINDOW = 120   # 微信普通消息 2 分钟内可撤回(服务端最终说了算)
 
@@ -350,7 +352,9 @@ def _dispatch(row, call, wait=WAIT_SECONDS):
                 msg = {"not_logged_in": "微信还没登录完成(停在登录页?)",
                        "request_mismatch": "请求对象校验失败,未发送",
                        "revoke_unsupported": "当前微信版本还没适配底层撤回",
-                       "voice_unsupported": "当前微信版本不能直发语音条"}.get(code, code)
+                       "voice_unsupported": "当前微信版本不能直发语音条",
+                       "at_unsupported": "当前微信版本还没适配 @ 提醒",
+                       "quote_unsupported": "当前微信版本还没适配引用回复"}.get(code, code)
                 raise DirectSendError(code, msg)
             deadline = time.time() + wait
             step, p = 0, {}
@@ -370,7 +374,7 @@ def _dispatch(row, call, wait=WAIT_SECONDS):
             _record(row)
             raise DirectSendError("frida_error", f"调用失败:{e}")
     if step == 9 and row.get("kind") == "revoke":
-        ok = bool(p.get("result"))
+        ok = bool(int((p.get("raw") or ["0"])[0], 16) & 0xFF) if p.get("raw") else bool(p.get("result"))
         row.update(ok=ok, step=step, message="已撤回" if ok else "",
                    **({} if ok else {"code": "revoke_failed", "error": "微信拒绝撤回(超时限或消息状态不对)"}))
     elif step == 9:
@@ -385,17 +389,131 @@ def _dispatch(row, call, wait=WAIT_SECONDS):
     return row
 
 
-def send(chat, content, name="", source="manual"):
-    """发文字。chat=wxid 或 xxx@chatroom。返回结果字典;失败抛 DirectSendError。"""
+def _member_names(chat):
+    """群成员 wxid → @ 时显示的名字(群昵称优先,其次昵称)。"""
+    from core import contacts
+    out = {}
+    try:
+        for m in contacts.group_members(chat) or []:
+            w = m.get("wxid") or m.get("username")
+            n = (m.get("group_nick") or m.get("name") or m.get("nick_name") or "").strip()
+            if w and n:
+                out[w] = n
+    except Exception:
+        pass
+    return out
+
+
+def resolve_mentions(chat, content):
+    """群消息里写的「@成员名」→ (规范化后的正文, [wxid])。名字后补微信的 \u2005 分隔符,
+    只认得出本群成员的名字(最长匹配),认不出的 @ 原样保留。"""
+    if not chat.endswith("@chatroom") or "@" not in content:
+        return content, []
+    names = sorted(((n, w) for w, n in _member_names(chat).items()), key=lambda x: -len(x[0]))
+    out, wxids, i = [], [], 0
+    while i < len(content):
+        if content[i] == "@":
+            hit = next(((n, w) for n, w in names if content.startswith(n, i + 1)), None)
+            if hit:
+                n, w = hit
+                j = i + 1 + len(n)
+                if j < len(content) and content[j] in (" ", AT_SEP):
+                    j += 1
+                out.append("@" + n + AT_SEP)
+                if w not in wxids:
+                    wxids.append(w)
+                i = j
+                continue
+        out.append(content[i])
+        i += 1
+    return "".join(out), wxids
+
+
+def mention_text(chat, at, content):
+    """把要 @ 的人补到正文开头(正文里已经写了「@名字」的不重复加)。返回 (正文, [wxid])。"""
+    names = _member_names(chat)
+    wxids = []
+    head = ""
+    for w in at:
+        if not isinstance(w, str) or not w or any(c.isspace() or c == "," for c in w):
+            raise DirectSendError("bad_at", "要 @ 的人不对")
+        if w in wxids:
+            continue
+        wxids.append(w)
+        n = names.get(w)
+        if not n:
+            from core import contacts
+            n = ((contacts.all_names().get(w) or {}).get("name") or "").strip()
+        if not n:
+            raise DirectSendError("bad_at", f"不在这个群里:{w}")
+        if ("@" + n) not in content:
+            head += "@" + n + AT_SEP
+    text, auto = resolve_mentions(chat, head + content)
+    return text, wxids + [w for w in auto if w not in wxids]
+
+
+def _find_message(chat, local_id):
+    """解密库里取一条消息(引用用):返回 {localId, createTime, sender, type}。"""
+    from core import db, messages
+    table = messages.msg_table(chat)
+    con = db.connect("message")
+    try:
+        if not db.table_exists(con, table):
+            raise DirectSendError("not_found", "找不到这个会话的消息")
+        r = con.execute(f"SELECT local_id, local_type, real_sender_id, create_time FROM {table} WHERE local_id = ?",
+                        (int(local_id),)).fetchone()
+        id2name = messages._name2id_map(con) if r else {}
+    finally:
+        con.close()
+    if not r:
+        raise DirectSendError("not_found", "没找到要引用的消息(库可能还没同步,稍等再试)")
+    if r[1] == 10000:
+        raise DirectSendError("not_found", "要引用的消息已经撤回了")
+    return {"localId": int(r[0]), "type": int(r[1]), "sender": id2name.get(r[2]) or "", "createTime": int(r[3])}
+
+
+def _sender_name(chat, wxid):
+    if not wxid:
+        return ""
+    if chat.endswith("@chatroom"):
+        n = _member_names(chat).get(wxid)
+        if n:
+            return n
+    from core import contacts
+    return ((contacts.all_names().get(wxid) or {}).get("name") or "").strip()
+
+
+def send(chat, content, name="", source="manual", at=None, quote=None):
+    """发文字。chat=wxid 或 xxx@chatroom。返回结果字典;失败抛 DirectSendError。
+    at:要 @ 的 wxid 列表(群里),"auto" = 只把正文里写的「@成员名」变成真 @;
+    quote:被引用消息的 local_id(引用回复,微信 4.1.13+)。"""
     chat = _check_chat(chat)
     content = content if isinstance(content, str) else ""
     if not content.strip():
         raise DirectSendError("empty", "内容不能为空")
     if len(content) > MAX_CHARS:
         raise DirectSendError("too_long", f"内容超过 {MAX_CHARS} 字")
-    row = {"t": int(time.time()), "kind": "text", "chat": chat, "name": name, "content": content,
-           "source": source}
-    return _dispatch(row, lambda ex: ex.send(chat, content))
+    wxids = []
+    if at == "auto":
+        if at_supported():
+            content, wxids = resolve_mentions(chat, content)
+    elif at:
+        if not chat.endswith("@chatroom"):
+            raise DirectSendError("bad_at", "只有群聊能 @ 人")
+        content, wxids = mention_text(chat, list(at), content)
+    opts = {}
+    if wxids:
+        opts["at"] = wxids
+    row = {"t": int(time.time()), "kind": "quote" if quote is not None else "text", "chat": chat, "name": name,
+           "content": content, "source": source}
+    if wxids:
+        row["at"] = wxids
+    if quote is not None:
+        q = _find_message(chat, quote)
+        opts["quote"] = {"localId": q["localId"], "createTime": q["createTime"],
+                         "name": _sender_name(chat, q["sender"])}
+        row["quote"] = q["localId"]
+    return _dispatch(row, lambda ex: ex.send(chat, content, opts))
 
 
 def send_image(chat, path, name="", label="", source="manual"):
@@ -674,3 +792,20 @@ def voice_supported():
     except ImportError:
         return False
     return True
+
+
+def _profile():
+    sha, _ver = binary_version()
+    return PROFILES.get(sha) if sha else None
+
+
+def at_supported():
+    """当前微信版本的直发能不能带 @ 提醒(不附加,只看配置)。"""
+    p = _profile()
+    return bool(p and p.get("fields", {}).get("atList"))
+
+
+def quote_supported():
+    """当前微信版本能不能直发引用回复(不附加,只看配置)。"""
+    p = _profile()
+    return bool(p and p.get("quote") and (p.get("revoke") or {}).get("style") == "batch")

@@ -7,7 +7,7 @@ core/direct_send.py 按微信二进制 sha256 选一套,注入给 core/direct_se
 
 # 请求对象字段:one/seven 是两个固定值(界面发送实测),to 收件人,type 类型,sub 文件子类型,
 # len 正文字节数或文件大小,content 正文,path 本地文件路径,filename 文件名(4.1.13 起),
-# video_flags 视频额外的字节标志 [(偏移, 值)]
+# video_flags 视频额外的字节标志 [(偏移, 值)],atList 被 @ 的 wxid 列表(没有=不支持 @ 提醒)
 PROFILES = {
     # ---- WeChat Linux 4.1.8 aarch64 ----
     "e40116597803a5e0d9fc4a2b727df4b8f7a3dd6de1c336140ea373be2b6626e9": {
@@ -52,8 +52,26 @@ PROFILES = {
         "fields": {"one": 0x7c, "seven": 0x84, "to": 0x90, "type": 0xe4, "sub": 0xe8, "len": 0x170,
                    "content": 0x5c8, "path": 0xf0, "filename": 0x158, "video_flags": [[0x5dc, 4]],
                    "voiceData": 0x5c8,      # 语音请求里 SILK 字节的 std::string(和文字正文同一偏移)
+                   "atList": 0x5e0,         # 文字请求:被 @ 的 wxid,逗号分隔(界面发 @ 实测)
                    "objSize": 0x5f0},
-        "revoke": None,      # 4.1.13 撤回链被拆成多个函数,待定位
+        # 撤回(界面右键撤回实测,docs 3.16):
+        #   GetMsgByLocalId 0x6313cd0(x8=Msg 输出, x0=消息服务, x1=&会话, w2=local_id, w3=create_time),找到标志 +0x278
+        #   Msg → 消息行 0x5f09c2c(x8=行 0x350 字节, x0=const Msg&),行 vtable 0xa1d8860
+        #   撤回服务:svcA → svcB → 0x6306de0(x8),vtable 0xa22d7e8
+        #   批量撤回 0x6869584(x8=结果, x0=撤回服务, x1=&vector<行>)
+        "revoke": {
+            "style": "batch",
+            "revokeSvc": 0x6306de0, "revokeSvcVt": 0xa22d7e8, "batch": 0x6869584,
+            "msgByLocalId": 0x6313cd0, "msgFound": 0x278, "toRow": 0x5f09c2c, "rowSize": 0x350,
+            "row": {"time": 0xa8, "localId": 0x74, "sortSeq": 0xa0, "displayName": 0x248},
+        },
+        # 引用回复 = 文字请求改成 appmsg 49/57,被引用消息的「消息行」放进 +0x1d8 的 optional(有值标志 +0x528),
+        # 另有 +0x190 会话、+0x1a8 时间、+0x1ac local_id、+0x1b0 sort_seq、+0x1d0=1、+0x568 空串的 md5。
+        # 微信按消息行自己拼 <refermsg>。消息行拷贝构造 0x46b2154(x0=目标, x1=源)。
+        "quote": {
+            "rowOff": 0x1d8, "rowSet": 0x528, "chat": 0x190, "time": 0x1a8, "localId": 0x1ac,
+            "sortSeq": 0x1b0, "flag": 0x1d0, "md5": 0x568, "rowCopy": 0x46b2154, "type": 49, "sub": 57,
+        },
         "voice": True,       # 4.1.9+ 才有语音条
     },
 }

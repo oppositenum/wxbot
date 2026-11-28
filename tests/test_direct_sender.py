@@ -39,7 +39,7 @@ class SendModeTest(Isolated):
             r = self.text()
         self.assertTrue(r['ok'])
         self.assertEqual(r['reason'], 'direct_submitted')
-        ds.assert_called_once_with('wxid_a', 'hi', 'demo', source='bot')
+        ds.assert_called_once_with('wxid_a', 'hi', 'demo', source='bot', at=None)
         self.ui.assert_not_called()
 
     def test_direct_unavailable_falls_back_to_ui_once(self):
@@ -93,6 +93,43 @@ class SendModeTest(Isolated):
         self.assertIsInstance(sender.current_adapter(), DirectSendAdapter)
         r = sender.preflight('g@chatroom', self.token, kind='at')
         self.assertEqual(r['reason'], 'direct_payload_not_supported')
+
+    def test_at_and_quote_go_direct_when_version_supports_them(self):
+        send_mode.set('direct')
+        with patch('core.direct_send.at_supported', return_value=True), \
+             patch('core.direct_send.quote_supported', return_value=True), \
+             patch('core.direct_send.status', return_value=READY), \
+             patch('core.direct_send.send', return_value={'ok': True}) as ds:
+            self.assertTrue(sender.supports('g@chatroom', 'at'))
+            self.assertFalse(sender.supports('wxid_a', 'at'))
+            r1 = sender.send_at('群', 'g@chatroom', 'wxid_b', '黎深', '开会', session=self.token, job_id='job-at')
+            r2 = sender.send_quote('群', 'g@chatroom', 7, '收到', session=self.token, job_id='job-q')
+        self.assertEqual((r1['reason'], r2['reason']), ('direct_submitted', 'direct_submitted'))
+        ds.assert_any_call('g@chatroom', '开会', '群', source='bot', at=['wxid_b'])
+        ds.assert_any_call('g@chatroom', '收到', '群', source='bot', quote=7, at='auto')
+        self.ui.assert_not_called()
+
+    def test_quote_is_not_silently_turned_into_text(self):
+        send_mode.set('direct')
+        self.assertFalse(sender.supports('g@chatroom', 'quote'))
+        with patch('core.direct_send.send', forbidden):
+            r = sender.send_quote('群', 'g@chatroom', 7, '收到', session=self.token, job_id='job-q2')
+        self.assertTrue(r['reason'].endswith('_payload_not_supported'), r['reason'])
+        self.ui.assert_not_called()
+
+    def test_bot_quotes_only_when_switched_on_and_supported(self):
+        from core import bot
+        msg = {'local_id': 9, 'is_self': False}
+        send_mode.set('direct')
+        self.assertFalse(bot._quote_reply('g@chatroom', msg))                     # 默认关
+        send_mode.set(group_quote=True)
+        self.assertTrue(send_mode.get()['group_quote'])
+        self.assertFalse(bot._quote_reply('g@chatroom', msg))                     # 版本不支持
+        with patch('core.direct_send.quote_supported', return_value=True):
+            self.assertTrue(bot._quote_reply('g@chatroom', msg))
+            self.assertFalse(bot._quote_reply('wxid_a', msg))                     # 私聊不引用
+            self.assertFalse(bot._quote_reply('g@chatroom', dict(msg, is_self=True)))
+            self.assertFalse(bot._quote_reply('g@chatroom', {'is_self': False}))
 
     def test_injected_adapter_is_not_replaced(self):
         send_mode.set('direct')

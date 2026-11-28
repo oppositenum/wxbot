@@ -50,6 +50,7 @@ button.primary{background:#23815a;color:#fff;border-color:#23815a}button:disable
     <label class="opt" id="opt-direct"><input type="radio" name="mode" value="direct"> <b>直发（实验）</b><span class="sub">直接调用微信底层发送，不操作界面，更快</span></label>
   </div>
   <label class="sub"><input type="checkbox" id="fallback"> 直发确定没发出时（未连接、未登录等）自动改用界面自动化；结果不确定时不回退，避免重复发送</label>
+  <label class="sub"><input type="checkbox" id="groupQuote"> 群里回复某人时，第一条引用对方那句话（直发 + 微信 4.1.13 才能做，做不到就照常发文字）</label>
   <div class="sub" id="modeMsg" style="margin-top:6px"></div>
 </section>
 <div class="warn">支持文字和图片（PNG / JPG / GIF / WEBP，20MB 以内）。「已交给微信发送」只代表微信已接收；图片要等微信后台上传完才算真正发出，是否送达请在手机或 VNC 里看有没有红色感叹号。</div>
@@ -64,6 +65,10 @@ button.primary{background:#23815a;color:#fff;border-color:#23815a}button:disable
       <h2>消息</h2>
       <div class="target" id="target"><span class="muted">先在左边选一个好友或群</span></div>
       <textarea id="content" placeholder="输入要发送的文字，可直接粘贴截图（Ctrl/⌘ + Enter 发送）" maxlength="2000"></textarea>
+      <div class="line" id="extra" style="display:none;gap:10px;flex-wrap:wrap;margin:6px 0">
+        <label id="atWrap" style="display:none">@ <select id="atSel" style="max-width:200px"><option value="">不 @ 人</option></select></label>
+        <label>引用 <select id="quoteSel" style="max-width:320px"><option value="">不引用</option></select></label>
+        <span class="muted" style="font-size:12px">正文里直接写「@成员名」也会变成真 @</span></div>
       <div class="preview" id="preview"><img id="pimg" alt=""><span class="fn" id="pname"></span><button type="button" id="premove">移除</button></div>
       <div class="actions"><button class="primary" id="send" disabled>发送</button><button type="button" id="pick" title="音频会转成带声波画面的视频发出(Linux 版微信发不了语音条)">选择图片/视频/音频</button><button type="button" id="revoke" disabled title="撤回我在这个会话里最近发的一条(2 分钟内)">撤回上一条</button><input type="file" id="file" accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/quicktime,audio/*,.mp3,.m4a,.wav,.ogg,.flac,.amr" hidden><span id="result"></span></div>
     </div>
@@ -183,8 +188,20 @@ function drawVR(){
 async function loadVR(){const [r,d]=await j('/api/voice_reply');if(r.ok){vr=d;drawVR();}}
 async function vrPost(body){const [r,d]=await j('/api/voice_reply',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
   if(!r.ok||!d.ok){vrMsg('✗ '+(d.error||'保存失败'),'bad');return;}vr=d;drawVR();vrMsg('✓ 已保存','ok');}
+async function loadExtra(){
+  const t=sel; $('#extra').style.display=t?'':'none'; $('#atWrap').style.display=t&&t.kind==='群'?'':'none';
+  $('#atSel').innerHTML='<option value="">不 @ 人</option>'; $('#quoteSel').innerHTML='<option value="">不引用</option>';
+  if(!t)return;
+  const [r,d]=await j('/api/messages?chat='+encodeURIComponent(t.chat)+'&limit=30');
+  if(sel!==t)return;
+  if(r.ok&&Array.isArray(d)) $('#quoteSel').innerHTML='<option value="">不引用</option>'+d.filter(m=>m.type!==10000&&m.local_id).reverse()
+    .map(m=>`<option value="${m.local_id}">${esc((m.is_self?'我':(m.sender_name||m.sender||t.to))+'：'+String(m.content||'['+m.type+']').replace(/\s+/g,' ').slice(0,40))}</option>`).join('');
+  if(t.kind==='群'){const [r2,d2]=await j('/api/groups/'+encodeURIComponent(t.chat)+'/members'); if(sel!==t)return;
+    if(r2.ok&&Array.isArray(d2)) $('#atSel').innerHTML='<option value="">不 @ 人</option>'+d2.filter(m=>m.wxid)
+      .map(m=>`<option value="${esc(m.wxid)}">${esc(m.group_nick||m.name||m.nick_name||m.wxid)}</option>`).join('');}
+}
 function pick(){
-  drawVR();
+  drawVR(); loadExtra();
   $('#target').innerHTML=sel?`<span class="tag ${sel.kind==='群'?'group':''}">${esc(sel.kind)}</span> <b>${esc(sel.to)}</b><div class="id">${esc(sel.chat)}</div>`:'<span class="muted">先在左边选一个好友或群</span>';
   $('#result').textContent='';upd();$('#content').focus();
 }
@@ -212,7 +229,9 @@ async function doSend(){
       await post('/api/direct/send_image',fd);done.push(img.type.startsWith('video/')?'视频':(img.type.startsWith('audio/')||/\.(mp3|m4a|wav|ogg|flac|amr)$/i.test(img.name||''))?'语音':'图片');setImage(null);
     }
     if(content.trim()){
-      await post('/api/direct/send',{chat:target.chat,name:target.to,content});done.push('文字');$('#content').value='';
+      const extra={}; if($('#atSel').value)extra.at=[$('#atSel').value]; if($('#quoteSel').value)extra.quote=+$('#quoteSel').value;
+      await post('/api/direct/send',Object.assign({chat:target.chat,name:target.to,content},extra));done.push(extra.quote?'引用回复':'文字');$('#content').value='';
+      $('#atSel').value='';$('#quoteSel').value='';
     }
     $('#result').className='ok';$('#result').textContent='✓ '+done.join('和')+'已交给微信发送';
   }catch(e){
@@ -290,7 +309,7 @@ async function loadMode(){
   if(!r.ok){$('#modeMsg').textContent='读取失败';return;}
   document.querySelectorAll('input[name=mode]').forEach(x=>x.checked=x.value===d.mode);
   $('#opt-ui').classList.toggle('on',d.mode==='ui');$('#opt-direct').classList.toggle('on',d.mode==='direct');
-  $('#fallback').checked=!!d.fallback;
+  $('#fallback').checked=!!d.fallback; $('#groupQuote').checked=!!d.group_quote;
   $('#modeMsg').textContent='当前：'+(d.mode==='direct'?'直发':'界面自动化')+(d.updated?' · 修改于 '+fmt(d.updated):'');
 }
 async function saveMode(body){
@@ -301,6 +320,7 @@ async function saveMode(body){
 }
 document.querySelectorAll('input[name=mode]').forEach(x=>x.onchange=()=>saveMode({mode:x.value}));
 $('#fallback').onchange=e=>saveMode({fallback:e.target.checked});
+$('#groupQuote').onchange=e=>saveMode({group_quote:e.target.checked});
 loadMode();loadStatus();loadHistory();loadTTS().then(loadVR);setInterval(loadStatus,15000);setInterval(loadHistory,15000);
 </script>
 <script src="/static/nav.js"></script></html>

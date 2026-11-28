@@ -16,12 +16,14 @@ class FakeExports:
         self.steps = list(steps)
         self.logged_in = logged_in
         self.sent = []
+        self.opts = []
 
     def ready(self):
         return {"attached": True, "logged_in": self.logged_in}
 
-    def send(self, to, content):
+    def send(self, to, content, opts=None):
         self.sent.append((to, content))
+        self.opts.append(opts or {})
         return self.send_result
 
     def send_image(self, to, path, size):
@@ -374,6 +376,95 @@ class DirectRevokeTest(unittest.TestCase):
                 with self.assertRaises(direct_send.DirectSendError) as cm:
                     direct_send.revoke(self.PEER)
         self.assertEqual(cm.exception.code, "revoke_failed")
+
+
+    def test_batch_revoke_reads_low_byte_of_result(self):
+        # 4.1.13 批量撤回的结果首字节是成功标志,其余字节是未初始化的 0xaa
+        from core import direct_send
+        now = int(time.time())
+        for raw, ok in (("aaaaaaaaaaaaaa01", True), ("aaaaaaaaaaaaaa00", False)):
+            with tempfile.TemporaryDirectory() as d:
+                conn = self._db(d, [(10, 6, 1, 0, 1, now, 2, "x", "")])
+                a, b = self._patches(conn)
+
+                class Script:
+                    class exports_sync:
+                        @staticmethod
+                        def revoke(msg):
+                            return {"ok": True}
+
+                        @staticmethod
+                        def poll():
+                            return {"step": 9, "result": 1, "raw": [raw, "0", "0"]}
+
+                with a, b, patch("core.direct_send._ensure_script", return_value=Script), \
+                        patch("core.direct_send._record"):
+                    if ok:
+                        self.assertTrue(direct_send.revoke(self.PEER)["ok"])
+                    else:
+                        with self.assertRaises(direct_send.DirectSendError):
+                            direct_send.revoke(self.PEER)
+
+
+class MentionQuoteTest(unittest.TestCase):
+    MEMBERS = {"wxid_b": "黎深", "wxid_c": "黎", "wxid_d": "大蜜"}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.exports = FakeExports()
+        self.dev = FakeDevice(FakeScript(self.exports))
+        ds._drop()
+        self.patches = [
+            patch.object(ds, "HISTORY", os.path.join(self.tmp.name, "h.jsonl")),
+            patch.object(ds, "_import_frida", return_value=FakeFrida(self.dev)),
+            patch.object(ds, "binary_version", return_value=(GOOD, "4.1.8 aarch64")),
+            patch.object(ds, "WAIT_SECONDS", 0.5),
+            patch.object(ds, "_member_names", return_value=dict(self.MEMBERS)),
+        ]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        ds._drop()
+        self.tmp.cleanup()
+
+    def test_resolve_mentions_longest_name_and_separator(self):
+        text, ids = ds.resolve_mentions("g@chatroom", "@黎深 你好 @黎 嗨 @陌生人 @黎深")
+        self.assertEqual(text, "@黎深\u2005你好 @黎\u2005嗨 @陌生人 @黎深\u2005")
+        self.assertEqual(ids, ["wxid_b", "wxid_c"])
+        self.assertEqual(ds.resolve_mentions("wxid_a", "@黎深 你好"), ("@黎深 你好", []))
+
+    def test_mention_text_prepends_missing_names_only(self):
+        text, ids = ds.mention_text("g@chatroom", ["wxid_d", "wxid_b"], "@黎深 吃饭了")
+        self.assertEqual(text, "@大蜜\u2005@黎深\u2005吃饭了")
+        self.assertEqual(ids, ["wxid_d", "wxid_b"])
+        with self.assertRaises(ds.DirectSendError) as cm:
+            ds.mention_text("g@chatroom", ["wxid a"], "x")
+        self.assertEqual(cm.exception.code, "bad_at")
+
+    def test_send_passes_at_and_quote_to_agent(self):
+        with patch.object(ds, "_find_message", return_value={"localId": 7, "createTime": 123, "sender": "wxid_b", "type": 1}):
+            row = ds.send("g@chatroom", "收到", at=["wxid_b"], quote=7)
+        self.assertEqual(self.exports.sent, [("g@chatroom", "@黎深\u2005收到")])
+        self.assertEqual(self.exports.opts[0], {"at": ["wxid_b"], "quote": {"localId": 7, "createTime": 123, "name": "黎深"}})
+        self.assertEqual((row["kind"], row["quote"], row["at"]), ("quote", 7, ["wxid_b"]))
+
+    def test_auto_mentions_only_when_version_supports_at(self):
+        ds.send("g@chatroom", "@大蜜 好", at="auto")
+        self.assertEqual(self.exports.opts[-1], {})          # 4.1.8 没有 @ 字段:原样发
+        self.exports.steps = [9]
+        with patch.object(ds, "at_supported", return_value=True):
+            ds.send("g@chatroom", "@大蜜 好", at="auto")
+        self.assertEqual(self.exports.sent[-1], ("g@chatroom", "@大蜜\u2005好"))
+        self.assertEqual(self.exports.opts[-1], {"at": ["wxid_d"]})
+
+    def test_at_needs_group(self):
+        with self.assertRaises(ds.DirectSendError) as cm:
+            ds.send("wxid_a", "hi", at=["wxid_b"])
+        self.assertEqual(cm.exception.code, "bad_at")
+        self.assertEqual(self.exports.sent, [])
 
 
 class DirectRevokeRouteTest(unittest.TestCase):

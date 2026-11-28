@@ -217,12 +217,14 @@ def near(left, right):
 def _recent(ledger, token, chat, jid):
     # Existing durable send records cover replies, greetings and follow-ups.
     with ledger.connect() as con:
-        rows = con.execute("SELECT payload FROM sends WHERE account=? AND chat=? AND kind='text' "
+        rows = con.execute("SELECT payload FROM sends WHERE account=? AND chat=? AND kind IN ('text','quote','at') "
             "AND status IN ('initiated','submitted','confirmed','uncertain') AND id<>? "
             "AND created>=? ORDER BY created DESC LIMIT 40",
             (token['account'], chat, jid, time.time()-1800)).fetchall()
     import json
-    return [json.loads(row['payload']) for row in rows if row['payload']]
+    out = [json.loads(row['payload']) for row in rows if row['payload']]
+    # 引用回复/@ 的账本 payload 是 {text: ...}
+    return [p.get('text') or '' if isinstance(p, dict) else p for p in out]
 
 
 def before_dispatch(chat, kind, payload, ledger, jid):
@@ -259,7 +261,9 @@ def before_dispatch(chat, kind, payload, ledger, jid):
     own = [m for m in relevant if reply_context.is_self(m, account)
            and not niu_mode.is_trigger(m) and not niu_mode.is_bot_stamp(m)
            and m.get('type') != 3]
-    if any(m.get('type') != 1 or not any(normalized(m.get('content')) == normalized(t) for t in prior)
+    # 我们自己的引用回复在库里是 appmsg(type 49 + refer),按文字比
+    if any((m.get('type') != 1 and not m.get('refer'))
+           or not any(normalized(m.get('content')) == normalized(t) for t in prior)
            for m in own):
         return Decision('observe', 'own_reply_before_send')
     if kind == 'text' and isinstance(payload, str):

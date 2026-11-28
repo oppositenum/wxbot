@@ -1163,8 +1163,11 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
             if _td:
                 log(f"  [拟人] 打字延迟 {_td:.1f}s")
                 time.sleep(_td)
-            r = sender.send_text(target, part, chat_username=chat_username,
-                                 job_id=send_ledger.stable_id(sessions.capture()['account'], chat_username, 'reply_part', [msg.get('local_id'), index]))
+            jid = send_ledger.stable_id(sessions.capture()['account'], chat_username, 'reply_part', [msg.get('local_id'), index])
+            if index == 1 and _quote_reply(chat_username, msg):
+                r = sender.send_quote(target, chat_username, msg['local_id'], part, job_id=jid)
+            else:
+                r = sender.send_text(target, part, chat_username=chat_username, job_id=jid)
             log(f"  AI回复[{persona['name']}] 第{index}条 -> {target}: {part!r} => {r}")
             if r.get('status') not in ('confirmed', 'submitted'):
                 break
@@ -1177,6 +1180,17 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
             log('[朋友圈感悟] 本次触发未完成，聊天回复不受影响')
 
     return r if kind in ("reply", "forward", "reply_ai") else {"ok": False, "status": "failed", "reason": "unknown_action"}
+
+
+def _quote_reply(chat_username, msg):
+    """群里回复要不要引用对方那句:开关打开、对方不是自己、这条有 local_id、当前发送方式做得了引用。"""
+    if not (chat_username or '').endswith('@chatroom') or not msg or msg.get('is_self') or not msg.get('local_id'):
+        return False
+    try:
+        from core import send_mode
+        return bool(send_mode.get().get('group_quote')) and sender.supports(chat_username, 'quote')
+    except Exception:
+        return False
 
 
 def _send_voice_reply(chat_username, target, raw_text, msg, persona):

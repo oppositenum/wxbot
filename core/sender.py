@@ -328,6 +328,21 @@ def send_at(display_name, chat_username, member_wxid, member_display, text, retr
                  {'member': member_wxid, 'display': member_display, 'text': text}, **context)
 
 
+def send_quote(display_name, chat_username, local_id, text, at=None, **context):
+    """引用回复:引用会话里 local_id 那条消息。只有直发(微信 4.1.13+)能做;做不到时明确返回不支持,
+    不会悄悄改成普通文字——要不要退回普通文字由调用方决定(先看 supports(chat, 'quote'))。"""
+    payload = {'text': text, 'local_id': int(local_id)}
+    if at:
+        payload['at'] = list(at)
+    return _send(display_name, chat_username, 'quote', payload, **context)
+
+
+def supports(chat, kind):
+    """当前发送方式能不能做 @ 提醒('at')/ 引用回复('quote')。"""
+    adapter = current_adapter()
+    return isinstance(adapter, DirectSendAdapter) and adapter.supports(chat, kind)
+
+
 def send_webhook(url, payload, *, job_id, session):
     """Push HTTP transport: confirmed means HTTP 2xx, NOT WeChat delivery.
     Same durable intent rule; timeout/non-2xx after request initiation is held.

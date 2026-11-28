@@ -28,7 +28,20 @@ class DirectSendAdapter:
         self.fallback = fallback  # 界面自动化适配器(LegacySearchAdapter)
 
     def capability(self, chat, kind='text'):
-        return '' if kind in ('text', 'image', 'voice') else 'direct_payload_not_supported'
+        if kind in ('text', 'image', 'voice'):
+            return ''
+        if kind in ('at', 'quote') and self.supports(chat, kind):
+            return ''
+        return 'direct_payload_not_supported'
+
+    def supports(self, chat, kind):
+        """这个微信版本的直发能不能做 @ 提醒 / 引用回复(不能就由 sender 降级成普通文字)。"""
+        from core import direct_send
+        if kind == 'at':
+            return bool(chat and chat.endswith('@chatroom')) and direct_send.at_supported()
+        if kind == 'quote':
+            return direct_send.quote_supported()
+        return True
 
     def receipt(self, jid):
         return None
@@ -46,6 +59,7 @@ class DirectSendAdapter:
         # 不看「回退」开关(那个开关管的是直发失败时要不要改走界面)。
         if kind == 'voice' and self.fallback and not direct_send.voice_supported():
             return self.fallback.submit(*args, **kw)
+
         token = session or sessions.capture()
         jid = job_id or send_ledger.next_id()
         kw['job_id'] = jid
@@ -79,7 +93,8 @@ class DirectSendAdapter:
                 return ledger.view(ledger.update(jid, 'not_sent', reason or 'missing_target'))
             if send_ledger.blocked_by_uncertainty(kind, chat):
                 return ledger.view(ledger.update(jid, 'not_sent', 'prior_send_uncertain'))
-            if not isinstance(payload, str) or not payload.strip():
+            text = payload.get('text') if isinstance(payload, dict) else payload
+            if not isinstance(text, str) or not text.strip():
                 return ledger.view(ledger.update(jid, 'not_sent', 'missing_content'))
             staged = None
             if kind == 'voice' and not os.path.isfile(payload):
@@ -113,8 +128,16 @@ class DirectSendAdapter:
                                                source='bot')
                     elif kind == 'voice':
                         direct_send.send_voice_msg(chat, payload, display or '', source='bot')
+                    elif kind == 'at':
+                        direct_send.send(chat, payload['text'], display or '', source='bot',
+                                         at=[payload['member']])
+                    elif kind == 'quote':
+                        direct_send.send(chat, payload['text'], display or '', source='bot',
+                                         quote=payload['local_id'], at=payload.get('at') or 'auto')
                     else:
-                        direct_send.send(chat, payload, display or '', source='bot')
+                        # 群里回复写了「@成员名」就变成真 @(对方收到提醒)
+                        direct_send.send(chat, payload, display or '', source='bot',
+                                         at='auto' if direct_send.at_supported() else None)
                 except direct_send.DirectSendError as e:
                     reply_policy.timing('直发提交', started)
                     if e.code in direct_send.NOT_SENT_CODES:

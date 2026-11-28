@@ -1526,11 +1526,23 @@ def api_direct_history():
 
 @app.post("/api/direct/send")
 def api_direct_send():
-    """实验直发:只给后台「直发测试」页手动用,不走 bot 发送链路。"""
+    """实验直发:只给后台「直发测试」页手动用,不走 bot 发送链路。
+    JSON:chat, content, name;at=[wxid](群里 @ 人,不填时正文里的「@成员名」自动变成真 @);quote=被引用消息 local_id。"""
     from core import direct_send
     data = request.get_json(silent=True) or {}
+    at, quote = data.get("at"), data.get("quote")
     try:
-        row = direct_send.send(data.get("chat"), data.get("content"), data.get("name") or "")
+        if quote not in (None, ""):
+            try:
+                quote = int(quote)
+            except (TypeError, ValueError):
+                raise direct_send.DirectSendError("bad_param", "quote 必须是 local_id 整数")
+        else:
+            quote = None
+        if isinstance(at, str) and at != "auto":
+            at = [at]
+        row = direct_send.send(data.get("chat"), data.get("content"), data.get("name") or "",
+                               at=at or "auto", quote=quote)
     except direct_send.DirectSendError as e:
         return jsonify(ok=False, code=e.code, error=e.message), 409
     return jsonify(row)
@@ -1547,9 +1559,10 @@ def api_send_mode_set():
     """机器人回复的发送方式:ui=界面自动化,direct=直发。立即生效。"""
     from core import send_mode
     data = request.get_json(silent=True) or {}
-    fallback = data.get("fallback")
+    fallback, gq = data.get("fallback"), data.get("group_quote")
     try:
-        cur = send_mode.set(data.get("mode"), fallback if isinstance(fallback, bool) else None)
+        cur = send_mode.set(data.get("mode"), fallback if isinstance(fallback, bool) else None,
+                            gq if isinstance(gq, bool) else None)
     except ValueError as e:
         return jsonify(error=str(e)), 400
     return jsonify(cur)
@@ -1932,9 +1945,30 @@ def api_send():
         return jsonify({"ok": False, "error": f"图片不存在：{path}"}), 400
     if kind not in ("text", "image"):
         return jsonify({"ok": False, "error": "type 必须是 text/image"}), 400
+    # 群里 @ 人:at=[wxid...](名字自动补到正文开头);quote=被引用消息的 local_id(引用回复)。
+    # 直发(微信 4.1.13+)才有真 @ 提醒和引用;界面发送时降级成普通文字。
+    at, quote = body.get("at"), body.get("quote")
+    if kind == "text" and (at or quote not in (None, "")):
+        from core import direct_send
+        try:
+            if at:
+                if not (chat or "").endswith("@chatroom"):
+                    raise direct_send.DirectSendError("bad_at", "只有群聊能 @ 人(要带 chat 群号)")
+                content, _ = direct_send.mention_text(chat, [at] if isinstance(at, str) else list(at), content)
+            if quote not in (None, ""):
+                if not chat:
+                    raise direct_send.DirectSendError("bad_param", "引用回复要带 chat")
+                if not sender.supports(chat, "quote"):
+                    raise direct_send.DirectSendError("quote_unsupported", "当前发送方式做不了引用回复(要直发 + 微信 4.1.13)")
+                kind, content = "quote", {"text": content, "local_id": int(quote)}
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "quote 必须是 local_id 整数"}), 400
+        except direct_send.DirectSendError as e:
+            return jsonify({"ok": False, "code": e.code, "error": e.message}), 400
     if body.get("sync"):
         try:
             res = (sender.send_text(to, content, chat_username=chat) if kind == "text"
+                   else sender.send_quote(to, chat, content["local_id"], content["text"]) if kind == "quote"
                    else sender.send_image(to, path, chat_username=chat))
             return jsonify(res), (200 if res.get("ok") else 500)
         except Exception as e:  # noqa: BLE001

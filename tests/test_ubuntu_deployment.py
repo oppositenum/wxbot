@@ -46,7 +46,9 @@ class UbuntuDeployment(unittest.TestCase):
         compose = (ROOT / "docker" / "ubuntu-manual" / "compose.yaml").read_text()
         dockerfile = (ROOT / "docker" / "ubuntu-manual" / "Dockerfile").read_text()
         self.assertIn("env_file:\n      - ../../.env", compose)
-        self.assertIn("${WXBOT_IMAGE:-wxbot-ubuntu-manual:24.04}", compose)
+        # 主号用独立变量:.env 的 WXBOT_IMAGE 给根目录 deploy.sh 用,不能把主号带去别的镜像
+        self.assertIn("${WXBOT_IMAGE_MAIN:-wxbot-ubuntu-manual:wechat-4.1.13}", compose)
+        self.assertNotIn("${WXBOT_IMAGE:", compose)
         self.assertIn("dockerfile: docker/ubuntu-manual/Dockerfile", compose)
         self.assertIn("FROM ${WXBOT_BASE_IMAGE}", dockerfile)
         self.assertIn("COPY --chown=wechat:wechat core/ /app/core/", dockerfile)

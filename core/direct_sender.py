@@ -124,8 +124,16 @@ class DirectSendAdapter:
                 started = time.monotonic()
                 try:
                     if kind == 'image':
+                        sent_at = time.time()
                         direct_send.send_image(chat, staged, display or '', os.path.basename(payload),
                                                source='bot')
+                        # 「已交给微信」不等于发出去了:等微信上传完,失败(红色感叹号)就如实报失败
+                        upload = direct_send.wait_upload(chat, 3, sent_at)
+                        if upload == direct_send.UPLOAD_FAILED:
+                            _log('[发送] 图片在微信里上传失败(红色感叹号)。微信一次上传失败后,之后的图片/视频/文件'
+                                 '都会失败,需要重启微信。')
+                            reply_policy.timing('直发提交', started)
+                            return ledger.view(ledger.update(jid, 'failed', 'wechat_upload_failed'))
                     elif kind == 'voice':
                         direct_send.send_voice_msg(chat, payload, display or '', source='bot')
                     elif kind == 'at':

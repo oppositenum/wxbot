@@ -250,21 +250,19 @@ def capture_img_key(secs=40, trigger=None, log=print):
             sess.detach()
 
 
-def trigger_reads(log=print):
-    """让微信读写各个库:往自己的文件传输助手直发一条文字、一段 1 秒视频、一条 2 秒语音(可删除)。"""
+def trigger_reads(log=print, need=None):
+    """让微信读写各个库:往自己的文件传输助手直发一条文字、一条 2 秒语音;只有缺 message_resource.db 时
+    才再发一段 1 秒视频(可删除)。视频发送失败会让微信之后的图片/文件上传全部失败(要重启微信),所以尽量少发、发了要查。"""
     import subprocess
     from core import direct_send
     tmp = "/tmp/wxbot_keytrigger"
     os.makedirs(tmp, exist_ok=True)
     mp4, wav = os.path.join(tmp, "init.mp4"), os.path.join(tmp, "init.wav")
     ff = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error"]
-    subprocess.run(ff + ["-f", "lavfi", "-i", "testsrc=size=320x240:rate=15", "-t", "1.2", "-pix_fmt", "yuv420p", mp4],
-                   timeout=60)
     subprocess.run(ff + ["-f", "lavfi", "-i", "sine=frequency=440:duration=2", wav], timeout=60)
     time.sleep(1)
     steps = [("文字", lambda: direct_send.send("filehelper", "[wxbot] 初始化读取密钥,可删除", "文件传输助手",
-                                              source="keys")),
-             ("视频", lambda: direct_send.send_video("filehelper", mp4, "文件传输助手", source="keys"))]
+                                              source="keys"))]
     if direct_send.voice_supported():
         steps.append(("语音", lambda: direct_send.send_voice_msg("filehelper", wav, "文件传输助手", source="keys")))
     for name, fn in steps:
@@ -274,6 +272,19 @@ def trigger_reads(log=print):
         except Exception as e:  # noqa: BLE001 直发不可用时只是少触发几个库
             log(f"发{name}失败:{e}")
         time.sleep(2)
+    if need is not None and config.CORE_DBS["msgres"] not in need:
+        return
+    subprocess.run(ff + ["-f", "lavfi", "-i", "testsrc=size=320x240:rate=15", "-f", "lavfi",
+                         "-i", "sine=frequency=440:duration=1.2", "-t", "1.2", "-pix_fmt", "yuv420p",
+                         "-c:a", "aac", "-shortest", mp4], timeout=60)
+    try:
+        t0 = time.time()
+        direct_send.send_video("filehelper", mp4, "文件传输助手", source="keys")
+        log("已往文件传输助手发视频(触发微信读 message_resource.db)")
+        if direct_send.wait_upload("filehelper", 43, t0, timeout=30) == direct_send.UPLOAD_FAILED:
+            log("⚠ 测试视频在微信里上传失败:之后的图片/视频/文件都会发不出去,请重启微信后再用")
+    except Exception as e:  # noqa: BLE001
+        log(f"发视频失败:{e}")
 
 
 def refresh(db_storage, linux_keys_out=None, secs=60, trigger=True, log=print):
@@ -288,7 +299,8 @@ def refresh(db_storage, linux_keys_out=None, secs=60, trigger=True, log=print):
     need = missing(keys, db_storage)
     if need and hook_supported():
         log(f"还缺 {len(need)} 个库的密钥,改用 AES hook 抓:{', '.join(need)}")
-        got = capture(need, db_storage, secs=secs, trigger=(lambda: trigger_reads(log)) if trigger else None, log=log)
+        got = capture(need, db_storage, secs=secs, trigger=(lambda: trigger_reads(log, need)) if trigger else None,
+                      log=log)
         merge(got)
         need = missing(load(), db_storage)
     elif need:

@@ -82,11 +82,26 @@ class SendModeTest(Isolated):
             f.write(b'\x89PNG\r\n\x1a\n' + b'x' * 10)
         with patch('core.direct_send.status', return_value=READY), \
              patch('core.direct_send.stage_image', return_value='/w/direct_media/x.png') as st, \
-             patch('core.direct_send.send_image', return_value={'ok': True}) as si:
+             patch('core.direct_send.send_image', return_value={'ok': True}) as si, \
+             patch('core.direct_send.wait_upload', return_value='ok'):
             r = sender.send_image('demo', src, chat_username='wxid_a', job_id='img-1', session=self.token)
         self.assertTrue(r['ok'])
         st.assert_called_once()
         si.assert_called_once_with('wxid_a', '/w/direct_media/x.png', 'demo', 'a.png', source='bot')
+
+    def test_image_upload_failure_in_wechat_is_reported(self):
+        # 「已交给微信」后微信上传失败(红色感叹号):不能当成发出去了,也不再重试
+        send_mode.set('direct')
+        src = self.tmp.name + '/a.png'
+        with open(src, 'wb') as f:
+            f.write(b'\x89PNG\r\n\x1a\n' + b'x' * 10)
+        with patch('core.direct_send.status', return_value=READY), \
+             patch('core.direct_send.stage_image', return_value='/w/direct_media/x.png'), \
+             patch('core.direct_send.send_image', return_value={'ok': True}), \
+             patch('core.direct_send.wait_upload', return_value='failed'):
+            r = sender.send_image('demo', src, chat_username='wxid_a', job_id='img-2', session=self.token)
+        self.assertFalse(r['ok'])
+        self.assertEqual((r['status'], r['reason'], r['retryable']), ('failed', 'wechat_upload_failed', False))
 
     def test_at_mention_is_not_supported_by_direct(self):
         send_mode.set('direct')

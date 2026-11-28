@@ -809,3 +809,39 @@ def quote_supported():
     """当前微信版本能不能直发引用回复(不附加,只看配置)。"""
     p = _profile()
     return bool(p and p.get("quote") and (p.get("revoke") or {}).get("style") == "batch")
+
+
+UPLOAD_OK, UPLOAD_FAILED, UPLOAD_PENDING = "ok", "failed", "pending"
+
+
+def wait_upload(chat, local_type, since, timeout=25.0, poll=1.5):
+    """直发图片/视频/文件后,等微信把它真正传上去:看库里我在这个会话 since 之后发的最新一条该类型消息的状态。
+    返回 ok(状态 2)/ failed(状态 5,对方看到的是红色感叹号)/ pending(超时还在传,或没找到)。
+    微信有个坑:一次媒体上传失败后,之后所有图片/视频/文件都会失败,直到重启微信(docs 3.13)。"""
+    from core import db, decrypt, messages
+    me = config.wxid()
+    deadline = time.time() + timeout
+    while True:
+        try:
+            decrypt.run(force=False, only=["message"])
+            con = db.connect("message")
+            try:
+                table = messages.msg_table(chat)
+                if db.table_exists(con, table):
+                    ids = [k for k, v in messages._name2id_map(con).items() if v == me]
+                    if ids:
+                        r = con.execute(
+                            f"SELECT status FROM {table} WHERE real_sender_id IN ({','.join('?' * len(ids))}) "
+                            "AND (local_type & 0xffffffff) = ? AND create_time >= ? ORDER BY sort_seq DESC LIMIT 1",
+                            (*ids, int(local_type), int(since) - 2)).fetchone()
+                        if r and r[0] == 2:
+                            return UPLOAD_OK
+                        if r and r[0] == 5:
+                            return UPLOAD_FAILED
+            finally:
+                con.close()
+        except Exception:  # noqa: BLE001 库读不到就当还在传
+            pass
+        if time.time() >= deadline:
+            return UPLOAD_PENDING
+        time.sleep(poll)

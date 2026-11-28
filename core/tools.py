@@ -225,7 +225,7 @@ def draw_image(prompt, ctx=None):
             return "[draw_image] 授权账号已变化，取消发送"
         disp = ctx.get("display_name") or chat
         r = sender.send_image(disp, path, chat_username=chat)
-        if not r.get("ok"):
+        if not r.get("ok") and r.get("reason") != "wechat_upload_failed":
             r = sender.send_image(disp, path, chat_username=chat)
     except Exception as e:  # noqa: BLE001
         return f"[图片已生成但发送出错] {e}"
@@ -233,6 +233,8 @@ def draw_image(prompt, ctx=None):
         return f"[已生成并把图片发给对方成功] 画的是:{prompt}"
     if r.get('status') == 'uncertain':
         return "[图片发送结果待核对，不得再次调用画图或发送来重试，也不能声称图片已送达]"
+    if r.get("reason") == "wechat_upload_failed":
+        return "[图片已生成但微信上传失败,对方没收到图,不能说画好了或已发出]"
     return f"[图片已生成但未发送] {r.get('error')}"
 
 

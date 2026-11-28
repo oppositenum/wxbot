@@ -82,6 +82,21 @@ button.primary{background:#23815a;color:#fff;border-color:#23815a}button:disable
           <span style="flex:1"></span><input class="small" id="vNewKey" placeholder="新音色 key，如 my_voice" style="width:190px"><button type="button" id="vNew">新增</button></div>
       </details>
     </div>
+    <div class="card tts" style="margin-top:18px" id="vrCard">
+      <h2>机器人语音回复</h2>
+      <div class="sub muted" style="font-size:13px">机器人回复时什么时候改用语音条。对方说「发语音/说给我听」会用语音，说「别发语音/打字」会用文字；「以后都用语音回我/以后别发语音了」会记成这个会话的偏好。战斗、接龙、发图不发语音。</div>
+      <div class="line"><label><input type="checkbox" id="vrOn"> 开启</label>
+        <label>模式 <select id="vrMode"><option value="request">只在对方要求时</option><option value="auto">自动判断（对方要求或适合开口说时）</option><option value="always">总是语音</option><option value="off">不发语音</option></select></label></div>
+      <div class="line"><label>自动判断时说语音的概率 <input type="range" id="vrChance" min="0" max="100" step="5"><span id="vrChanceT"></span></label>
+        <label>最长字数 <input class="small" id="vrMax" type="number" min="5" max="300" style="width:70px"></label>
+        <label>音色 <select id="vrVoice"></select></label></div>
+      <div class="line"><button type="button" id="vrSave">保存全局设置</button><span id="vrMsg"></span></div>
+      <div class="line" id="vrChatLine" style="display:none;border-top:1px solid #eef2ef;padding-top:8px">
+        <span>当前会话 <b id="vrChatName"></b>：</span>
+        <label>模式 <select id="vrChatMode"><option value="">跟随全局</option><option value="request">只在要求时</option><option value="auto">自动判断</option><option value="always">总是语音</option><option value="off">不发语音</option></select></label>
+        <label>音色 <select id="vrChatVoice"></select></label>
+        <button type="button" id="vrChatSave">保存会话设置</button></div>
+    </div>
     <div class="card" style="margin-top:18px">
       <h2>发送记录</h2>
       <div id="history"><p class="empty">还没有记录</p></div>
@@ -147,7 +162,23 @@ function draw(){
   $('#list').innerHTML=shown.length?shown.map((r,i)=>`<div class="row ${sel&&sel.chat===r.chat?'sel':''}" data-i="${i}"><span class="tag ${r.kind==='群'?'group':''}">${esc(r.kind)}</span><div class="who"><div class="name">${esc(r.to)}</div><div class="id">${esc(r.chat)}</div></div></div>`).join(''):'<p class="empty">没有匹配的人或群</p>';
   document.querySelectorAll('#list .row').forEach(el=>el.onclick=()=>{sel=shown[+el.dataset.i];pick();draw();});
 }
+let vr=null;
+function vrMsg(t,c){$('#vrMsg').className=c||'';$('#vrMsg').textContent=t||'';}
+function vrVoiceOpts(empty){return (empty?`<option value="">${empty}</option>`:'')+tts.voices.map(v=>`<option value="${esc(v.key)}">${esc(v.label)}</option>`).join('');}
+function drawVR(){
+  if(!vr)return;
+  $('#vrOn').checked=!!vr.enabled;$('#vrMode').value=vr.mode;$('#vrChance').value=Math.round((vr.chance||0)*100);$('#vrChanceT').textContent=$('#vrChance').value+'%';
+  $('#vrMax').value=vr.max_chars;$('#vrVoice').innerHTML=vrVoiceOpts('跟随 TTS 默认音色');$('#vrVoice').value=vr.voice||'';
+  if(!vr.available)vrMsg('当前微信版本没有「发语音」（需要 4.1.9+），设置会保存但不生效','bad');
+  const c=sel&&vr.chats?(vr.chats[sel.chat]||{}):null;
+  $('#vrChatLine').style.display=sel?'flex':'none';
+  if(sel){$('#vrChatName').textContent=sel.to||sel.chat;$('#vrChatMode').value=(c&&c.mode)||'';$('#vrChatVoice').innerHTML=vrVoiceOpts('跟随全局');$('#vrChatVoice').value=(c&&c.voice)||'';}
+}
+async function loadVR(){const [r,d]=await j('/api/voice_reply');if(r.ok){vr=d;drawVR();}}
+async function vrPost(body){const [r,d]=await j('/api/voice_reply',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+  if(!r.ok||!d.ok){vrMsg('✗ '+(d.error||'保存失败'),'bad');return;}vr=d;drawVR();vrMsg('✓ 已保存','ok');}
 function pick(){
+  drawVR();
   $('#target').innerHTML=sel?`<span class="tag ${sel.kind==='群'?'group':''}">${esc(sel.kind)}</span> <b>${esc(sel.to)}</b><div class="id">${esc(sel.chat)}</div>`:'<span class="muted">先在左边选一个好友或群</span>';
   $('#result').textContent='';upd();$('#content').focus();
 }
@@ -200,6 +231,10 @@ $('#ttsSend').onclick=async()=>{
   sending=false;upd();loadHistory();
 };
 $('#sendAs').onchange=()=>ttsCfg({send_as:$('#sendAs').value});
+$('#vrChance').oninput=()=>{$('#vrChanceT').textContent=$('#vrChance').value+'%';};
+$('#vrSave').onclick=()=>vrPost({global:{enabled:$('#vrOn').checked,mode:$('#vrMode').value,chance:(+$('#vrChance').value)/100,max_chars:+$('#vrMax').value,voice:$('#vrVoice').value}});
+$('#vrChatSave').onclick=()=>{if(!sel)return;const m=$('#vrChatMode').value,v=$('#vrChatVoice').value;
+  if(!m&&!v)vrPost({chat:sel.chat,clear:true});else{const set={};if(m)set.mode=m;set.voice=v;if(m)set.enabled=true;vrPost({chat:sel.chat,set});}};
 $('#vSave').onclick=()=>ttsCfg({voice:Object.assign({key:$('#voice').value},editFields())});
 $('#vDefault').onclick=()=>ttsCfg({default:$('#voice').value});
 $('#vDel').onclick=()=>{const v=curVoice();if(confirm(v.builtin?'恢复「'+v.label+'」的预设参数？':'删除音色「'+v.label+'」？'))ttsCfg({delete:v.key},v.builtin?v.key:'');};
@@ -249,6 +284,6 @@ async function saveMode(body){
 }
 document.querySelectorAll('input[name=mode]').forEach(x=>x.onchange=()=>saveMode({mode:x.value}));
 $('#fallback').onchange=e=>saveMode({fallback:e.target.checked});
-loadMode();loadStatus();loadHistory();loadTTS();setInterval(loadStatus,15000);setInterval(loadHistory,15000);
+loadMode();loadStatus();loadHistory();loadTTS().then(loadVR);setInterval(loadStatus,15000);setInterval(loadHistory,15000);
 </script>
 <script src="/static/nav.js"></script></html>

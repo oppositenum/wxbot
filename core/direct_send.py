@@ -21,7 +21,8 @@ WECHAT_BIN = os.environ.get("WXBOT_WECHAT_BIN", "/opt/wechat/wechat")
 SUPPORTED_SHA256 = {
     "e40116597803a5e0d9fc4a2b727df4b8f7a3dd6de1c336140ea373be2b6626e9": "4.1.8 aarch64",
 }
-FRIDA_PATHS = [p for p in (os.environ.get("WXBOT_FRIDA_PATH"), "/tmp/fr",
+# /home/wechat 在数据卷里,装在这里重建容器也不丢;/tmp/fr 是早期手动装的位置
+FRIDA_PATHS = [p for p in (os.environ.get("WXBOT_FRIDA_PATH"), "/home/wechat/.wxbot/frida", "/tmp/fr",
                            os.path.join(config.WORK_DIR, "frida")) if p]
 AGENT_JS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "direct_send_agent.js")
 HISTORY = os.path.join(config.WORK_DIR, "direct_send_history.jsonl")

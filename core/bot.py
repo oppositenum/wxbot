@@ -34,6 +34,7 @@ _GLOBAL_RULES = os.path.join(config.PROJECT_DIR, "bot_rules.json")
 
 from core import account_session as sessions, send_ledger, personalization, conversation_state, reply_policy
 from core import niu_mode
+from core import voice_reply
 from core import admin_commands, battle_mode, continuous_mode, humanize, context_reset
 
 def rules_file():
@@ -553,6 +554,7 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
         system += (f"\n\n【连发】对方这句要你连着发。必须输出 {burst} 条独立微信，"
                    "条与条用单独一行 [[NEXT]] 分隔；每条换角度、换词，直接做，不要问她怎么弄，"
                    "不要在正文里写第几条。")
+    system += voice_reply.prompt(chat_username)
     if wants_image:
         # 触发出图就真画真发，不把生图丢给模型自由发挥（会编外链或说发不出）。
         return _draw_then_chat(system, ask, turns, chat_username, persona,
@@ -1103,6 +1105,19 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
             if game and (not game["mine"] or game["attempt"]) and key(now_game) != key(game):
                 log(f"  [接龙] 局面已变（链上最新「{now_game['last'] if now_game else '已散局'}」），丢弃过期答案 {text!r}")
                 return {"ok": True, "status": "skipped", "reason": "continuous_stale", "retryable": False}
+        # 语音条:对方要求/会话偏好/模型标了 [[VOICE]] 时说成语音(战斗、接龙、发图不说)
+        voice_ok = False
+        inbound_txt = "\n".join((m.get("content") or "") for m in (batch_msgs or [msg]) if not m.get("is_self"))
+        niu_now = (rule.get("name") == "niu") or any(niu_mode.is_trigger(m) for m in (batch_msgs or [msg]))
+        if not continuous and not niu_now and not battle_mode.is_on(chat_username):
+            pref = voice_reply.remember_preference(chat_username, inbound_txt)
+            if pref:
+                log(f"  [语音] 记下这个会话的偏好：{'以后用语音' if pref == 'always' else '以后不发语音'}")
+            voice_ok, why = voice_reply.decide(chat_username, inbound_txt, text)
+            if voice_reply.active(chat_username):
+                log(f"  [语音] {'说语音' if voice_ok else '发文字'}（{why}）")
+        raw_text = text
+        text = voice_reply.strip_mark(text)
         if not (text or "").strip():
             niu_empty = (rule.get("name") == "niu") or any(
                 niu_mode.is_trigger(m) for m in (batch_msgs or [msg]))
@@ -1112,6 +1127,11 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
             log(f"  AI回复[{persona['name']}] 生成为空，跳过发送(不发空/不空转重试)")
             return {"ok": False, "status": "not_sent", "reason": "generation_failed", "retryable": False}
         target = send_name_for(chat_username)
+        if voice_ok:
+            vr = _send_voice_reply(chat_username, target, raw_text, msg, persona)
+            if vr and vr.get('status') in ('confirmed', 'submitted'):
+                return vr
+            log(f"  [语音] 语音条没发出（{(vr or {}).get('reason')}），改发文字")
         inbound = "\n".join((m.get("content") or "") for m in (batch_msgs or [msg]) if not m.get("is_self"))
         burst, _ = burst_count(inbound or (msg.get("content") or ""), default=1)
         niu = (rule.get("name") == "niu") or any(niu_mode.is_trigger(m) for m in (batch_msgs or [msg]))
@@ -1157,6 +1177,21 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
             log('[朋友圈感悟] 本次触发未完成，聊天回复不受影响')
 
     return r if kind in ("reply", "forward", "reply_ai") else {"ok": False, "status": "failed", "reason": "unknown_action"}
+
+
+def _send_voice_reply(chat_username, target, raw_text, msg, persona):
+    """把这条回复读成语音条发出。失败返回发送结果或 None,调用方改发文字。"""
+    from core import voice_bar
+    words = voice_reply.spoken(raw_text)
+    try:
+        jid = send_ledger.stable_id(sessions.capture()['account'], chat_username, 'reply_voice',
+                                    [msg.get('local_id')])
+        r = voice_bar.send_tts(chat_username, words, voice_reply.voice_for(chat_username), target, job_id=jid)
+    except voice_bar.VoiceBarError as e:
+        log(f"  [语音] 准备语音失败：{e.message}")
+        return None
+    log(f"  AI回复[{persona['name']}] 语音条 {r.get('seconds')}s -> {target}: {words!r} => {r}")
+    return r
 
 
 def _push_summary(msg):

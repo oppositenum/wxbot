@@ -1663,6 +1663,33 @@ def api_direct_send_tts():
     return jsonify(row)
 
 
+@app.get("/api/voice_reply")
+def api_voice_reply_get():
+    """机器人语音回复设置。available=微信版本支持「发语音」(4.1.9+)。"""
+    from core import voice_reply
+    return jsonify(dict(voice_reply.get_config(), available=voice_reply.available(), modes=list(voice_reply.MODES)))
+
+
+@app.post("/api/voice_reply")
+def api_voice_reply_set():
+    """JSON:{global:{enabled,mode,chance,voice,max_chars}} 改全局;{chat, set:{...}} 改单个会话;
+    {chat, clear:true} 去掉会话覆盖。"""
+    from core import voice_reply, tts
+    data = request.get_json(silent=True) or {}
+    try:
+        if isinstance(data.get("global"), dict):
+            out = voice_reply.set_global(**data["global"])
+        elif data.get("chat") and data.get("clear"):
+            out = voice_reply.clear_chat(str(data["chat"]))
+        elif data.get("chat") and isinstance(data.get("set"), dict):
+            out = voice_reply.set_chat(str(data["chat"]), **data["set"])
+        else:
+            return jsonify(ok=False, error="参数不对"), 400
+    except (ValueError, TypeError, tts.TTSError) as e:
+        return jsonify(ok=False, error=getattr(e, "message", None) or str(e)), 400
+    return jsonify(dict(out, ok=True, available=voice_reply.available()))
+
+
 @app.post("/api/direct/revoke")
 def api_direct_revoke():
     """撤回我发的消息(底层直调,2 分钟内)。JSON:chat=wxid/群号,local_id 可选(不填=该会话我最近发的一条)。"""

@@ -22,7 +22,9 @@ EXTRA_DBS = ("sns/sns.db",)     # 朋友圈
 # 图片 .dat 用软件 AES(OpenSSL aes_core 的查表实现)解密,不走上面的硬件路径。
 # 4.1.13 有两套:set_decrypt_key 0x8cb8584(图片用这个)/ 0x84b8334,set_encrypt_key 0x8cb7fa4。
 # 定位:二进制里搜 Te0/Td0 表常量(c66363a5…/51f4a750…)→ xref → 开头 cmp w1,#0x80 的就是 set_encrypt_key。
-IMG_KEY_FNS = {"3539690ff31b8b85af3bb84b8f1087edda9ce324db9fdab10f40d7622fba42d9": [0x8cb8584, 0x84b8334, 0x8cb7fa4]}
+# 只能 hook 0x8cb8584:同时 hook 0x8cb7fa4 / 0x84b8334 后(哪怕已卸载),微信之后的图片上传全部失败
+# (状态 5,要重启微信),2026-11-28 在两个号上对照实验确认。
+IMG_KEY_FNS = {"3539690ff31b8b85af3bb84b8f1087edda9ce324db9fdab10f40d7622fba42d9": [0x8cb8584]}
 
 IMG_JS = """
 const base = Process.findModuleByName('wechat').base;

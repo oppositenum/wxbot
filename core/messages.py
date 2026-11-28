@@ -265,6 +265,7 @@ def _parse_refer(content):
             "type": rtype,
             "chatusr": chatusr or fromusr,   # 私聊里 chatusr 常为空，作者在 fromusr
             "fromusr": fromusr,
+            "svrid": (refer.findtext("svrid") or "").strip(),   # 被引用消息的 server_id(找原图用)
         }
     return title, refer_d
 

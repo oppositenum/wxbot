@@ -293,6 +293,38 @@ def _strip_at(text):
 _media_desc = {}          # (account, chat, message identity) -> successful Result only
 
 
+IMG_ASK_RE = re.compile(
+    r"这(是|个是|张是|张图是|图是)?(什么|啥|谁|哪)|是(什么|啥)(东西|呀|啊)?[?？]?$|"
+    r"看(看|一下|下|得到|得见|得清|清楚|到了吗|见了吗)|帮我看|你看这|"
+    r"(图|照片|截图|图片|相片)(里|上|中)?(是|有|写|说|的)|识别|认(得|识)出?|"
+    r"写(的|了)(是)?(什么|啥)|(什么|啥)意思|好看(吗|不)")
+ASK_IMAGE_WINDOW = 180
+
+
+def _images_asked_about(texts, images, context):
+    """对方的文字在问哪几张图:同批的图、引用的图,或没带图时这个人 3 分钟内发的最近一张。返回 media key 集合。"""
+    key = lambda cm: (cm.get("server_id"), cm.get("local_id"), cm.get("type"))
+    keys = set()
+    for t in texts:
+        ref = t.get("refer") or {}
+        if str(ref.get("type")) == "3" and ref.get("svrid"):
+            for cm in list(context) + list(images):
+                if cm.get("type") == 3 and str((cm.get("server_id") or 0) & 0xFFFFFFFFFFFFFFFF) == ref["svrid"]:
+                    keys.add(key(cm))
+    asked = [t for t in texts if IMG_ASK_RE.search(t.get("content") or "")]
+    if not asked:
+        return keys
+    if images:
+        return keys | {key(cm) for cm in images}
+    last = asked[-1]
+    recent = [cm for cm in context if cm.get("type") == 3 and not cm.get("is_self")
+              and cm.get("sender") == last.get("sender")
+              and 0 <= (last.get("create_time") or 0) - (cm.get("create_time") or 0) <= ASK_IMAGE_WINDOW]
+    if recent:
+        keys.add(key(recent[-1]))
+    return keys
+
+
 def _media_result(chat, m):
     native = media_read.native_voice(m)
     if native:
@@ -378,8 +410,17 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
     # Memoize failures within this reply too: direct/said/context must agree, no triple requests.
     media_results = {}
 
+    look = set()      # 这次要真的去看的图片(对方在问它);其余图片只写「[图片]」,不花视觉识别的钱
+
+    def media_key(cm):
+        return (cm.get("server_id"), cm.get("local_id"), cm.get("type"))
+
     def enrich(cm):
         if cm.get("type") in (3, 43):
+            if cm.get("type") == 3 and media_key(cm) in look:
+                if media_key(cm) not in media_results:
+                    media_results[media_key(cm)] = _media_result(chat_username, cm)
+                return media_results[media_key(cm)].context()
             return "[图片]" if cm.get("type") == 3 else "[视频]"
         if cm.get("type") not in media_read.LABELS:
             return cm.get("content") or ""
@@ -399,13 +440,17 @@ def _ai_reply(persona, chat_username, msg, context_msgs, rules=None, batch_msgs=
     if not batch:
         return ""
     msg = batch[-1]
-    # 纯图片/视频不描述、不回复。5 秒批次里同时有文字时，丢掉画面，只回文字。
+    # 纯图片/视频不描述、不回复。同批有文字时:文字在问这张图(这是什么/看看/引用了图)就真的去看,
+    # 否则丢掉画面只回文字。没带图但在问「刚发的图」时,看这个人 3 分钟内发的最近一张。
+    text_only = [cm for cm in batch if reply_policy._has_reply_text(cm)]
+    images = [cm for cm in batch if cm.get("type") == 3]
+    if any(cm.get("type") in (3, 43) for cm in batch) and not text_only:
+        return ""
+    look.update(_images_asked_about(text_only, images, list(context_msgs or [])))
     if any(cm.get("type") in (3, 43) for cm in batch):
-        text_only = [cm for cm in batch if reply_policy._has_reply_text(cm)]
-        if not text_only:
-            return ""
-        batch = text_only
-        msg = batch[-1]
+        keep = {media_key(cm) for cm in images} & look
+        batch = [cm for cm in batch if cm in text_only or media_key(cm) in keep]
+        msg = text_only[-1]
     if all(cm.get("type") in media_read.LABELS for cm in batch):
         for cm in batch:
             enrich(cm)
@@ -1150,7 +1195,7 @@ def do_action(rule, msg, chat_username, groups, log, context_msgs=None, rules=No
             return {"ok": False, "status": "not_sent", "reason": "generation_failed", "retryable": False}
         target = send_name_for(chat_username)
         if voice_ok:
-            vr = _send_voice_reply(chat_username, target, raw_text, msg, persona)
+            vr = _send_voice_reply(chat_username, target, raw_text, msg, persona, log)
             if vr and vr.get('status') in ('confirmed', 'submitted'):
                 return vr
             log(f"  [语音] 语音条没发出（{(vr or {}).get('reason')}），改发文字")
@@ -1238,7 +1283,7 @@ def _quote_reply(chat_username, msg):
         return False
 
 
-def _send_voice_reply(chat_username, target, raw_text, msg, persona):
+def _send_voice_reply(chat_username, target, raw_text, msg, persona, log=print):
     """把这条回复读成语音条发出。失败返回发送结果或 None,调用方改发文字。"""
     from core import voice_bar
     words = voice_reply.spoken(raw_text)

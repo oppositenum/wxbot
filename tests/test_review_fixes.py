@@ -283,17 +283,34 @@ class Media(Isolated):
                                 batch_msgs=[self.msg])
         self.assertEqual(out, "")
 
-    def test_image_with_text_replies_to_text_only(self):
+    def test_image_with_question_reads_the_image(self):
+        # 对方发图再问「这是谁啊」:要真的去看这张图(2026-11-28 改,之前是丢掉图只回文字)
         text = {"type": 1, "local_id": 2, "content": "这是谁啊", "sender": "friend"}
+        seen = media_read.Result("success", "图片", "一只橘猫趴在沙发上")
+        with patch.object(agent, "agent_config", return_value={"enabled": False}), \
+             patch.object(bot, "_sender_name", return_value="friend"), \
+             patch.object(bot, "_media_result", return_value=seen) as mr, \
+             patch.object(bot.llm, "chat", return_value="是只橘猫") as model:
+            out = bot._ai_reply({"persona": "sys"}, "friend", self.msg, [self.msg, text],
+                                batch_msgs=[self.msg, text])
+        self.assertEqual(out, "是只橘猫")
+        mr.assert_called_once()
+        asked = model.call_args.args[1][-1]["content"]
+        self.assertIn("这是谁啊", asked)
+        self.assertIn("一只橘猫趴在沙发上", asked)
+        self.assertNotIn("PRIVATE_XML", asked)
+
+    def test_image_with_unrelated_text_replies_to_text_only(self):
+        text = {"type": 1, "local_id": 2, "content": "晚上吃什么", "sender": "friend"}
         with patch.object(agent, "agent_config", return_value={"enabled": False}), \
              patch.object(bot, "_sender_name", return_value="friend"), \
              patch.object(bot, "_media_result", blocked), \
-             patch.object(bot.llm, "chat", return_value="你自己") as model:
+             patch.object(bot.llm, "chat", return_value="吃面") as model:
             out = bot._ai_reply({"persona": "sys"}, "friend", self.msg, [self.msg, text],
                                 batch_msgs=[self.msg, text])
-        self.assertEqual(out, "你自己")
+        self.assertEqual(out, "吃面")
         asked = model.call_args.args[1][-1]["content"]
-        self.assertIn("这是谁啊", asked)
+        self.assertIn("晚上吃什么", asked)
         self.assertNotIn("PRIVATE_XML", asked)
 
     def test_pure_media_failure_deterministic_no_reply_model(self):

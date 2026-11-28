@@ -17,7 +17,7 @@ button{padding:9px 16px;border:1px solid #bfd0c6;background:#fff;border-radius:9
 button.primary{background:#23815a;color:#fff;border-color:#23815a}button:disabled{opacity:.5;cursor:not-allowed}
 .status{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;align-items:center}
 .pill{font-size:13px;border-radius:20px;padding:3px 10px;background:#eef1ef;color:#55635b}
-.pill.ok{background:#e3f4ea;color:#1d7a50}.pill.bad{background:#fbe9e9;color:#a33232}
+.pill.ok{background:#e3f4ea;color:#1d7a50}.pill.bad{background:#fbe9e9;color:#a33232}.pill.warn{background:#fdf3dc;color:#8a6212}
 .target{padding:10px 12px;border-radius:10px;background:#f5f8f6;margin-bottom:10px}
 .actions{display:flex;gap:10px;align-items:center;margin-top:10px}
 #result{font-size:14px}#result.ok{color:#1d7a50}#result.bad{color:#a33232}
@@ -83,16 +83,26 @@ button.primary{background:#23815a;color:#fff;border-color:#23815a}button:disable
       <audio id="ttsAudio" controls style="display:none;width:100%;margin-top:8px"></audio>
       <details id="ttsEdit"><summary>编辑音色</summary>
         <div class="line"><label>显示名 <input class="small" id="vLabel" maxlength="30" style="width:150px"></label>
-          <label>微软音色 <select id="vName"></select></label></div>
-        <div class="line"><label>语速 <input type="range" id="vRate" min="-50" max="50" step="1"><span id="vRateT"></span></label>
+          <label id="vNameWrap">微软音色 <select id="vName"></select></label>
+          <label id="vModelWrap" style="display:none"><span id="vProvName"></span> 合成模型 <select id="vModel"></select></label></div>
+        <div class="line" id="vRPRow"><label>语速 <input type="range" id="vRate" min="-50" max="50" step="1"><span id="vRateT"></span></label>
           <label>音调 <input type="range" id="vPitch" min="-50" max="50" step="1"><span id="vPitchT"></span></label></div>
         <div class="line"><button type="button" id="vSave">保存</button><button type="button" id="vDefault">设为默认</button><button type="button" id="vDel">删除/恢复预设</button><button type="button" id="vHide">隐藏</button><button type="button" id="vUnhide" style="display:none">显示全部预设</button>
           <span style="flex:1"></span><input class="small" id="vNewKey" placeholder="新音色 key，如 my_voice" style="width:190px"><button type="button" id="vNew">新增</button></div>
         <div class="line" style="border-top:1px solid #eef2ef;padding-top:8px"><b style="font-size:13px">复刻音色</b>
-          <span class="muted" style="font-size:13px">上传 10～60 秒的录音或视频（一个人说话、没有背景音乐），用阿里云百炼 CosyVoice 复刻成新音色。只能用本人或已获授权的声音。</span></div>
+          <span class="muted" style="font-size:13px">上传 10～60 秒的录音或视频（一个人说话、没有背景音乐），选厂商和模型复刻成新音色。想对比效果，可以「沿用已有音色的录音」在别的厂商/模型再复刻一份。只能用本人或已获授权的声音。</span></div>
+        <div class="line"><label>厂商 <select id="cProv"></select></label><label>模型 <select id="cModel"></select></label>
+          <input class="small" id="cSlot" placeholder="已购音色号 S_…（可留空）" style="width:190px;display:none"></div>
         <div class="line"><input class="small" id="cLabel" placeholder="音色名字" style="width:140px"><input type="file" id="cFile" accept="audio/*,video/*">
-          <label><input type="checkbox" id="cConsent"> 这是本人或已获授权的声音</label><button type="button" id="cGo">开始复刻</button></div>
+          <label>或 <select id="cFrom"><option value="">上传新录音</option></select></label></div>
+        <div class="line"><label><input type="checkbox" id="cConsent"> 这是本人或已获授权的声音</label><button type="button" id="cGo">开始复刻</button>
+          <span class="muted" id="cNote" style="font-size:12px"></span></div>
       </details>
+    </div>
+    <div class="card tts" style="margin-top:18px" id="provCard">
+      <h2>语音厂商与 API Key</h2>
+      <div class="sub muted" style="font-size:13px">复刻音色用哪家合成就要配哪家的 key。同一家可以配多个 key，轮流使用；限流的 key 冷却 1 分钟，额度用完/欠费的冷却 6 小时（可点「恢复」），key 无效的停用到你恢复为止。「账号分组」一样的 key 共用复刻出来的音色；换到另一个分组的 key 时，会用保存的录音在那个账号下自动复刻一次（可按厂商关掉）。key 只在这里输入，页面只显示打码后的样子。</div>
+      <div id="provList"><p class="muted">加载中…</p></div>
     </div>
     <div class="card tts" style="margin-top:18px" id="vrCard">
       <h2>机器人语音回复</h2>
@@ -136,9 +146,14 @@ async function loadStatus(){
 let tts={default:'',voices:[],edge_voices:[]};
 function curVoice(){return tts.voices.find(v=>v.key===$('#voice').value)||tts.voices[0];}
 function ttsMsg(t,c){$('#ttsMsg').className=c||'';$('#ttsMsg').textContent=t||'';}
+let provs=[];
+function provOf(id){return provs.find(p=>p.id===id);}
 function fillVoice(){
   const v=curVoice(); if(!v)return;
   $('#vLabel').value=v.label;
+  const pv=provOf(v.provider); const clone=!!pv;
+  $('#vNameWrap').style.display=clone?'none':''; $('#vRPRow').style.display=clone?'none':''; $('#vModelWrap').style.display=clone?'':'none';
+  if(clone){ $('#vProvName').textContent=pv.label; $('#vModel').innerHTML=pv.models.map(([m,l])=>`<option value="${esc(m)}">${esc(l)}</option>`).join(''); $('#vModel').value=v.model||pv.default_model; }
   const names=tts.edge_voices.length?tts.edge_voices:[{name:v.name,gender:'',tags:''}];
   if(!names.some(x=>x.name===v.name))names.unshift({name:v.name,gender:'',tags:''});
   $('#vName').innerHTML=names.map(x=>`<option value="${esc(x.name)}">${esc(x.name)}${x.gender?' · '+(x.gender==='Male'?'男':'女'):''}${x.tags?' · '+esc(x.tags):''}</option>`).join('');
@@ -149,11 +164,11 @@ function fillVoice(){
   $('#vUnhide').style.display=(tts.hidden||[]).length?'':'none';$('#vUnhide').textContent='显示全部预设（已隐藏 '+(tts.hidden||[]).length+' 个）';
 }
 function showRP(){const r=+$('#vRate').value,p=+$('#vPitch').value;$('#vRateT').textContent=(r>=0?'+':'')+r+'%';$('#vPitchT').textContent=(p>=0?'+':'')+p+'Hz';}
-function editFields(){const r=+$('#vRate').value,p=+$('#vPitch').value;return {label:$('#vLabel').value.trim(),name:$('#vName').value,rate:(r>=0?'+':'')+r+'%',pitch:(p>=0?'+':'')+p+'Hz'};}
+function editFields(){if(provOf((curVoice()||{}).provider))return {label:$('#vLabel').value.trim(),model:$('#vModel').value};const r=+$('#vRate').value,p=+$('#vPitch').value;return {label:$('#vLabel').value.trim(),name:$('#vName').value,rate:(r>=0?'+':'')+r+'%',pitch:(p>=0?'+':'')+p+'Hz'};}
 function drawVoices(keep){
   $('#sendAs').value=tts.send_as||'video';
   const k=keep||$('#voice').value||tts.default;
-  $('#voice').innerHTML=tts.voices.map(v=>`<option value="${esc(v.key)}">${v.provider==='cosyvoice'?'🎙 ':''}${esc(v.label)}${v.key===tts.default?'（默认）':''}</option>`).join('');
+  $('#voice').innerHTML=tts.voices.map(v=>`<option value="${esc(v.key)}">${provOf(v.provider)?'🎙 ':''}${esc(v.label)}${v.key===tts.default?'（默认）':''}</option>`).join('');
   $('#voice').value=tts.voices.some(v=>v.key===k)?k:tts.default; fillVoice();
 }
 async function loadTTS(keep){const [r,d]=await j('/api/tts/config');if(r.ok){tts=d;drawVoices(keep);if(d.edge_error)ttsMsg('取微软音色列表失败：'+d.edge_error,'bad');}}
@@ -264,14 +279,58 @@ $('#vrSave').onclick=()=>vrPost({global:{enabled:$('#vrOn').checked,mode:$('#vrM
 $('#vrChatSave').onclick=()=>{if(!sel)return;const m=$('#vrChatMode').value,v=$('#vrChatVoice').value;
   if(!m&&!v)vrPost({chat:sel.chat,clear:true});else{const set={};if(m)set.mode=m;set.voice=v;if(m)set.enabled=true;vrPost({chat:sel.chat,set});}};
 $('#cGo').onclick=async()=>{
-  const f=$('#cFile').files[0];if(!f){ttsMsg('先选录音文件','bad');return;}
+  const f=$('#cFile').files[0], from=$('#cFrom').value;
+  if(!f&&!from){ttsMsg('先选录音文件，或选一个已有音色沿用它的录音','bad');return;}
   if(!$('#cConsent').checked){ttsMsg('请先确认这是本人或已获授权的声音','bad');return;}
-  const fd=new FormData();fd.append('file',f);fd.append('label',$('#cLabel').value.trim()||'复刻音色');fd.append('consent','1');
-  ttsMsg('复刻中（整理样本、上传、创建音色，约半分钟）…');$('#cGo').disabled=true;
+  const fd=new FormData(); if(f&&!from)fd.append('file',f); if(from)fd.append('from_voice',from);
+  const pv=provOf($('#cProv').value)||{label:''};
+  fd.append('label',$('#cLabel').value.trim()||((from?(tts.voices.find(v=>v.key===from)||{}).label+' · ':'')+pv.label+' '+$('#cModel').value));
+  fd.append('consent','1'); fd.append('provider',$('#cProv').value); fd.append('model',$('#cModel').value);
+  if($('#cSlot').value.trim())fd.append('speaker_id',$('#cSlot').value.trim());
+  ttsMsg('复刻中（整理样本、上传、创建音色，约半分钟～两分钟）…');$('#cGo').disabled=true;
   try{const [r,d]=await j('/api/tts/clone',{method:'POST',body:fd});
-    if(!r.ok||!d.ok){ttsMsg('✗ '+(d.error||'复刻失败'),'bad');}else{tts=Object.assign(tts,d);drawVoices(d.key);ttsMsg('✓ 已复刻，样本 '+d.sample_seconds+' 秒，选中后点「试听」','ok');}}
-  finally{$('#cGo').disabled=false;}
+    if(!r.ok||!d.ok){ttsMsg('✗ '+(d.error||'复刻失败'),'bad');}else{tts=Object.assign(tts,d);drawVoices(d.key);drawCloneForm();ttsMsg('✓ 已复刻，样本 '+d.sample_seconds+' 秒，选中后点「试听」','ok');}}
+  finally{$('#cGo').disabled=false;loadProv();}
 };
+function drawCloneForm(){
+  const cur=$('#cProv').value;
+  $('#cProv').innerHTML=provs.map(p=>`<option value="${esc(p.id)}">${esc(p.label)}${p.keys.length?'':'（未配 key）'}</option>`).join('');
+  if(cur)$('#cProv').value=cur; drawCloneModels();
+  const keep=$('#cFrom').value;
+  $('#cFrom').innerHTML='<option value="">上传新录音</option>'+tts.voices.filter(v=>provOf(v.provider)&&v.sample).map(v=>`<option value="${esc(v.key)}">沿用「${esc(v.label)}」的录音</option>`).join('');
+  $('#cFrom').value=keep;
+}
+function drawCloneModels(){const p=provOf($('#cProv').value); if(!p)return;
+  $('#cModel').innerHTML=p.models.map(([m,l])=>`<option value="${esc(m)}">${esc(l)}</option>`).join(''); $('#cModel').value=p.default_model;
+  $('#cSlot').style.display=p.clone_opts.some(o=>o[0]==='speaker_id')?'':'none'; $('#cNote').textContent=p.note;}
+$('#cProv').onchange=drawCloneModels;
+const KSTAT={ok:['正常','ok'],rate:['限流冷却中','warn'],exhausted:['额度用完/欠费，冷却中','bad'],auth:['key 无效或没权限','bad'],disabled:['已停用',''],other:['出错','warn']};
+function hm(t){return t?new Date(t*1000).toLocaleString('zh-CN',{hour12:false,timeZone:'Asia/Shanghai',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}):'';}
+async function loadProv(){const [r,d]=await j('/api/voice/providers'); if(!r.ok){$('#provList').innerHTML='<p class="bad">读取失败</p>';return;} provs=d.providers; drawProv(); drawCloneForm(); fillVoice();}
+function drawProv(){
+  $('#provList').innerHTML=provs.map(p=>`<div style="border-top:1px solid #eef2ef;padding:8px 0" data-p="${esc(p.id)}">
+    <div class="line"><b>${esc(p.label)}</b><span class="muted" style="font-size:12px">${esc(p.note)}</span></div>
+    ${p.keys.map(k=>{const st=KSTAT[k.status]||[k.status,''];return `<div class="line" style="font-size:13px" data-k="${esc(k.id)}">
+      <code>${esc(k.masked)}</code><span>${esc(k.label||'')}</span><span class="muted">分组 ${esc(k.group||'（独立）')}</span>
+      <span class="pill ${st[1]}">${esc(st[0])}${k.until&&k.status!=='auth'?' 至 '+hm(k.until):''}</span>
+      <span class="muted">成功 ${k.uses} 次${k.fails?' · 失败 '+k.fails:''}${k.error?' · '+esc(k.error.slice(0,60)):''}</span>
+      ${k.status!=='ok'&&k.status!=='disabled'?'<button type="button" data-a="reset">恢复</button>':''}
+      <button type="button" data-a="${k.enabled?'disable':'enable'}">${k.enabled?'停用':'启用'}</button><button type="button" data-a="delete">删除</button></div>`;}).join('')||'<div class="muted" style="font-size:13px">还没有 key</div>'}
+    <div class="line"><input class="small" type="password" autocomplete="off" placeholder="API Key" data-f="key" style="width:220px"><input class="small" placeholder="备注" data-f="label" style="width:100px"><input class="small" placeholder="账号分组(同账号填一样)" data-f="group" style="width:160px"><button type="button" data-a="add">添加</button>
+      <label style="font-size:13px"><input type="checkbox" data-a="auto" ${p.auto_enroll?'checked':''}> 换到其它分组的 key 时自动复刻</label></div></div>`).join('');
+}
+$('#provList').onclick=async e=>{const b=e.target.closest('button'); if(!b)return; const box=b.closest('[data-p]'), pid=box.dataset.p, row=b.closest('[data-k]'), a=b.dataset.a;
+  let body={provider:pid};
+  if(a==='add'){const g=f=>box.querySelector(`[data-f=${f}]`).value.trim(); if(!g('key')){ttsMsg('先填 API Key','bad');return;} body=Object.assign(body,{action:'add',key:g('key'),label:g('label'),group:g('group')});}
+  else if(a==='reset')body=Object.assign(body,{action:'reset',id:row.dataset.k});
+  else if(a==='delete'){if(!confirm('删除这个 key？'))return; body=Object.assign(body,{action:'delete',id:row.dataset.k});}
+  else if(a==='disable'||a==='enable')body=Object.assign(body,{action:'update',id:row.dataset.k,enabled:a==='enable'});
+  else return;
+  const [r,d]=await j('/api/voice/keys',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+  if(!r.ok||d.ok===false){ttsMsg('✗ '+(d.error||'保存失败'),'bad');return;} provs=d.providers; drawProv(); drawCloneForm();};
+$('#provList').onchange=async e=>{const c=e.target; if(c.dataset.a!=='auto')return; const pid=c.closest('[data-p]').dataset.p;
+  const [r,d]=await j('/api/voice/keys',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({provider:pid,action:'auto_enroll',on:c.checked})});
+  if(r.ok&&d.providers){provs=d.providers;drawProv();}};
 $('#vSave').onclick=()=>ttsCfg({voice:Object.assign({key:$('#voice').value},editFields())});
 $('#vDefault').onclick=()=>ttsCfg({default:$('#voice').value});
 $('#vDel').onclick=()=>{const v=curVoice();if(confirm(v.builtin?'恢复「'+v.label+'」的预设参数？':'删除音色「'+v.label+'」？'))ttsCfg({delete:v.key},v.builtin?v.key:'');};
@@ -326,6 +385,6 @@ $('#fallback').onchange=e=>saveMode({fallback:e.target.checked});
 $('#groupQuote').onchange=e=>saveMode({group_quote:e.target.checked});
 $('#groupAt').onchange=e=>saveMode({group_at:e.target.checked});
 $('#drawQuote').onchange=e=>saveMode({draw_quote:e.target.checked});
-loadMode();loadStatus();loadHistory();loadTTS().then(loadVR);setInterval(loadStatus,15000);setInterval(loadHistory,15000);
+loadMode();loadStatus();loadHistory();loadTTS().then(loadProv).then(loadVR);setInterval(loadStatus,15000);setInterval(loadHistory,15000);
 </script>
 <script src="/static/nav.js"></script></html>

@@ -58,9 +58,44 @@ def _read():
     try:
         with open(_path(), encoding="utf-8") as f:
             d = json.load(f)
-        return d if isinstance(d, dict) else {}
+        d = d if isinstance(d, dict) else {}
     except (OSError, ValueError):
         return {}
+    if _migrate(d):
+        _write(d)
+    return d
+
+
+def _guess_sample(created):
+    """旧复刻音色没记样本路径:按创建时间找 work/voice_clone 里最接近(不晚于)的 *-sample.wav。"""
+    d = os.path.join(config.WORK_DIR, "voice_clone")
+    best = None
+    try:
+        names = sorted(n for n in os.listdir(d) if n.endswith("-sample.wav"))
+    except OSError:
+        return ""
+    for n in names:
+        try:
+            t = time.mktime(time.strptime(n[:15], "%Y%m%d-%H%M%S"))
+        except ValueError:
+            continue
+        if t <= (created or 0) + 5:
+            best = n
+    return os.path.join(d, best) if best else ""
+
+
+def _migrate(d):
+    """旧格式 {provider: cosyvoice, voice_id, model} → {provider: aliyun, model, ids: {分组|模型: voice_id}, sample}。
+    原来的 key 迁到 voice_keys 时分组是 default。"""
+    changed = False
+    for key, v in (d.get("voices") or {}).items():
+        if v.get("provider") == "cosyvoice":
+            model = v.get("model") or "cosyvoice-v3.5-plus"
+            v.update(provider="aliyun", model=model, ids={f"default|{model}": v.pop("voice_id", "")} if v.get("voice_id")
+                     else {}, sample=v.get("sample") or _guess_sample(v.get("created")))
+            v["ids"] = {k: x for k, x in v["ids"].items() if x}
+            changed = True
+    return changed
 
 
 def _write(d):
@@ -174,11 +209,19 @@ def save_voice(key, fields):
                 voices[key] = clean
             else:
                 voices.pop(key, None)
-        elif (voices.get(key) or {}).get("provider") == "cosyvoice":
-            # 复刻音色只能改显示名;语速音调由样本决定
+        elif (voices.get(key) or {}).get("provider") in _clone_providers():
+            # 复刻音色能改显示名和合成模型;语速音调由样本决定
             label = str((fields or {}).get("label") or "").strip()[:30]
             if label:
                 voices[key]["label"] = label
+            model = str((fields or {}).get("model") or "").strip()
+            if model:
+                from core import voice_providers
+                p = voice_providers.get(voices[key]["provider"])
+                if model not in {m for m, _ in p.models}:
+                    raise TTSError("bad_param", f"{p.label} 没有这个模型:{model}")
+                voices[key]["model"] = model
+                voices[key]["name"] = f"{p.id}:{model}"
         else:
             merged = dict(voices.get(key) or {}, **clean)
             if not merged.get("name") or not merged.get("label"):
@@ -188,29 +231,121 @@ def save_voice(key, fields):
     return get_config()
 
 
-def add_clone_voice(key, label, voice_id, model, sample_seconds=None):
-    """登记一个复刻音色(core/voice_clone.py 创建)。"""
+def _clone_providers():
+    from core import voice_providers
+    return voice_providers.PROVIDERS
+
+
+def is_clone(v):
+    return (v or {}).get("provider") in _clone_providers()
+
+
+def add_clone_voice(key, label, provider, model, sample, sample_seconds=None, opts=None):
+    """登记一个复刻音色(core/voice_clone.py 创建;真正的复刻在第一次 enroll 时做)。"""
     if not KEY_RE.match(key or ""):
         raise TTSError("bad_key", "音色 key 只能用小写字母、数字、下划线")
+    from core import voice_providers
+    p = voice_providers.get(provider)
+    model = model or p.default_model
+    if model not in {m for m, _ in p.models}:
+        raise TTSError("bad_param", f"{p.label} 没有这个模型:{model}")
     with _lock:
         d = _read()
         d.setdefault("voices", {})[key] = {
-            "label": (label or key)[:30], "provider": "cosyvoice", "voice_id": voice_id, "model": model,
-            "name": "cosyvoice:" + model, "rate": "+0%", "pitch": "+0Hz", "volume": "+0%",
+            "label": (label or key)[:30], "provider": p.id, "model": model, "name": f"{p.id}:{model}",
+            "rate": "+0%", "pitch": "+0Hz", "volume": "+0%", "ids": {}, "sample": sample,
+            "opts": {k: str(x)[:64] for k, x in (opts or {}).items() if x},
             "created": int(time.time()), "sample_seconds": sample_seconds}
         _write(d)
     return get_config()
 
 
-def delete_voice(key):
-    """自定义音色删掉(复刻音色同时删掉百炼上的音色);内置音色恢复预设。"""
-    v = (_read().get("voices") or {}).get(key) or {}
-    if v.get("provider") == "cosyvoice" and v.get("voice_id"):
+def _slot(p, group, model):
+    """音色 ID 按什么存:同一分组(同一厂商账号)共用;绑定模型的厂商还要按模型分。"""
+    return f"{group}|{model}" if p.model_bound else group
+
+
+def _set_id(key, slot, vid):
+    with _lock:
+        d = _read()
+        v = (d.get("voices") or {}).get(key)
+        if v is None:
+            return
+        ids = v.setdefault("ids", {})
+        if vid:
+            ids[slot] = vid
+        else:
+            ids.pop(slot, None)
+        _write(d)
+
+
+def _clone_audio(key, text, log=None):
+    """用复刻音色合成,返回 mp3 字节。按 key 轮询;这个 key 所在分组还没有这个音色时用样本复刻一次。"""
+    from core import voice_keys, voice_providers
+    from core.voice_providers import ProviderError
+    v = get_voice(key)
+    p = voice_providers.get(v["provider"])
+    model = v.get("model") or p.default_model
+    sample = v.get("sample") or ""
+
+    def enroll(k, slot):
+        if not sample or not os.path.isfile(sample):
+            raise ProviderError("skip", "没有录音样本,不能在这个 key 下复刻")
+        vid = p.enroll(k["key"], sample, key, model, v.get("opts"))
+        _set_id(key, slot, vid)
+        if log:
+            log(f"[语音] {p.label} 在 key 分组 {k['group']} 下复刻了「{v['label']}」")
+        return vid
+
+    def attempt(k):
+        slot = _slot(p, k["group"], model)
+        ids = (get_voice(key).get("ids") or {})
+        vid = ids.get(slot)
+        if not vid:
+            if ids and not voice_keys.auto_enroll(p.id, p.auto_enroll_default):
+                raise ProviderError("skip", "这个 key 分组没有复刻过这个音色")
+            vid = enroll(k, slot)
         try:
-            from core import voice_clone
-            voice_clone.delete_voice(v["voice_id"])
-        except Exception:
-            pass
+            return p.synth(k["key"], text, vid, model)
+        except ProviderError as e:
+            if e.kind != "voice_missing":
+                raise
+            _set_id(key, slot, "")          # 音色被厂商删了(如 MiniMax 7 天未用):重新复刻再试一次
+            return p.synth(k["key"], text, enroll(k, slot), model)
+
+    return voice_keys.run(p.id, attempt, log=log)
+
+
+def enroll_now(key, log=None):
+    """刚登记的复刻音色:用第一个可用 key 复刻(新建时就让错误马上暴露)。返回 voice_id。"""
+    from core import voice_keys, voice_providers
+    v = get_voice(key)
+    p = voice_providers.get(v["provider"])
+    model = v.get("model") or p.default_model
+
+    def attempt(k):
+        vid = p.enroll(k["key"], v["sample"], key, model, v.get("opts"))
+        _set_id(key, _slot(p, k["group"], model), vid)
+        return vid
+    return voice_keys.run(p.id, attempt, log=log)
+
+
+def delete_voice(key):
+    """自定义音色删掉(复刻音色同时删掉厂商那边各个 key 分组下的音色);内置音色恢复预设。"""
+    v = (_read().get("voices") or {}).get(key) or {}
+    if is_clone(v) and v.get("ids"):
+        from core import voice_keys, voice_providers
+        p = voice_providers.get(v["provider"])
+        keys = {}
+        for k in voice_keys.candidates(p.id):
+            keys.setdefault(k["group"], k["key"])
+        for slot, vid in v["ids"].items():
+            k = keys.get(slot.split("|")[0])
+            if k:
+                try:
+                    p.delete(k, vid)
+                except Exception:
+                    pass
     with _lock:
         d = _read()
         (d.get("voices") or {}).pop(key, None)
@@ -263,13 +398,17 @@ def synth(text, voice=None, rate=None, pitch=None, volume=None, out_dir=None):
     v = get_voice(voice)
     out_dir = out_dir or os.path.join(config.WORK_DIR, "direct_media")
     os.makedirs(out_dir, exist_ok=True)
-    if v.get("provider") == "cosyvoice":
-        from core import voice_clone
+    if is_clone(v):
+        from core import voice_keys
+        from core.voice_providers import ProviderError
         path = os.path.join(out_dir, f"{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(4).hex()}.clone.mp3")
         try:
-            return voice_clone.synth(text, v["voice_id"], v.get("model") or voice_clone.MODEL, path)
-        except voice_clone.CloneError as e:
-            # 额度用完/网络问题时退回默认的免费音色,别让语音功能整个停掉
+            audio = _clone_audio(v["key"], text, log=lambda m: print(m, flush=True))
+            with open(path, "wb") as f:
+                f.write(audio)
+            return path
+        except (ProviderError, voice_keys.NoKeyError) as e:
+            # 所有 key 都用完/失效或网络问题时退回默认的免费音色,别让语音功能整个停掉
             print(f"[tts] 复刻音色「{v.get('label')}」合成失败,改用默认音色:{e.message}", flush=True)
             v = get_voice(DEFAULT_KEY)      # 内置微软音色,不会再是复刻音色
             rate = pitch = volume = None

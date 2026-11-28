@@ -1647,23 +1647,74 @@ def api_tts_config_set():
 
 @app.post("/api/tts/clone")
 def api_tts_clone():
-    """上传录音(音频或视频,本人或已授权的声音)复刻音色。表单:file, label, consent=1。"""
+    """复刻音色(本人或已授权的声音)。表单:file(音频或视频)或 from_voice(沿用已有音色的录音),
+    label, consent=1, provider(aliyun/minimax/volcengine/elevenlabs,默认 aliyun), model, speaker_id(火山引擎已购音色号)。"""
     from core import voice_clone, tts
-    f = request.files.get("file")
-    if f is None:
-        return jsonify(ok=False, error="缺少录音文件"), 400
-    if request.form.get("consent") != "1":
+    form = request.form
+    if form.get("consent") != "1":
         return jsonify(ok=False, error="请确认这是本人或已获授权的声音"), 400
-    label = (request.form.get("label") or "").strip()[:30] or "复刻音色"
-    d = os.path.join(config.WORK_DIR, "voice_clone")
-    os.makedirs(d, exist_ok=True)
-    src = os.path.join(d, time.strftime("%Y%m%d-%H%M%S") + "-upload" + os.path.splitext(f.filename or "")[1][:8])
-    f.save(src)
+    f = request.files.get("file")
+    from_voice = (form.get("from_voice") or "").strip()
+    if f is None and not from_voice:
+        return jsonify(ok=False, error="缺少录音文件"), 400
+    label = (form.get("label") or "").strip()[:30] or "复刻音色"
+    src = None
+    if f is not None:
+        d = os.path.join(config.WORK_DIR, "voice_clone")
+        os.makedirs(d, exist_ok=True)
+        src = os.path.join(d, time.strftime("%Y%m%d-%H%M%S") + "-upload" + os.path.splitext(f.filename or "")[1][:8])
+        f.save(src)
     try:
-        key, vid, secs = voice_clone.create_voice(src, label)
+        key, vid, secs = voice_clone.create_voice(src, label, provider=form.get("provider") or "aliyun",
+                                                  model=form.get("model") or None,
+                                                  opts={"speaker_id": form.get("speaker_id") or ""},
+                                                  from_voice=from_voice or None)
     except voice_clone.CloneError as e:
         return jsonify(ok=False, code=e.code, error=e.message), 400
+    except tts.TTSError as e:
+        return jsonify(ok=False, code=e.code, error=e.message), 400
     return jsonify(dict(tts.get_config(), ok=True, key=key, sample_seconds=round(secs, 1)))
+
+
+@app.get("/api/voice/providers")
+def api_voice_providers():
+    """语音厂商(可复刻的模型、计费提示)和各家 API Key 的状态(key 打码)。"""
+    from core import voice_keys, voice_providers
+    keys = voice_keys.view()
+    out = []
+    for p in voice_providers.catalog():
+        k = keys.get(p["id"]) or {"keys": [], "auto_enroll": None}
+        out.append(dict(p, keys=k["keys"], auto_enroll=p["auto_enroll_default"] if k["auto_enroll"] is None
+                        else k["auto_enroll"]))
+    return jsonify(providers=out)
+
+
+@app.post("/api/voice/keys")
+def api_voice_keys():
+    """管理 API Key。JSON:provider + action:
+    add {key, label, group} / update {id, label, group, enabled} / reset {id} / delete {id} / auto_enroll {on}。"""
+    from core import voice_keys, voice_providers
+    data = request.get_json(silent=True) or {}
+    pid, action = data.get("provider"), data.get("action")
+    if pid not in voice_providers.PROVIDERS:
+        return jsonify(ok=False, error="不支持的厂商"), 400
+    try:
+        if action == "add":
+            voice_keys.add(pid, data.get("key"), data.get("label") or "", data.get("group") or "")
+        elif action == "update":
+            voice_keys.update(pid, data.get("id"), label=data.get("label"), group=data.get("group"),
+                              enabled=data.get("enabled"))
+        elif action == "reset":
+            voice_keys.update(pid, data.get("id"), reset=True)
+        elif action == "delete":
+            voice_keys.remove(pid, data.get("id"))
+        elif action == "auto_enroll":
+            voice_keys.set_auto_enroll(pid, bool(data.get("on")))
+        else:
+            return jsonify(ok=False, error="action 不对"), 400
+    except ValueError as e:
+        return jsonify(ok=False, error=str(e)), 400
+    return api_voice_providers()
 
 
 @app.post("/api/tts/preview")

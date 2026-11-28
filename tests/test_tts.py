@@ -42,7 +42,7 @@ class TTSConfigTest(unittest.TestCase):
         self.assertEqual(tts.get_config()["default"], tts.DEFAULT_KEY)
 
     def test_keep_only_hides_presets_but_still_resolves_them(self):
-        tts.add_clone_voice("my_clone", "我的声音", "vid-1", "cosyvoice-v3.5-plus")
+        tts.add_clone_voice("my_clone", "我的声音", "aliyun", "cosyvoice-v3.5-plus", "/tmp/none.wav")
         cfg = tts.keep_only(["my_clone"])
         self.assertEqual([v["key"] for v in cfg["voices"]], ["my_clone"])
         self.assertEqual(cfg["default"], "my_clone")

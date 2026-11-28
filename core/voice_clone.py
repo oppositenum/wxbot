@@ -1,21 +1,17 @@
-"""复刻音色(阿里云百炼 CosyVoice 声音复刻)。
+"""复刻音色:只用于本人或已获授权的声音。
 
-只用于本人或已获授权的声音。流程:
   prepare_sample(任意音视频) → 抽出说话片段、压掉长停顿、响度归一,得到 10~20 秒 24k 单声道 wav
-  create_voice(样本, 显示名) → 百炼 voice-enrollment 创建音色(免费),写进 core/tts 的音色配置
-  synth(文本, 音色) → 用绑定的模型合成 mp3(按百炼模型计费,控制台可设「用完即停」)
+  create_voice(录音, 显示名, 厂商, 模型) → 样本存进 work/voice_clone/samples,登记音色并马上复刻一次
+厂商(阿里云百炼/MiniMax/火山引擎/ElevenLabs)见 core/voice_providers.py,API Key 和轮询见 core/voice_keys.py,
+合成和"换 key 时自动补复刻"见 core/tts.py。
 
-key:环境变量 DASHSCOPE_API_KEY;读不到时读 /home/wechat/.wxbot/dashscope_api_key(在容器数据卷里,权限 600)。
-复刻音色绑定创建时的模型,不能跨模型用。
+旧版只支持百炼,key 来自环境变量 DASHSCOPE_API_KEY 或 /home/wechat/.wxbot/dashscope_api_key;
+现在第一次用时会自动导入到 voice_keys(legacy_key)。
 """
-import base64
-import json
 import os
 import re
 import subprocess
 import time
-import urllib.error
-import urllib.request
 
 import config
 
@@ -32,6 +28,14 @@ class CloneError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+def legacy_key():
+    """旧版的百炼 key(环境变量或 key 文件),没有返回空串。"""
+    try:
+        return api_key()
+    except CloneError:
+        return ""
 
 
 def api_key():
@@ -110,72 +114,41 @@ def prepare_sample(src, out_dir=None):
     return sample, secs
 
 
-def _call(inp, timeout=90):
-    req = urllib.request.Request(API, data=json.dumps({"model": "voice-enrollment", "input": inp}).encode(),
-                                 headers={"Authorization": "Bearer " + api_key(),
-                                          "Content-Type": "application/json"})
+
+
+
+
+
+def _samples_dir():
+    d = os.path.join(config.WORK_DIR, "voice_clone", "samples")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def create_voice(src, label, key=None, provider="aliyun", model=None, opts=None, from_voice=None):
+    """一步到位:整理样本(或沿用已有音色的样本)→ 登记音色 → 用第一个可用 key 复刻。
+    返回 (音色 key, voice_id, 样本秒数)。复刻失败时不留下这个音色。"""
+    import shutil
+    from core import tts, voice_keys
+    from core.voice_providers import ProviderError
+    key = key or "clone_" + time.strftime("%m%d%H%M%S")
+    if from_voice:
+        old = tts.get_voice(from_voice)
+        if not tts.is_clone(old) or not old.get("sample") or not os.path.isfile(old["sample"]):
+            raise CloneError("no_file", "这个音色没有保存录音样本,请重新上传")
+        sample, secs = old["sample"], old.get("sample_seconds") or 0
+    else:
+        sample, secs = prepare_sample(src)
+    keep = os.path.join(_samples_dir(), key + ".wav")
+    if os.path.abspath(sample) != os.path.abspath(keep):
+        shutil.copyfile(sample, keep)
     try:
-        return json.load(urllib.request.urlopen(req, timeout=timeout))
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", "ignore")[:300]
-        raise CloneError("api_error", f"百炼返回 {e.code}:{body}")
-    except urllib.error.URLError as e:
-        raise CloneError("network", f"连不上百炼:{e.reason}")
-
-
-def enroll(sample_wav, prefix="wxbot", model=MODEL):
-    """样本 → 百炼复刻音色,返回 voice_id。样本以 Base64 Data URI 提交,不需要公网地址。"""
-    if os.path.getsize(sample_wav) > 10 * 1024 * 1024:
-        raise CloneError("too_large", "样本超过 10MB")
-    data = base64.b64encode(open(sample_wav, "rb").read()).decode()
-    prefix = re.sub(r"[^a-z0-9]", "", prefix.lower())[:9] or "wxbot"
-    r = _call({"action": "create_voice", "target_model": model, "prefix": prefix,
-               "url": "data:audio/wav;base64," + data})
-    vid = (r.get("output") or {}).get("voice_id")
-    if not vid:
-        raise CloneError("api_error", f"没拿到 voice_id:{r}")
-    return vid
-
-
-def delete_voice(voice_id):
-    _call({"action": "delete_voice", "voice_id": voice_id})
-
-
-def list_voices(prefix=None):
-    inp = {"action": "list_voice", "page_index": 0, "page_size": 100}
-    if prefix:
-        inp["prefix"] = prefix
-    return (_call(inp).get("output") or {}).get("voice_list") or []
-
-
-def synth(text, voice_id, model=MODEL, path=None):
-    """用复刻音色合成 mp3,写到 path 并返回 path。"""
+        tts.add_clone_voice(key, label, provider, model, keep, sample_seconds=round(secs, 1), opts=opts)
+    except tts.TTSError as e:
+        raise CloneError(e.code, e.message)
     try:
-        import dashscope
-    except ImportError:
-        raise CloneError("no_sdk", "没有安装 dashscope(python3 -m pip install dashscope)")
-    import warnings
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")      # 未配置 workspace 时走公共网关的提示
-            client = dashscope.Client(api_key=api_key())
-            audio = client.audio.tts.synthesize(text, model=model, voice=voice_id, format="mp3", sample_rate=24000)
-    except CloneError:
-        raise
-    except Exception as e:  # noqa: BLE001 SDK 的各种网络/额度错误
-        raise CloneError("synth_failed", f"复刻音色合成失败:{e}")
-    if not audio:
-        raise CloneError("synth_failed", "复刻音色没有返回音频")
-    with open(path, "wb") as f:
-        f.write(audio)
-    return path
-
-
-def create_voice(src, label, key=None, model=MODEL):
-    """一步到位:整理样本 → 创建复刻音色 → 写进音色配置。返回音色配置里的 key。"""
-    from core import tts
-    sample, secs = prepare_sample(src)
-    key = key or "clone_" + time.strftime("%m%d%H%M")
-    vid = enroll(sample, prefix=key.replace("_", ""), model=model)
-    tts.add_clone_voice(key, label, vid, model, sample_seconds=round(secs, 1))
+        vid = tts.enroll_now(key)
+    except (ProviderError, voice_keys.NoKeyError) as e:
+        tts.delete_voice(key)
+        raise CloneError(getattr(e, "kind", "no_key"), e.message)
     return key, vid, secs

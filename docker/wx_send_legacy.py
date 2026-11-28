@@ -11,6 +11,7 @@
   python3 wx_send.py text  "文件传输助手" "你好"
   python3 wx_send.py image "文件传输助手" /path/in/container.png
 """
+import os
 import subprocess as sp
 import sys
 import time
@@ -45,6 +46,94 @@ def main_window_ids():
             if name == title:
                 ids.append(wid)
     return list(dict.fromkeys(ids))
+
+
+# 微信 4.1.9+ 窗口顶部多了一行自绘标题栏,侧栏搜索框、会话标题整体下移约 19px,
+# 会话区也更靠右。按安装的微信版本选一组偏移(相对窗口客户区左上角)。
+_LAYOUTS = {
+    "4.1.8": {"search": (174, 40), "search_clear": (268, 48), "panel": (60, 20, 430, 620),
+              "header": (286, 6, 700, 52), "field_scan_end": 110},
+    "4.1.13": {"search": (169, 59), "search_clear": (250, 59), "panel": (77, 40, 430, 640),
+               "header": (320, 36, 700, 84), "field_scan_end": 130},
+}
+_layout_cache = {}
+
+
+def wechat_version():
+    if "v" not in _layout_cache:
+        r = x("dpkg-query", "-W", "-f=${Version}", "wechat")
+        _layout_cache["v"] = (r.stdout or "").strip()
+    return _layout_cache["v"]
+
+
+def layout():
+    try:
+        v = tuple(int(p) for p in wechat_version().split(".")[:3])
+    except ValueError:
+        v = ()
+    return _LAYOUTS["4.1.13" if v >= (4, 1, 9) else "4.1.8"]
+
+
+def new_layout():
+    return layout() is _LAYOUTS["4.1.13"]
+
+
+def _viewable(wid):
+    r = x("xwininfo", "-id", str(wid))
+    return "IsViewable" in (r.stdout or "")
+
+
+def _tray_icon_point():
+    """面板托盘里的微信图标:截顶栏右半边,找绿色像素团的中心。"""
+    import uuid
+    path = f"/tmp/wx_tray_{uuid.uuid4().hex[:8]}.png"
+    x("scrot", "-o", path)
+    try:
+        from PIL import Image
+        im = Image.open(path).convert("RGB")
+    except Exception:
+        return None
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    xs, ys = [], []
+    for sx in range(im.width // 2, im.width):
+        for sy in range(0, 26):
+            r, g, b = im.getpixel((sx, sy))
+            if g > 150 and r < 90 and b < 120:
+                xs.append(sx)
+                ys.append(sy)
+    if len(xs) < 30:
+        return None
+    return (min(xs) + max(xs)) // 2, (min(ys) + max(ys)) // 2
+
+
+def restore_main(wid=None):
+    """4.1.9+ 焦点在主窗口时按 Esc 会把窗口收进托盘(窗口 unmap)。
+    xdotool windowmap 只让窗口管理器以为它显示了,Qt 不重绘,是空白窗口;只能点托盘图标。"""
+    ids = [str(wid)] if wid else main_window_ids()
+    if not ids or any(_viewable(i) for i in ids):
+        return True
+    pt = _tray_icon_point()
+    if not pt:
+        return False
+    x("xdotool", "mousemove", str(pt[0]), str(pt[1]), "click", "1")
+    for _ in range(15):
+        time.sleep(0.2)
+        if any(_viewable(i) for i in (ids if wid else main_window_ids())):
+            time.sleep(0.4)
+            return True
+    return False
+
+
+def esc():
+    """按 Esc。新版若因此把主窗口收进托盘,立刻点托盘恢复。"""
+    key("Escape")
+    if new_layout():
+        time.sleep(0.2)
+        restore_main()
 
 
 def win_id():
@@ -147,12 +236,20 @@ def leave_search(wid=None):
     if not wid:
         return
     try:
+        restore_main(wid)
         keep_window_size(wid)
         x("xdotool", "windowactivate", "--sync", wid)
         x("xdotool", "windowfocus", "--sync", wid)
-        for _ in range(3):
-            key("Escape")
-            time.sleep(0.12)
+        if new_layout():
+            # 新版:焦点在主窗口时 Esc 会收起窗口;先点进搜索框,一次 Esc 只清空搜索
+            px, py, _w, _h = win_geom(wid)
+            click_search(px, py)
+            time.sleep(0.15)
+            esc()
+        else:
+            for _ in range(3):
+                esc()
+                time.sleep(0.12)
     except Exception:
         pass
 
@@ -222,7 +319,7 @@ def search_field_point(wid):
         return 240 <= r <= 252 and abs(r - g) < 6 and abs(g - b) < 6
 
     bands = []
-    y_end = min(im.height, py + 110)
+    y_end = min(im.height, py + layout()["field_scan_end"])
     # 侧栏搜索框在左图标栏右边。标题栏也是浅色，所以从窗口内容顶再往下才开始找。
     x_start = max(0, px + 50)
     x_end = min(im.width, px + 340)
@@ -261,8 +358,9 @@ def search_field_point(wid):
 def click_search(px, py):
     """按住 Ctrl 再单击。普通点击只打在外层窗口上，键盘仍留在输入框；
     双击则会被微信当成标题栏双击，窗口跟着放大。
-    搜索框在窗口内容区 (174, 40)。截图找框会把标题栏算进去，点到框外面。"""
-    point = (px + 174, py + 40)
+    搜索框位置见 _LAYOUTS(4.1.8 在窗口内容区 (174, 40))。截图找框会把标题栏算进去，点到框外面。"""
+    sx, sy = layout()["search"]
+    point = (px + sx, py + sy)
     x("xdotool", "mousemove", str(point[0]), str(point[1]))
     time.sleep(0.08)
     x("xdotool", "keydown", "ctrl")
@@ -293,7 +391,7 @@ def abort_if_composer_polluted():
     time.sleep(0.05)
     key("Delete")
     time.sleep(0.08)
-    key("Escape")
+    esc()
 
 
 def search_panel_image(px, py):
@@ -305,7 +403,8 @@ def search_panel_image(px, py):
     crop = f"/tmp/wx_search_{tag}_crop.png"
     x("scrot", "-o", full)
     im = Image.open(full)
-    box = (px + 60, py + 20, px + 430, py + 620)
+    l, t, r, b = layout()["panel"]
+    box = (px + l, py + t, px + r, py + b)
     im.crop(box).save(crop)
     return im, box, crop
 
@@ -347,9 +446,10 @@ def _ocr_rows(crop_path):
 def _section_label(text):
     """分区标题。文章行里的群名碎片不能当成「群聊」。"""
     t = "".join((text or "").split())
-    if "群聊" in t and "聊天记录" not in t and len(t) <= 6:
+    # 小字「群聊」常被 OCR 拆成上下两截,拼回来是「聊群」。
+    if ("群聊" in t or "聊群" in t) and "聊天记录" not in t and len(t) <= 6:
         return "group"
-    if "聊天记录" in t and len(t) <= 8:
+    if ("聊天记录" in t and len(t) <= 8) or (t.endswith("记录") and len(t) <= 5):
         return "history"
     if "联系人" in t and len(t) <= 6:
         return "contact"
@@ -382,6 +482,10 @@ def _panel_floor(im):
                 hit += 1
         return hit / seen if seen else 0
 
+    if new_layout():
+        # 新版浮层是白底,只有高亮的那条建议是灰的,按灰色找底边会停在第三行。
+        # 交给分区标题(聊天记录/联系人)截止。
+        return im.height
     seen_card = False
     for y in range(30, im.height - 2):
         if gray_share(y) >= 0.8:
@@ -565,7 +669,8 @@ def search_box_holds(name):
 
 def dismiss_search(px, py):
     """关掉侧栏搜索浮层。Esc 关不掉这个浮层，要点搜索框右侧的清除。"""
-    x("xdotool", "mousemove", str(px + 268), str(py + 48), "click", "1")
+    cx, cy = layout()["search_clear"]
+    x("xdotool", "mousemove", str(px + cx), str(py + cy), "click", "1")
     time.sleep(0.2)
 
 
@@ -612,7 +717,8 @@ def _header_box(px, py, w):
     """主窗口顶栏在侧栏右边，紧贴窗口内容顶。
     独立聊天窗没有侧栏，标题在系统标题栏下面一行，从左边开始。"""
     if w >= 900:
-        return px + 286, py + 6, px + min(w - 80, 700), py + 52
+        l, t, r, b = layout()["header"]
+        return px + l, py + t, px + min(w - 80, r), py + b
     right = max(120, w - 90)
     return px + 8, py + 30, px + right, py + 68
 
@@ -770,11 +876,13 @@ def already_on_chat(px, py, w, h, expect):
 def open_chat(wid, name, expect=""):
     close_overlays()
     px, py, w, h = ensure_focused(wid)
-    # 关掉残留搜索浮层；不要在输入框里回车。
-    key("Escape")
-    time.sleep(0.12)
-    key("Escape")
-    time.sleep(0.12)
+    # 关掉残留搜索浮层；不要在输入框里回车。新版的 leave_search 已经清过搜索,
+    # 再按 Esc 只会把主窗口收进托盘。
+    if not new_layout():
+        esc()
+        time.sleep(0.12)
+        esc()
+        time.sleep(0.12)
     global _opened_by_alias
     px, py, w, h = win_geom(wid)
     if already_on_chat(px, py, w, h, expect):
@@ -805,7 +913,7 @@ def open_chat(wid, name, expect=""):
         # 第二下落到侧栏里的同一行，会话不切换。
         key("Return")
         time.sleep(0.8)
-        key("Escape")
+        esc()
         time.sleep(0.15)
         px, py, w, h = win_geom(wid)
         if not pane_has_header(header_crop_path(px, py, w, h)):
@@ -821,11 +929,31 @@ def open_chat(wid, name, expect=""):
     try:
         panel, box, crop = search_panel_image(px, py)
         group_y = _group_row_y(panel, box, crop, name)
+        if new_layout():
+            # 新版结果是陆续加载的:先出网络建议,群聊分区随后插到最上面,行位置会变。
+            # 连续两次算出同一行才算稳定。
+            for _ in range(4):
+                time.sleep(0.6)
+                panel, box, crop = search_panel_image(px, py)
+                again = _group_row_y(panel, box, crop, name)
+                if again and group_y and abs(again - group_y) <= 6:
+                    break
+                group_y = again
+            else:
+                group_y = None
     except Exception:
         group_y = None
     if not group_y:
         leave_search()
         print("ERR:wrong-chat"); sys.exit(3)
+    if new_layout():
+        # 新版单击结果行就直接打开会话并收起浮层;旧版的补双击会点到后面的列表。
+        click_search_hit(px, group_y - py, py, clicks=1)
+        time.sleep(0.8)
+        px, py, w, h = win_geom(wid)
+        if expect and not header_matches(header_text(px, py, w, h), expect):
+            print("ERR:wrong-chat"); sys.exit(3)
+        return px, py, w, h
     # 单击能选中群行（名字变绿），但回车打进搜索框，不打开会话。
     # 连续两次双击，第二下会落在浮层后面的列表上。先单击把浮层留住，
     # 停一下再双击，两下都打在这一行上。
@@ -951,7 +1079,12 @@ def open_and_scroll(name, rounds=6, expect=""):
 if __name__ == "__main__":
     kind = sys.argv[1] if len(sys.argv) > 1 else ""
     expect = sys.argv[4] if len(sys.argv) > 4 else ""
-    if kind == "justopen":
+    if kind == "leavesearch":     # 清掉残留搜索;新版不会把主窗口收进托盘
+        restore_main()
+        leave_search()
+        restore_main()
+        print("OK")
+    elif kind == "justopen":
         just_open(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "")
     elif kind == "open":
         open_and_scroll(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 6, expect)

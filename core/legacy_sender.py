@@ -125,11 +125,7 @@ class LegacySearchAdapter:
     @staticmethod
     def _leave_search_ui():
         try:
-            docker_wx._exec(
-                'bash', '-lc',
-                "DISPLAY=:0 xdotool search --name '^微信$' | tail -1 | "
-                "xargs -r -I{} sh -c 'xdotool windowactivate --sync {}; "
-                "xdotool key Escape Escape Escape'",
-                timeout=8)
+            # 交给脚本:新版微信焦点在主窗口时按 Esc 会把窗口收进托盘,脚本会按版本处理并恢复。
+            docker_wx._exec('python3', LegacySearchAdapter.script, 'leavesearch', timeout=15)
         except Exception:
             pass

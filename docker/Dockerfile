@@ -83,7 +83,7 @@ RUN set -eux; \
 
 # Live media capture is part of the image. SILK voice decoding is optional
 # because pilk may need architecture-specific build tooling.
-RUN pip3 install --break-system-packages --no-cache-dir frida==17.23.3 edge-tts dashscope
+RUN pip3 install --break-system-packages --no-cache-dir --ignore-installed typing_extensions frida==17.23.3 edge-tts dashscope pycryptodome
 # pilk(把音频编成微信 SILK,直发语音条用)是 C 扩展:临时装编译器,装完卸掉
 RUN apt-get update && apt-get install -y --no-install-recommends gcc python3-dev \
     && pip3 install --break-system-packages --no-cache-dir pilk \

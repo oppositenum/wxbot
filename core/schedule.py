@@ -465,6 +465,8 @@ def fire(t, occurrence=None, session=None):
             if occurrence.startswith('cron:'):
                 try:trigger_at=int(occurrence.split(':',1)[1])*60
                 except ValueError:pass
+            if t.get('kind') == 'call':
+                return _fire_call(t, jid, ledger, token)
             try:
                 text = _compute_text(dict(t,_trigger_at=trigger_at))
             except sessions.StaleAccount:raise
@@ -501,6 +503,42 @@ def fire(t, occurrence=None, session=None):
     except Exception as exc:
         # A committed child may have sent. Preserve conservative review state.
         return ledger.view(ledger.update(jid, 'uncertain', 'execution_exception_' + type(exc).__name__))
+
+
+def _fire_call(t, jid, ledger, token):
+    """到点打电话:后台拨号立刻返回;没接通 / 正在通话 → 按设置改发文字提醒。"""
+    from core import sender, voice_call
+    uname = t['target_username']
+    disp = t.get('target_display') or t.get('target')
+    purpose = (t.get('prompt') or t.get('title') or '').strip()
+    fallback = PREFIX + (purpose or t.get('title') or '提醒')
+
+    def send_fallback(why):
+        if not voice_call.load_settings().get('fallback_text', True):
+            return None
+        r = sender.send_text(disp, fallback, chat_username=uname,
+                             job_id=send_ledger.stable_id(jid, 'call_fallback'), session=token)
+        _log(f"电话没打通({why}),改发文字:{r.get('status')}")
+        if r.get('status') in ('confirmed', 'submitted'):
+            _record_fire(t, uname, fallback, True)
+        return r
+
+    def done(rec):
+        if not rec.get('connected'):
+            send_fallback(rec.get('result') or 'not_connected')
+        else:
+            _record_fire(t, uname, '📞 ' + purpose, True)
+
+    try:
+        voice_call.place_call(uname, display=disp, purpose=purpose, source='schedule', on_done=done)
+    except voice_call.CallError as e:
+        _log(f"定时电话没拨出:{e}")
+        r = send_fallback('busy')
+        if r is None:
+            return ledger.view(ledger.update(jid, 'not_sent', 'call_unavailable'))
+        return ledger.view(ledger.update(jid, r.get('status', 'uncertain'), 'call_fallback_' + r.get('reason', '')))
+    _log(f"定时电话已拨出 → {disp}:{purpose}")
+    return ledger.view(ledger.update(jid, 'submitted', 'call_started'))
 
 
 @sessions.task
@@ -576,11 +614,20 @@ def _new_id(tasks):
 
 def add_task(title, target, prompt, cron=None, once_at=None, mention=None,
              use_llm=False, persona=None, creator_wxid=None, creator_name=None,
-             kind="reminder", quiet=None):
-    """创建任务，自动解析目标/被@成员。返回 (task, error)。"""
+             kind="reminder", quiet=None, self_request=False):
+    """创建任务，自动解析目标/被@成员。返回 (task, error)。
+    kind=call:到点打语音电话(对方要在可拨打名单里;或开了「允许别人让我给他打电话」且是本人要求)。"""
     uname, is_group, disp = resolve_target(target)
     if not uname:
         return None, f"找不到会话/联系人：{target}"
+    if kind == "call":
+        from core import voice_call
+        vs = voice_call.load_settings()
+        if is_group:
+            return None, "电话只能打给个人，不能打给群"
+        own = bool(self_request and creator_wxid and creator_wxid == uname and vs.get("self_request"))
+        if not (voice_call.allowed(uname, vs) or own):
+            return None, f"「{disp}」不在可拨打名单里，没法定时打电话（控制台 → 语音通话 → 设置里加）"
     mention_wxid = mention_disp = None
     if is_group and mention:
         mention_wxid, mention_disp = resolve_member(uname, mention)
@@ -810,6 +857,7 @@ _NL_SYSTEM = """你把用户对"定时任务"的自然语言指令解析成 JSON
   "crons": ["多条cron"],  // 当一条cron表达不了(不同星期几用不同钟点)时,拆成多条放这里;单一时间点就用上面的cron、这里给空数组[]
   "once_at": "YYYY-MM-DD HH:MM (一次性任务的绝对时间)，周期性给空串",
   "prompt": "到点要做/要说的内容",
+  "call": true/false,                 // 用户要的是【打电话】提醒(「给我打电话提醒…」「打个电话叫我起床」「电话叫我」)=true;发消息提醒=false
   "use_llm": true/false,              // 内容需要AI临时生成(如"总结新闻""随便说点什么")=true; 固定话术(如"提醒交周报")=false
   "persona": "指定用谁的口吻/人设说(如指令提到'让角色甲说',填 角色甲;否则空串)",
   "cancel_match": "取消/删除/改时间时用来匹配已有任务的关键词(action=cancel|update时给)",
@@ -821,6 +869,7 @@ _NL_SYSTEM = """你把用户对"定时任务"的自然语言指令解析成 JSON
 - 上下文可能给出【最近触发的提醒】。用户对刚收到的提醒说"不用提醒了/别再提醒/取消这个"→action=cancel,cancel_match填该提醒对应的任务标题;说"改成六点/提前十分钟"这类改时间→action=update,cancel_match填任务标题,cron/once_at 填改后的新时间(基于原任务时间推算)。
 - 【保守】指代不明(最近提醒有多条不同任务、或根本没有最近提醒且没说清是哪条)时→action=ask,在 ask 里问清楚是哪条任务,绝不猜。
 - 用户问"刚才提醒了什么/最近提醒过什么"→action=fired。
+- 「打电话提醒」「打个电话叫我」这类:call=true,prompt 写成电话里要说的事(如"提醒吃药"),use_llm=false。
 - 文本开头可能有"@机器人自己"的前缀(如"@Giut.nik ..."),【忽略它】,它不是要提醒的对象。
 - 指令里明确写"@某人提醒..."的那个"某人"才是 mention(要@提醒的对象),原样照抄他的名字。
 - "每天9点"→cron "0 9 * * *"; "每周一10:30"→"30 10 * * 1"; "每小时"→"0 * * * *"; "每30分钟"→"*/30 * * * *"。
@@ -841,7 +890,7 @@ def parse_nl(text, extra=""):
     return json.loads(raw)
 
 
-_SCHED_VERB = re.compile(r"提醒|定时|闹钟|催我|叫我|通知我|找我|发我|跟我说|给我说|说点什么|唠")
+_SCHED_VERB = re.compile(r"提醒|定时|闹钟|催我|叫我|通知我|找我|发我|跟我说|给我说|说点什么|唠|打电话|打个电话|电话叫")
 _SCHED_TIME = re.compile(
     r"每[天周月日]|每隔|每小时|每分钟|每\d|明天|后天|今天|上午|下午|晚上|早上|凌晨|"
     r"周[一二三四五六日天]|礼拜|\d+\s*点|\d{1,2}:\d{2}|过\d+分|一分钟|半小时")
@@ -971,10 +1020,13 @@ def handle_nl(text, ctx=None):
     single = (d.get("cron") or "").strip()
     if single and single not in crons:
         crons.insert(0, single)
+    is_call = bool(d.get("call"))
     common = dict(
         title=d.get("title"), target=tgt, prompt=d.get("prompt"),
+        kind="call" if is_call else "reminder",
+        self_request=bool(ctx and ctx.get("requester_wxid")),
         once_at=(d.get("once_at") or "").strip() or None,
-        mention=mention, use_llm=bool(d.get("use_llm")),
+        mention=None if is_call else mention, use_llm=False if is_call else bool(d.get("use_llm")),
         persona=(d.get("persona") or "").strip() or None,
         creator_wxid=creator,
         creator_name=(ctx.get("requester_name") if ctx else None))
@@ -995,6 +1047,7 @@ def handle_nl(text, ctx=None):
     t, err = add_task(cron=(crons[0] if crons else None), **common)
     if err:
         return {"ok": False, "action": "create", "message": err, "parsed": d}
+    what = "到点给 " + t['target_display'] + " 打电话" if t.get("kind") == "call" else "→ " + t['target_display']
     return {"ok": True, "action": "create",
-            "message": f"已创建:「{t['title']}」→ {t['target_display']} "
+            "message": f"已创建:「{t['title']}」{what} "
                        f"({describe_schedule(t)}, 下次 {_next_hint(t)})", "task": t}

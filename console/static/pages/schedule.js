@@ -156,6 +156,7 @@
         if (t.persona) badges.push(`<span class="badge blue">人设 ${esc(t.persona)}</span>`);
       } else {
         if (t.is_group) badges.push(`<span class="badge">群${t.mention_display || t.mention ? ' · @' + esc(t.mention_display || t.mention) : ''}</span>`);
+        if (t.kind === 'call') badges.push('<span class="badge green">📞 打电话</span>');
         if (t.use_llm) badges.push(`<span class="badge blue">AI 生成${t.persona ? ' · ' + esc(t.persona) : ''}</span>`);
         if (t.creator_name) badges.push(`<span class="badge">由 ${esc(t.creator_name)} 设置</span>`);
       }

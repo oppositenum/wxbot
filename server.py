@@ -1206,6 +1206,87 @@ def api_webhooks_deliveries(hook_id):
     return jsonify({"ok": True, "deliveries": webhook.deliveries(hook_id)})
 
 
+# ---------------- AI 语音通话(实验) ----------------
+@app.get("/api/voicecall/status")
+def api_voicecall_status():
+    from core import voice_call
+    st = voice_call.status()
+    st.pop("last", None) if st.get("busy") else None
+    return jsonify({"ok": True, **st})
+
+
+@app.post("/api/voicecall/start")
+def api_voicecall_start():
+    from core import voice_call
+    d = request.get_json(force=True, silent=True) or {}
+    chat = str(d.get("chat") or "").strip()
+    if not chat:
+        return jsonify({"ok": False, "error": "选一个联系人"}), 400
+    try:
+        cid = voice_call.place_call(chat, display=str(d.get("name") or ""), purpose=str(d.get("purpose") or "")[:200],
+                                    source="console")
+    except voice_call.CallError as e:
+        return jsonify({"ok": False, "error": str(e)}), 409
+    return jsonify({"ok": True, "id": cid})
+
+
+@app.post("/api/voicecall/hangup")
+def api_voicecall_hangup():
+    from core import voice_call
+    return jsonify({"ok": voice_call.hangup()})
+
+
+@app.get("/api/voicecall/settings")
+def api_voicecall_settings_get():
+    from core import voice_call
+    s = voice_call.load_settings()
+    s.pop("vocabulary_id", None)
+    return jsonify({"ok": True, **s})
+
+
+@app.post("/api/voicecall/settings")
+def api_voicecall_settings_set():
+    from core import voice_call
+    d = request.get_json(force=True, silent=True) or {}
+    d = {k: v for k, v in d.items() if k in ("allow", "auto_answer", "self_request", "max_minutes",
+                                             "fallback_text", "precall_text")}
+    try:
+        s = voice_call.save_settings(d)
+    except (TypeError, ValueError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    s.pop("vocabulary_id", None)
+    return jsonify({"ok": True, **s})
+
+
+@app.get("/api/voicecall/history")
+def api_voicecall_history():
+    from core import voice_call
+    return jsonify({"ok": True, "calls": voice_call.history()})
+
+
+@app.get("/api/voicecall/history/<call_id>")
+def api_voicecall_events(call_id):
+    from core import voice_call
+    ev = voice_call.call_events(call_id)
+    if ev is None:
+        return jsonify({"ok": False, "error": "没有这通电话"}), 404
+    keep = ("persona", "prepared", "chat_open", "chat_open_failed", "precall_text", "dialed", "connected",
+            "connected_by_voice", "not_connected", "speak_opener", "turn", "rethink", "barge_in", "echo_ignored",
+            "fragment_ignored", "remote_hangup", "hangup_click", "call_end", "incoming", "answer_click",
+            "vocabulary", "vocabulary_error", "asr_error", "dial_retry", "dial_failed")
+    return jsonify({"ok": True, "events": [e for e in ev if e.get("kind") in keep]})
+
+
+@app.get("/api/voicecall/history/<call_id>/audio")
+def api_voicecall_audio(call_id):
+    from core import voice_call
+    rec = next((x for x in voice_call.history() if x.get("id") == call_id), None)
+    p = os.path.join(rec["dir"], "remote.wav") if rec else ""
+    if not p or not os.path.isfile(p):
+        return jsonify({"ok": False, "error": "没有录音"}), 404
+    return send_file(p, mimetype="audio/wav")
+
+
 @app.post("/api/bot/persona")
 def api_bot_persona():
     # Explicit migration is the sole new global role write path. The old UI must
@@ -1464,7 +1545,8 @@ def api_schedule_create():
         return jsonify({"ok": False, "message": f"cron 不合法:{cron}"}), 400
     t, err = schedule.add_task(d.get("title") or "", d.get("target") or "", d.get("prompt") or "",
                                cron=cron, once_at=once_at, mention=(d.get("mention") or "").strip() or None,
-                               use_llm=bool(d.get("use_llm")), persona=(d.get("persona") or "").strip() or None)
+                               use_llm=bool(d.get("use_llm")), persona=(d.get("persona") or "").strip() or None,
+                               kind="call" if d.get("kind") == "call" else "reminder")
     if err:
         return jsonify({"ok": False, "message": err}), 400
     if d.get("enabled") is False:
@@ -2222,6 +2304,11 @@ def main():
         schedule.start_loop()             # 定时任务调度线程随后台自启
     except Exception as e:  # noqa: BLE001
         print("定时任务调度自启失败:", e)
+    try:
+        from core import voice_call
+        voice_call.start_watcher()        # 自动接听(只在设置里打开时才截图检测)
+    except Exception as e:  # noqa: BLE001
+        print("来电检测自启失败:", e)
     try:
         _ensure_archiver()                # 图片高清存档线程随后台自启
     except Exception as e:  # noqa: BLE001

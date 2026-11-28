@@ -1,0 +1,46 @@
+# 微信 4.1.13 语音消息测试容器(独立账号、独立数据卷,不影响 wxbot-ubuntu-manual / wxbot-second)。
+# 镜像构建见 Dockerfile.wechat-upgrade。启动:
+#   docker compose -p wxbot-voice -f docker/ubuntu-manual/compose.voice.yaml up -d
+# noVNC: http://127.0.0.1:6085  后台: http://127.0.0.1:5104
+services:
+  ubuntu-wechat:
+    image: ${WXBOT_VOICE_IMAGE:-wxbot-ubuntu-manual:wechat-4.1.13}
+    container_name: wxbot-voice
+    init: true
+    restart: unless-stopped
+    hostname: ubuntu-pc-c
+    mac_address: 00:1b:21:5e:41:d3
+    shm_size: 1gb
+    security_opt:
+      - seccomp=unconfined
+    cap_add:
+      - SYS_PTRACE
+    env_file:
+      - ../../.env
+    environment:
+      DISPLAY: ":0"
+      SCREEN: 1920x1080x24
+      TZ: Asia/Shanghai
+      LANG: zh_CN.UTF-8
+      LANGUAGE: zh_CN:zh
+      LC_ALL: zh_CN.UTF-8
+      WXBOT_LOCAL: "1"
+      WXBOT_BIND: 0.0.0.0
+      WXBOT_XWECHAT_ROOT: /home/wechat/xwechat_files
+      WXBOT_LLM_CONFIG: /home/wechat/llm_config.json
+      WXBOT_BOT_AUTOSTART: "0"
+      WXBOT_MEDIA_CAPTURE: "0"
+      WXBOT_SELF_CONTAINER: wxbot-voice
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - 127.0.0.1:5104:5100
+      - 127.0.0.1:6085:6080
+      - 127.0.0.1:5905:5900
+    volumes:
+      - voice-home:/home/wechat
+      - ../../accounts:/app/accounts
+      - ../../output/ubuntu-manual-images:/home/wechat/Pictures
+
+volumes:
+  voice-home:
+    name: wxbot-voice-home

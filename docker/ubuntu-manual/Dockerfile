@@ -17,12 +17,16 @@ ENV DISPLAY=:0 \
     WXBOT_LLM_CONFIG=/home/wechat/llm_config.json \
     PYTHONUNBUFFERED=1
 
-# 直发"语音":Linux 版微信发不了语音条,音频用 ffmpeg 转成带声波画面的视频再发
+# 语音:ffmpeg 把音频转成声波视频;edge-tts 做免费的文字转语音
 USER root
-# 文字转语音用免费的 Edge 在线语音(edge-tts)
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg python3-pip \
+# 基础镜像里 python3.12 带 cap_sys_ptrace(让 wechat 用户的 Frida 能附加微信),
+# buildkit 构建沙箱不允许执行带额外 capability 的程序(Operation not permitted),
+# 所以装包期间先去掉,装完再恢复。
+RUN setcap -r /usr/bin/python3.12 \
+    && apt-get update && apt-get install -y --no-install-recommends ffmpeg python3-pip \
     && rm -rf /var/lib/apt/lists/* \
-    && python3 -m pip install --break-system-packages --no-cache-dir edge-tts
+    && python3 -m pip install --break-system-packages --no-cache-dir edge-tts \
+    && setcap cap_sys_ptrace=ep /usr/bin/python3.12
 
 COPY --chown=wechat:wechat config.py server.py /app/
 COPY --chown=wechat:wechat core/ /app/core/

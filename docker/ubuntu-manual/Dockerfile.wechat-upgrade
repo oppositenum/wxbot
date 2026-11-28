@@ -1,0 +1,23 @@
+# 在现有桌面镜像上覆盖安装新版微信 deb(不重下 Ubuntu 桌面底包)。
+#
+# 用法(构建上下文目录里只放 wechat.deb):
+#   mkdir -p /tmp/wx-deb && curl -L -o /tmp/wx-deb/wechat.deb \
+#     https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_arm64.deb
+#   docker build -f docker/ubuntu-manual/Dockerfile.wechat-upgrade \
+#     -t wxbot-wechat-base:4.1.13 /tmp/wx-deb
+# 然后用 docker/ubuntu-manual/Dockerfile 叠应用层:
+#   docker build -f docker/ubuntu-manual/Dockerfile \
+#     --build-arg WXBOT_BASE_IMAGE=wxbot-wechat-base:4.1.13 \
+#     -t wxbot-ubuntu-manual:wechat-4.1.13 .
+#
+# 注意:直发(core/direct_send)按微信二进制 sha256 适配,新版本未适配前会自动停用并回退界面发送。
+ARG WXBOT_BASE_IMAGE=wxbot-ubuntu-manual:24.04
+FROM ${WXBOT_BASE_IMAGE}
+
+USER root
+COPY wechat.deb /tmp/wechat.deb
+RUN apt-get update \
+    && (apt-get install -y --no-install-recommends /tmp/wechat.deb || apt-get -f install -y) \
+    && rm -f /tmp/wechat.deb && rm -rf /var/lib/apt/lists/* \
+    && dpkg-query -W -f='wechat ${Version}\n' wechat
+USER wechat

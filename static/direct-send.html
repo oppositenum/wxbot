@@ -70,7 +70,7 @@ button.primary{background:#23815a;color:#fff;border-color:#23815a}button:disable
     <div class="card tts" style="margin-top:18px">
       <h2>语音（文字转语音）</h2>
       <div class="sub muted" style="font-size:13px">把上面输入框里的文字用选定音色读出来再发出（Linux 版微信发不了语音条）。免费的微软在线语音。上传的音频文件也按下面的发送形式发。</div>
-      <div class="line"><label>发送形式 <select id="sendAs"><option value="video">声波视频（对方点开就播）</option><option value="file">mp3 文件（文件卡片，点开预览播放）</option></select></label></div>
+      <div class="line"><label>发送形式 <select id="sendAs"><option value="video">声波视频（对方点开就播）</option><option value="file">mp3 文件（文件卡片，点开预览播放）</option><option value="voice_bar">语音条（真正的语音消息，需微信 4.1.9+）</option></select></label></div>
       <div class="line"><select id="voice"></select><button type="button" id="ttsPlay">试听</button><button type="button" class="primary" id="ttsSend" disabled>发成语音</button><span id="ttsMsg"></span></div>
       <audio id="ttsAudio" controls style="display:none;width:100%;margin-top:8px"></audio>
       <details id="ttsEdit"><summary>编辑音色</summary>
@@ -155,7 +155,7 @@ function fmt(t){const d=new Date(t*1000);return d.toLocaleString('zh-CN',{hour12
 async function loadHistory(){
   const [r,d]=await j('/api/direct/history');
   const h=(r.ok&&d.history)||[];
-  $('#history').innerHTML=h.length?h.map(x=>`<div class="hist"><div class="meta"><span>${fmt(x.t)}</span>${x.source==='bot'?'<span class="bot">🤖 机器人</span>':''}<span>${esc(x.name||x.chat)}</span><span style="color:${x.ok?'#1d7a50':'#a33232'}">${x.ok?(x.kind==='revoke'?'✓ 已撤回':'✓ 已交给微信'):'✗ '+esc(x.error||'失败')}</span></div><div class="text">${x.kind==='image'?'🖼️ 图片 · ':x.kind==='video'?'🎬 视频 · ':x.kind==='file'?'📎 文件 · ':x.kind==='revoke'?'↩️ 撤回 · ':''}${esc(x.content)}</div></div>`).join(''):'<p class="empty">还没有记录</p>';
+  $('#history').innerHTML=h.length?h.map(x=>`<div class="hist"><div class="meta"><span>${fmt(x.t)}</span>${x.source==='bot'?'<span class="bot">🤖 机器人</span>':''}<span>${esc(x.name||x.chat)}</span><span style="color:${x.ok?'#1d7a50':'#a33232'}">${x.ok?(x.kind==='revoke'?'✓ 已撤回':'✓ 已交给微信'):'✗ '+esc(x.error||'失败')}</span></div><div class="text">${x.kind==='image'?'🖼️ 图片 · ':x.kind==='video'?'🎬 视频 · ':x.kind==='file'?'📎 文件 · ':x.kind==='voice_bar'?'🎙️ ':x.kind==='revoke'?'↩️ 撤回 · ':''}${esc(x.content)}</div></div>`).join(''):'<p class="empty">还没有记录</p>';
 }
 async function post(url,body){
   const opt={method:'POST'};

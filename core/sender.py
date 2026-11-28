@@ -318,6 +318,11 @@ def send_image(display_name, host_path, chat_username=None, retries=1, verify=Tr
     return _send(display_name, chat_username, 'image', host_path, **context)
 
 
+def send_voice_bar(display_name, wav_path, chat_username=None, **context):
+    """真语音条(微信 4.1.9+,界面录音):wav 由 core/voice_bar.py 准备。"""
+    return _send(display_name, chat_username, 'voice', wav_path, **context)
+
+
 def send_at(display_name, chat_username, member_wxid, member_display, text, retries=2, **context):
     return _send(display_name, chat_username, 'at',
                  {'member': member_wxid, 'display': member_display, 'text': text}, **context)

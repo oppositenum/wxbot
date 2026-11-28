@@ -35,7 +35,9 @@ PRESETS = {
     "female_tw": {"label": "台湾腔女声", "name": "zh-TW-HsiaoChenNeural", "rate": "-5%", "pitch": "+0Hz"},
 }
 DEFAULT_KEY = "warm_low"
-SEND_AS = ("video", "file")   # 语音发送形式:声波视频(点开就播) / mp3 文件(文件卡片,点开预览播放)
+# 语音发送形式:声波视频(点开就播) / mp3 文件(文件卡片,点开预览播放) /
+# 真语音条(微信 4.1.9+ 界面录音,见 core/voice_bar.py)
+SEND_AS = ("video", "file", "voice_bar")
 
 _lock = threading.Lock()
 _voices_cache = {"t": 0, "list": []}
@@ -89,7 +91,7 @@ def get_config():
 
 def set_send_as(mode):
     if mode not in SEND_AS:
-        raise TTSError("bad_param", "发送形式只能是 video(声波视频)或 file(mp3 文件)")
+        raise TTSError("bad_param", "发送形式只能是 video(声波视频)、file(mp3 文件)或 voice_bar(语音条)")
     with _lock:
         d = _read()
         d["send_as"] = mode

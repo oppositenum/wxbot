@@ -1045,6 +1045,67 @@ def send_image(name, path, expect=""):
     print("OK")
 
 
+def _is_green(px_rgb):
+    r, g, b = px_rgb[:3]
+    return g > 150 and r < 90 and b < 140
+
+
+def _recording_bar(px, py, w, h):
+    """「发语音」按下后,输入栏右侧是绿色圆形发送箭头。用它判断正在录音。"""
+    import uuid
+    path = f"/tmp/wx_voice_{uuid.uuid4().hex[:8]}.png"
+    x("scrot", "-o", path)
+    try:
+        from PIL import Image
+        im = Image.open(path).convert("RGB")
+    except Exception:
+        return False
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    cx, cy = px + w - 41, py + h - 37
+    hits = sum(1 for dx in range(-6, 7, 3) for dy in range(-6, 7, 3)
+               if 0 <= cx + dx < im.width and 0 <= cy + dy < im.height and _is_green(im.getpixel((cx + dx, cy + dy))))
+    return hits >= 12
+
+
+def _pulse_env():
+    return {"DISPLAY": DISPLAY, "PATH": "/usr/bin:/bin",
+            "XDG_RUNTIME_DIR": f"/tmp/runtime-{os.getuid()}"}
+
+
+def send_voice(name, path, expect=""):
+    """发真语音条(微信 4.1.9+):点输入栏右下「发语音」开始录,把音频播进虚拟麦克风 vmic,
+    播完点录音条右侧绿色箭头发送。录音条没出现或播放失败就点 ✕ 取消,一定不发。"""
+    if not new_layout():
+        print("ERR:voice-unsupported"); sys.exit(4)
+    px, py, w, h = activate_chat_window(name, expect)
+    if expect and not already_on_chat(px, py, w, h, expect):
+        print("ERR:wrong-chat"); sys.exit(3)
+    focus_input(px, py, w, h)
+    if expect and not already_on_chat(px, py, w, h, expect):
+        abort_if_composer_polluted()
+        print("ERR:wrong-chat"); sys.exit(3)
+    clear_input()        # 输入框有字时「发语音」按钮行为不同,先清空
+    x("xdotool", "mousemove", str(px + w - 98), str(py + h - 33), "click", "1")
+    time.sleep(0.7)
+    if not _recording_bar(px, py, w, h):
+        print("ERR:voice-ui"); sys.exit(3)
+    played = sp.run(["paplay", "-d", "vmic", path], env=_pulse_env(), capture_output=True, text=True)
+    time.sleep(0.4)
+    if played.returncode != 0 or not _recording_bar(px, py, w, h):
+        x("xdotool", "mousemove", str(px + w - 252), str(py + h - 37), "click", "1")   # ✕ 取消录音
+        time.sleep(0.3)
+        print("ERR:voice-play"); sys.exit(3)
+    x("xdotool", "mousemove", str(px + w - 41), str(py + h - 37), "click", "1")
+    time.sleep(0.8)
+    if _recording_bar(px, py, w, h):
+        print("ERR:voice-send-uncertain"); sys.exit(5)
+    print("OK")
+
+
 def just_open(name, expect=""):
     det = detached_chat_id(expect)
     if det:
@@ -1094,5 +1155,7 @@ if __name__ == "__main__":
         send_text(sys.argv[2], sys.argv[3], expect)
     elif kind == "image":
         send_image(sys.argv[2], sys.argv[3], expect)
+    elif kind == "voice":         # voice <搜索词> <wav 路径> <会话名>
+        send_voice(sys.argv[2], sys.argv[3], expect)
     else:
-        print("kind must be text|image|open|justopen"); sys.exit(1)
+        print("kind must be text|image|voice|open|justopen|leavesearch"); sys.exit(1)

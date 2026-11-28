@@ -67,12 +67,15 @@ class Legacy(Isolated):
         self.assertIn('dismiss_search', group_open)
         self.assertNotIn('click_search_hit(px, py,', group_open)
         self.assertIn('ERR:wrong-chat', group_open)
-        self.assertIn('key("Escape")', open_fn)
+        # Esc 统一走 esc():4.1.9+ 主窗口有焦点时 Esc 会收进托盘,esc() 会点托盘恢复
+        self.assertIn('esc()', open_fn)
+        self.assertNotIn('key("Escape")', open_fn)
         self.assertNotIn('px + w // 2', open_fn)
         self.assertNotIn('py + h // 2', open_fn)
         self.assertIn('clear_input()', send_fn)
         self.assertIn('already_on_chat', send_fn)
         self.assertNotIn('key("Escape")', send_fn)
+        self.assertNotIn('esc()', send_fn)
         id_open = open_fn[open_fn.index('if searched_by_wechat_id'):open_fn.index('# 群名')]
         self.assertIn('key("Return")', id_open)
         self.assertNotIn('click_search_hit', id_open)
@@ -160,7 +163,7 @@ class Legacy(Isolated):
         src = Path('docker/wx_send_legacy.py').read_text(encoding='utf-8')
         start = src.index('def _ocr_rows')
         end = src.index('\ndef search_shows_query')
-        ns = {'x': lambda *a, **k: SimpleNamespace(stdout='')}
+        ns = {'x': lambda *a, **k: SimpleNamespace(stdout=''), 'new_layout': lambda: False}
         exec(compile(src[start:end], 'group_row.py', 'exec'), ns)
         name = '南风闲话群'
         rows = [
@@ -192,7 +195,7 @@ class Legacy(Isolated):
         src = Path('docker/wx_send_legacy.py').read_text(encoding='utf-8')
         start = src.index('def _ocr_rows')
         end = src.index('\ndef search_shows_query')
-        ns = {'x': lambda *a, **k: SimpleNamespace(stdout='')}
+        ns = {'x': lambda *a, **k: SimpleNamespace(stdout=''), 'new_layout': lambda: False}
         exec(compile(src[start:end], 'group_row.py', 'exec'), ns)
         name = '南风闲话群'
         # 「群聊」被裁出画面。群在最上，下面是网络结果，再下面是单人头像的聊天记录。
@@ -216,7 +219,7 @@ class Legacy(Isolated):
         src = Path('docker/wx_send_legacy.py').read_text(encoding='utf-8')
         start = src.index('def _ocr_rows')
         end = src.index('\ndef search_shows_query')
-        ns = {'x': lambda *a, **k: SimpleNamespace(stdout='')}
+        ns = {'x': lambda *a, **k: SimpleNamespace(stdout=''), 'new_layout': lambda: False}
         exec(compile(src[start:end], 'group_row.py', 'exec'), ns)
         # 19:02 真实 OCR：「搜索网络结果」读成「网涅索络结果」，群名也被拆碎。
         rows = [(48, '群聊'), (88, '旨昌场'), (96, '南风闲话'),
@@ -235,7 +238,7 @@ class Legacy(Isolated):
         src = Path('docker/wx_send_legacy.py').read_text(encoding='utf-8')
         start = src.index('def _ocr_rows')
         end = src.index('\ndef search_shows_query')
-        ns = {'x': lambda *a, **k: SimpleNamespace(stdout='')}
+        ns = {'x': lambda *a, **k: SimpleNamespace(stdout=''), 'new_layout': lambda: False}
         exec(compile(src[start:end], 'group_row.py', 'exec'), ns)
         from PIL import Image
         panel = Image.new('RGB', (370, 200), (247, 247, 247))
@@ -247,7 +250,7 @@ class Legacy(Isolated):
         src = Path('docker/wx_send_legacy.py').read_text(encoding='utf-8')
         start = src.index('def _ocr_rows')
         end = src.index('\ndef search_shows_query')
-        ns = {'x': lambda *a, **k: SimpleNamespace(stdout='')}
+        ns = {'x': lambda *a, **k: SimpleNamespace(stdout=''), 'new_layout': lambda: False}
         exec(compile(src[start:end], 'group_row.py', 'exec'), ns)
         # 浮层只有群这一行。裁图继续往下，扫进了会话列表的公众号头像。
         panel = Image.new('RGB', (370, 600), (222, 222, 222))

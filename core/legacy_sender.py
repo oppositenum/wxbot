@@ -17,7 +17,7 @@ class LegacySearchAdapter:
     script = '/usr/local/bin/wx_send_legacy.py'
 
     def capability(self, chat, kind='text'):
-        return '' if kind in ('text', 'image') else 'legacy_payload_not_supported'
+        return '' if kind in ('text', 'image', 'voice') else 'legacy_payload_not_supported'
 
     def receipt(self, jid):
         return None
@@ -63,7 +63,7 @@ class LegacySearchAdapter:
                 from core.sender import search_key
                 query, locate = search_key(chat, display)
                 arg = payload
-                if kind == 'image':
+                if kind in ('image', 'voice'):
                     if not os.path.isfile(payload):
                         return ledger.view(ledger.update(jid, 'not_sent', 'file_unavailable'))
                     if not docker_wx.LOCAL:
@@ -86,7 +86,7 @@ class LegacySearchAdapter:
                     initiated = True
                     ui_started = time.monotonic()
                     result = docker_wx._exec('python3', self.script, kind, query, arg, locate,
-                                             timeout=40 if kind == 'text' else 60)
+                                             timeout=self._timeout(kind, payload))
                     reply_policy.timing('微信界面提交', ui_started)
                 if not sessions.valid(token):
                     return ledger.view(ledger.update(jid, 'uncertain', 'account_changed_after_initiation'))
@@ -107,6 +107,9 @@ class LegacySearchAdapter:
                 if err == 'ERR:wrong-chat':
                     self._leave_search_ui()
                     return ledger.view(ledger.update(jid, 'not_sent', 'legacy_wrong_chat'))
+                if err in ('ERR:voice-unsupported', 'ERR:voice-ui', 'ERR:voice-play'):
+                    # 录音条没出现或播放失败时脚本已点 ✕ 取消,语音一定没发出
+                    return ledger.view(ledger.update(jid, 'not_sent', 'legacy_' + err[4:].replace('-', '_')))
                 return ledger.view(ledger.update(jid, 'uncertain', 'legacy_ui_result_unknown'))
         except Exception as exc:
             status = 'uncertain' if initiated else 'not_sent'
@@ -121,6 +124,20 @@ class LegacySearchAdapter:
                 return dict(ok=False, status=status, reason=reason, job_id=jid, retryable=False)
         finally:
             docker_wx.release_priority()
+
+    @staticmethod
+    def _timeout(kind, payload):
+        if kind == 'text':
+            return 40
+        if kind == 'voice':
+            try:
+                import wave
+                with wave.open(payload, 'rb') as w:
+                    secs = w.getnframes() / float(w.getframerate() or 1)
+            except Exception:
+                secs = 60
+            return int(60 + secs)      # 打开会话 + 实时播放 + 发送
+        return 60
 
     @staticmethod
     def _leave_search_ui():

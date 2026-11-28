@@ -27,7 +27,15 @@ eval "$(dbus-launch --sh-syntax)"
 xset s off
 xset -dpms || true
 xfce4-session >"$STATE_DIR/desktop.log" 2>&1 &
+rm -f "$XDG_RUNTIME_DIR/pulse/pid"   # 镜像里残留的旧 pid 会让 pulseaudio 以为已在运行
 pulseaudio --start --exit-idle-time=-1 || true
+# 虚拟麦克风:往 vmic 播的声音会出现在默认输入 virtual_mic,用来发语音条(core/voice_bar.py)。
+for _ in 1 2 3 4 5; do pactl info >/dev/null 2>&1 && break; sleep 1; done
+if ! pactl list short sinks 2>/dev/null | grep -q "\bvmic\b"; then
+  pactl load-module module-null-sink sink_name=vmic sink_properties=device.description=VirtualMicFeed rate=48000 channels=1 >/dev/null 2>&1 || true
+  pactl load-module module-remap-source master=vmic.monitor source_name=virtual_mic source_properties=device.description=VirtualMic >/dev/null 2>&1 || true
+fi
+pactl set-default-source virtual_mic >/dev/null 2>&1 || true
 fcitx5 -d >"$STATE_DIR/input.log" 2>&1 || true
 
 VNC_ARGS=(-display "$DISPLAY" -forever -shared -noxdamage -rfbport 5900)

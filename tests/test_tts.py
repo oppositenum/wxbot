@@ -135,7 +135,7 @@ class SendAsTest(unittest.TestCase):
         tts.set_send_as("file")
         self.assertEqual(tts.get_config()["send_as"], "file")
         with self.assertRaises(tts.TTSError):
-            tts.set_send_as("voice_bar")
+            tts.set_send_as("voice_message")
 
     def test_send_tts_file_mode_uses_readable_name(self):
         from core import direct_send
@@ -161,3 +161,32 @@ class SendAsTest(unittest.TestCase):
             p = direct_send.stage_file(b"x", "../../etc/晚安.mp3")
         self.assertEqual(os.path.basename(p), "晚安.mp3")
         self.assertTrue(os.path.realpath(p).startswith(os.path.realpath(self.tmp.name)))
+
+
+class VoiceBarModeTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.p = patch("config.WORK_DIR", self.tmp.name)
+        self.p.start()
+
+    def tearDown(self):
+        self.p.stop()
+        self.tmp.cleanup()
+
+    def test_voice_bar_mode_routes_to_voice_bar(self):
+        from core import direct_send
+        tts.set_send_as("voice_bar")
+        with patch("core.voice_bar.send_tts", return_value={"status": "submitted", "seconds": 3.1}) as vb, \
+                patch("core.direct_send._record"):
+            row = direct_send.send_tts("wxid_a", "晚上好", "calm_deep", "小A")
+        vb.assert_called_once_with("wxid_a", "晚上好", "calm_deep", "小A")
+        self.assertTrue(row["ok"])
+        self.assertEqual(row["kind"], "voice_bar")
+
+    def test_voice_bar_not_sent_raises(self):
+        from core import direct_send
+        with patch("core.voice_bar.send_tts", return_value={"status": "not_sent", "reason": "legacy_voice_ui"}), \
+                patch("core.direct_send._record"):
+            with self.assertRaises(direct_send.DirectSendError) as cm:
+                direct_send.send_tts("wxid_a", "hi", send_as="voice_bar")
+        self.assertEqual(cm.exception.code, "legacy_voice_ui")

@@ -532,7 +532,9 @@ def send_tts(chat, text, voice=None, name="", source="manual", send_as=None):
     chat = _check_chat(chat)
     mode = send_as or tts.send_as()
     if mode not in tts.SEND_AS:
-        raise DirectSendError("bad_param", "send_as 只能是 video 或 file")
+        raise DirectSendError("bad_param", "send_as 只能是 video、file 或 voice_bar")
+    if mode == "voice_bar":
+        return _send_voice_bar(chat, text, voice, name, source)
     try:
         mp3 = tts.synth(text, voice)
         label = "语音(" + tts.get_voice(voice)["label"] + ") · " + " ".join(str(text).split())[:60]
@@ -576,3 +578,25 @@ def send_file(chat, path, name="", label="", source="manual"):
     row = {"t": int(time.time()), "kind": "file", "chat": chat, "name": name,
            "content": label or os.path.basename(path), "path": path, "size": size, "source": source}
     return _dispatch(row, lambda ex: ex.send_file(chat, path, size))
+
+
+def _send_voice_bar(chat, text, voice, name, source):
+    """真语音条走界面录音(core/voice_bar.py),不经过 Frida;结果也记进直发历史。"""
+    from core import tts, voice_bar
+    row = {"t": int(time.time()), "kind": "voice_bar", "chat": chat, "name": name, "source": source}
+    try:
+        row["content"] = "语音条(" + tts.get_voice(voice)["label"] + ") · " + " ".join(str(text).split())[:60]
+        res = voice_bar.send_tts(chat, text, voice, name)
+    except (voice_bar.VoiceBarError, tts.TTSError) as e:
+        row.update(ok=False, code=e.code, error=e.message)
+        _record(row)
+        raise DirectSendError(e.code if e.code in NOT_SENT_CODES else "voice_bar_failed", e.message)
+    ok = res.get("status") in ("submitted", "confirmed")
+    row.update(ok=ok, status=res.get("status"), seconds=res.get("seconds"),
+               message="已发出语音条" if ok else "",
+               **({} if ok else {"code": res.get("reason") or "voice_bar_failed",
+                                 "error": f"语音条没发出:{res.get('reason')}"}))
+    _record(row)
+    if not ok:
+        raise DirectSendError(row["code"], row["error"])
+    return row

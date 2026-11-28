@@ -43,7 +43,37 @@ services:
     volumes:
       - wxdata:/home/wechat          # 微信数据和登录态
       - appdata:/app/accounts        # 密钥、解密库、人设、规则和配置
+    networks: [wxbot-net]
+
+  # 控制台:一个入口管理所有微信(:5090)。第一个微信就是上面的 wxbot,
+  # 之后在控制台里「添加微信」会按同一个镜像再建 wxbot-acc1、wxbot-acc2…(各自独立的数据卷)。
+  console:
+    image: ${WXBOT_IMAGE:-wxbot-wechat:ubuntu-24.04}
+    container_name: wxbot-console
+    init: true
+    restart: unless-stopped
+    user: "0"                        # 要读写 docker.sock 才能创建/启停微信容器
+    cap_add: [SYS_PTRACE]            # 镜像里的 python 带 ptrace 能力位,没有这个启动不了
+    command: ["python3", "/app/console/server.py"]
+    environment:
+      WXBOT_UI_USER: ${WXBOT_UI_USER:?WXBOT_UI_USER must be set in .env}
+      WXBOT_UI_PASSWORD: ${WXBOT_UI_PASSWORD:?WXBOT_UI_PASSWORD must be set in .env}
+      WXBOT_SECRET: ${WXBOT_SECRET:?WXBOT_SECRET must be set in .env}
+      VNC_PASSWORD: ${VNC_PASSWORD:-}
+      WXBOT_ACCOUNT_IMAGE: ${WXBOT_IMAGE:-wxbot-wechat:ubuntu-24.04}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:5090:5090"   # 控制台(推荐入口)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - console-data:/data
+    networks: [wxbot-net]
 
 volumes:
   wxdata:
   appdata:
+  console-data:
+
+networks:
+  wxbot-net:
+    name: wxbot-net

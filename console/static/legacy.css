@@ -1,0 +1,14 @@
+/* 注入到还没重做的旧页面:去掉旧导航,统一字体/颜色/控件,让它们在新控制台里看起来协调 */
+.wxnav, .wxnav-toggle, .wxnav-scrim { display: none !important; }
+html, body { padding-left: 0 !important; margin-left: 0 !important; }
+body { background: #f4f5f7 !important; color: #1d2330;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif !important;
+  -webkit-font-smoothing: antialiased; }
+:root { --brand: #07c160; }
+button { border-radius: 8px !important; border: 1px solid #e3e6ec; background: #fff; cursor: pointer; padding: 6px 12px; transition: background .12s; }
+button:hover { background: #f6f7f9; }
+button.primary, button.btn-primary { background: #07c160 !important; border-color: #07c160 !important; color: #fff !important; }
+input, select, textarea { border: 1px solid #e3e6ec; border-radius: 8px; padding: 6px 10px; background: #fff; outline: none; }
+input:focus, select:focus, textarea:focus { border-color: #07c160; box-shadow: 0 0 0 3px rgba(7,193,96,.14); }
+.card, .panel, section.card { border-radius: 12px !important; border: 1px solid #e7e9ee !important; box-shadow: 0 1px 3px rgba(16,24,40,.06) !important; background: #fff; }
+h1 { font-size: 20px; font-weight: 600; } h2 { font-size: 16px; font-weight: 600; }

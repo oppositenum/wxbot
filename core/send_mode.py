@@ -31,6 +31,8 @@ def get():
     except (OSError, ValueError):
         data = {}
     out = dict(DEFAULT)
+    if os.environ.get("WXBOT_SEND_MODE") in MODES:      # 新容器的默认值(控制台创建的号默认直发)
+        out["mode"] = os.environ["WXBOT_SEND_MODE"]
     if data.get("mode") in MODES:
         out["mode"] = data["mode"]
     for k in FLAGS:

@@ -537,6 +537,20 @@ def poller():
 
 
 # ---------------- API ----------------
+@app.get("/api/me")
+def api_me():
+    """当前登录的微信是谁(控制台账号列表用):wxid、昵称、头像。未登录时 wxid 为空。"""
+    me = config.wxid() or ""
+    info = {}
+    if me:
+        try:
+            info = contacts.all_names().get(me) or {}
+        except Exception:  # noqa: BLE001 库还没解密好
+            info = {}
+    return jsonify({"wxid": me, "name": info.get("name") or "", "head_url": info.get("head_url") or "",
+                    "container": os.environ.get("WXBOT_SELF_CONTAINER", "")})
+
+
 @app.get("/api/status")
 def api_status():
     keys_ready = False

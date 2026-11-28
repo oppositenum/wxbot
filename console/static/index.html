@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>wxbot 控制台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%2307c160'/%3E%3Ctext x='16' y='22' font-size='17' text-anchor='middle' fill='white' font-family='Arial' font-weight='700'%3Ew%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+<div class="app" id="app">
+  <aside class="side">
+    <div class="brand"><div class="brand-logo">w</div><div><b>wxbot</b><small>微信机器人控制台</small></div></div>
+    <div class="side-scroll">
+      <a class="acct" href="#/" id="navHome"><div class="avatar sm" style="background:var(--brand-50);color:var(--brand-d)">⌂</div><div class="grow"><div class="name">总览</div><div class="sub">所有微信的状态</div></div></a>
+      <div class="side-title"><span>微信账号</span><button id="addBtn" title="添加微信">＋ 添加</button></div>
+      <div id="acctList"></div>
+    </div>
+    <div class="side-foot"><span class="dot green"></span><span class="grow muted" id="whoami">已登录</span><button class="btn ghost sm" id="logoutBtn">退出</button></div>
+  </aside>
+  <div class="main">
+    <header class="topbar">
+      <button class="btn ghost sm menu-btn" id="menuBtn">☰</button>
+      <div class="grow row" id="topTitle"></div>
+      <div class="row" id="topActions"></div>
+    </header>
+    <main class="content" id="view"></main>
+  </div>
+</div>
+<div class="toasts" id="toasts"></div>
+<script src="/ui/app.js"></script>
+</body>
+</html>

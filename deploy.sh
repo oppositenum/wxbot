@@ -118,7 +118,7 @@ if [[ "$ready" != "1" ]]; then
   die "backend did not become ready within 120 seconds"
 fi
 
-echo "[deploy] ready: http://127.0.0.1:5100"
-echo "[deploy] management login is WXBOT_UI_USER / WXBOT_UI_PASSWORD in $ROOT_DIR/.env"
-echo "[deploy] first WeChat scan: http://127.0.0.1:6080/vnc.html"
-echo "[deploy] VNC password is VNC_PASSWORD in $ROOT_DIR/.env"
+echo "[deploy] ready. 控制台(推荐,所有微信一个入口): http://127.0.0.1:5090"
+echo "[deploy] 登录账号密码是 $ROOT_DIR/.env 里的 WXBOT_UI_USER / WXBOT_UI_PASSWORD"
+echo "[deploy] 在控制台里选第一个微信 →「扫码与桌面」扫码,之后可以「添加微信」再加更多"
+echo "[deploy] (旧入口仍可用:后台 http://127.0.0.1:5100,扫码 http://127.0.0.1:6080/vnc.html,VNC 密码 VNC_PASSWORD)"

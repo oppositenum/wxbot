@@ -1,0 +1,33 @@
+# 本机控制台(已经有 wxbot-ubuntu-manual / wxbot-second 这类旧容器时用;新部署直接用根目录 docker-compose.yml)。
+#   docker compose -p wxbot-console -f docker/console/compose.yaml up -d
+# 打开 http://127.0.0.1:5090,账号密码同 .env 的 WXBOT_UI_USER / WXBOT_UI_PASSWORD。
+# 启动时自动纳入已有的 wxbot* 微信容器(不重建、不改动,只把它们接入 wxbot-net 网络)。
+services:
+  console:
+    image: ${WXBOT_CONSOLE_IMAGE:-wxbot-wechat:4.1.13}
+    container_name: wxbot-console
+    init: true
+    restart: unless-stopped
+    user: "0"
+    cap_add: [SYS_PTRACE]
+    command: ["python3", "/app/console/server.py"]
+    env_file:
+      - ../../.env
+    environment:
+      # 新建的微信用这个镜像(从零构建、锁定微信 4.1.13.29)
+      WXBOT_ACCOUNT_IMAGE: ${WXBOT_ACCOUNT_IMAGE:-wxbot-wechat:4.1.13}
+      TZ: Asia/Shanghai
+    ports:
+      - 127.0.0.1:5090:5090
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - console-data:/data
+    networks: [wxbot-net]
+
+volumes:
+  console-data:
+    name: wxbot-console-data
+
+networks:
+  wxbot-net:
+    name: wxbot-net

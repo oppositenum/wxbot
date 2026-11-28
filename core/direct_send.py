@@ -31,7 +31,7 @@ WAIT_SECONDS = 8.0
 NOT_SENT_CODES = frozenset({
     "no_frida", "no_wechat", "unsupported", "not_running", "attach_failed", "agent_error",
     "not_logged_in", "request_mismatch", "bad_chat", "empty", "too_long", "no_file",
-    "bad_image", "bad_video", "bad_audio", "no_ffmpeg", "convert_failed", "too_large", "step_failed",
+    "bad_image", "bad_video", "bad_audio", "no_ffmpeg", "convert_failed", "tts_failed", "too_large", "step_failed",
     "not_found", "not_mine", "not_sent_ok", "too_old", "already_revoked",
 })
 
@@ -514,3 +514,15 @@ def revoke(chat, local_id=None, name="", source="manual"):
            "content": msg["content"][:100] or f"[类型{msg['type']}]", "local_id": msg["localId"],
            "source": source}
     return _dispatch(row, lambda ex: ex.revoke(msg), wait=20.0)
+
+
+def send_tts(chat, text, voice=None, name="", source="manual"):
+    """文字 → 配置的音色合成 mp3 → 声波视频发出。voice=音色 key,空=默认音色。"""
+    from core import tts
+    chat = _check_chat(chat)
+    try:
+        mp3 = tts.synth(text, voice)
+        label = "语音(" + tts.get_voice(voice)["label"] + ") · " + " ".join(str(text).split())[:60]
+    except tts.TTSError as e:
+        raise DirectSendError(e.code if e.code in ("empty", "too_long") else "tts_failed", e.message)
+    return send_voice(chat, mp3, name, label, source)

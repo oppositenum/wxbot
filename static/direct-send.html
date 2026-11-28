@@ -30,6 +30,11 @@ button.primary{background:#23815a;color:#fff;border-color:#23815a}button:disable
 .mode label.opt{flex:1;min-width:220px;border:1px solid #d6e2db;border-radius:12px;padding:10px 12px;cursor:pointer;background:#fff}
 .mode label.opt.on{border-color:#23815a;background:#eef8f2}.mode label.opt b{display:block}
 .mode .sub{font-size:13px;color:#718078}.bot{font-size:12px;border-radius:20px;padding:1px 7px;background:#f3ecfb;color:#6a3fa0}
+.tts .line{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px}
+.tts select,.tts input.small{padding:8px 10px;border:1px solid #bfd0c6;border-radius:9px;font:14px system-ui;background:#fff;width:auto}
+.tts label{font-size:13px;color:#55635b;display:flex;gap:6px;align-items:center}
+.tts details{margin-top:12px;border-top:1px solid #eef2ef;padding-top:8px}.tts summary{cursor:pointer;color:#23815a}
+#ttsMsg.ok{color:#1d7a50}#ttsMsg.bad{color:#a33232}#ttsMsg{font-size:13px}
 .preview{display:none;align-items:center;gap:10px;margin-top:10px;padding:8px;border:1px dashed #bfd0c6;border-radius:10px}
 .preview img{max-width:120px;max-height:90px;border-radius:6px}.preview .fn{flex:1;min-width:0;font-size:13px;color:#55635b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @media(max-width:820px){main{padding:18px 12px}.grid{grid-template-columns:1fr}#list{max-height:40vh}}
@@ -62,6 +67,20 @@ button.primary{background:#23815a;color:#fff;border-color:#23815a}button:disable
       <div class="preview" id="preview"><img id="pimg" alt=""><span class="fn" id="pname"></span><button type="button" id="premove">移除</button></div>
       <div class="actions"><button class="primary" id="send" disabled>发送</button><button type="button" id="pick" title="音频会转成带声波画面的视频发出(Linux 版微信发不了语音条)">选择图片/视频/音频</button><button type="button" id="revoke" disabled title="撤回我在这个会话里最近发的一条(2 分钟内)">撤回上一条</button><input type="file" id="file" accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/quicktime,audio/*,.mp3,.m4a,.wav,.ogg,.flac,.amr" hidden><span id="result"></span></div>
     </div>
+    <div class="card tts" style="margin-top:18px">
+      <h2>语音（文字转语音）</h2>
+      <div class="sub muted" style="font-size:13px">把上面输入框里的文字用选定音色读出来，转成带声波画面的视频发出（Linux 版微信发不了语音条）。免费的微软在线语音。</div>
+      <div class="line"><select id="voice"></select><button type="button" id="ttsPlay">试听</button><button type="button" class="primary" id="ttsSend" disabled>发成语音</button><span id="ttsMsg"></span></div>
+      <audio id="ttsAudio" controls style="display:none;width:100%;margin-top:8px"></audio>
+      <details id="ttsEdit"><summary>编辑音色</summary>
+        <div class="line"><label>显示名 <input class="small" id="vLabel" maxlength="30" style="width:150px"></label>
+          <label>微软音色 <select id="vName"></select></label></div>
+        <div class="line"><label>语速 <input type="range" id="vRate" min="-50" max="50" step="1"><span id="vRateT"></span></label>
+          <label>音调 <input type="range" id="vPitch" min="-50" max="50" step="1"><span id="vPitchT"></span></label></div>
+        <div class="line"><button type="button" id="vSave">保存</button><button type="button" id="vDefault">设为默认</button><button type="button" id="vDel">删除/恢复预设</button>
+          <span style="flex:1"></span><input class="small" id="vNewKey" placeholder="新音色 key，如 my_voice" style="width:190px"><button type="button" id="vNew">新增</button></div>
+      </details>
+    </div>
     <div class="card" style="margin-top:18px">
       <h2>发送记录</h2>
       <div id="history"><p class="empty">还没有记录</p></div>
@@ -86,7 +105,29 @@ async function loadStatus(){
   $('#status').innerHTML=p.join('');
   ready=!!(d.attached&&d.logged_in);upd();
 }
-function upd(){$('#send').disabled=!(ready&&sel&&!sending&&($('#content').value.trim()||image));$('#revoke').disabled=!(ready&&sel&&!sending);}
+let tts={default:'',voices:[],edge_voices:[]};
+function curVoice(){return tts.voices.find(v=>v.key===$('#voice').value)||tts.voices[0];}
+function ttsMsg(t,c){$('#ttsMsg').className=c||'';$('#ttsMsg').textContent=t||'';}
+function fillVoice(){
+  const v=curVoice(); if(!v)return;
+  $('#vLabel').value=v.label;
+  const names=tts.edge_voices.length?tts.edge_voices:[{name:v.name,gender:'',tags:''}];
+  if(!names.some(x=>x.name===v.name))names.unshift({name:v.name,gender:'',tags:''});
+  $('#vName').innerHTML=names.map(x=>`<option value="${esc(x.name)}">${esc(x.name)}${x.gender?' · '+(x.gender==='Male'?'男':'女'):''}${x.tags?' · '+esc(x.tags):''}</option>`).join('');
+  $('#vName').value=v.name;
+  $('#vRate').value=parseInt(v.rate)||0;$('#vPitch').value=parseInt(v.pitch)||0;showRP();
+  $('#vDel').textContent=v.builtin?'恢复预设':'删除';$('#vDel').disabled=v.builtin&&!v.changed;
+}
+function showRP(){const r=+$('#vRate').value,p=+$('#vPitch').value;$('#vRateT').textContent=(r>=0?'+':'')+r+'%';$('#vPitchT').textContent=(p>=0?'+':'')+p+'Hz';}
+function editFields(){const r=+$('#vRate').value,p=+$('#vPitch').value;return {label:$('#vLabel').value.trim(),name:$('#vName').value,rate:(r>=0?'+':'')+r+'%',pitch:(p>=0?'+':'')+p+'Hz'};}
+function drawVoices(keep){
+  const k=keep||$('#voice').value||tts.default;
+  $('#voice').innerHTML=tts.voices.map(v=>`<option value="${esc(v.key)}">${esc(v.label)}${v.key===tts.default?'（默认）':''}</option>`).join('');
+  $('#voice').value=tts.voices.some(v=>v.key===k)?k:tts.default; fillVoice();
+}
+async function loadTTS(keep){const [r,d]=await j('/api/tts/config');if(r.ok){tts=d;drawVoices(keep);if(d.edge_error)ttsMsg('取微软音色列表失败：'+d.edge_error,'bad');}}
+async function ttsCfg(body,keep){const [r,d]=await j('/api/tts/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});if(!r.ok||!d.ok){ttsMsg('✗ '+(d.error||'保存失败'),'bad');return;}tts=Object.assign(tts,d);drawVoices(keep);ttsMsg('✓ 已保存','ok');}
+function upd(){$('#send').disabled=!(ready&&sel&&!sending&&($('#content').value.trim()||image));$('#revoke').disabled=!(ready&&sel&&!sending);$('#ttsSend').disabled=!(ready&&sel&&!sending&&$('#content').value.trim());}
 function setImage(f){
   const vid=!!f&&/^video\/(mp4|quicktime)$/.test(f.type);
   const aud=!!f&&(/^audio\//.test(f.type)||/\.(mp3|m4a|wav|ogg|flac|amr)$/i.test(f.name||''));
@@ -141,6 +182,25 @@ async function doSend(){
   sending=false;upd();loadHistory();loadStatus();
 }
 $('#pick').onclick=()=>$('#file').click();
+$('#voice').onchange=fillVoice;$('#vRate').oninput=showRP;$('#vPitch').oninput=showRP;
+$('#ttsPlay').onclick=async()=>{
+  const text=$('#content').value.trim()||'你好，这是试听。今天过得怎么样？';
+  ttsMsg('合成中…');const f=$('#ttsEdit').open?editFields():{};
+  const r=await fetch('/api/tts/preview',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({text,voice:$('#voice').value,rate:f.rate,pitch:f.pitch})});
+  if(!r.ok){let d={};try{d=await r.json();}catch(e){}ttsMsg('✗ '+(d.error||'试听失败'),'bad');return;}
+  const a=$('#ttsAudio');if(a.src)URL.revokeObjectURL(a.src);a.src=URL.createObjectURL(await r.blob());a.style.display='block';a.play();ttsMsg('');
+};
+$('#ttsSend').onclick=async()=>{
+  if($('#ttsSend').disabled)return;const target=sel,text=$('#content').value.trim();
+  sending=true;upd();ttsMsg('合成并发送中…');
+  try{await post('/api/direct/send_tts',{chat:target.chat,name:target.to,text,voice:$('#voice').value});ttsMsg('✓ 语音已交给微信发送','ok');$('#content').value='';}
+  catch(e){ttsMsg('✗ '+(e.message||'发送失败'),'bad');}
+  sending=false;upd();loadHistory();
+};
+$('#vSave').onclick=()=>ttsCfg({voice:Object.assign({key:$('#voice').value},editFields())});
+$('#vDefault').onclick=()=>ttsCfg({default:$('#voice').value});
+$('#vDel').onclick=()=>{const v=curVoice();if(confirm(v.builtin?'恢复「'+v.label+'」的预设参数？':'删除音色「'+v.label+'」？'))ttsCfg({delete:v.key},v.builtin?v.key:'');};
+$('#vNew').onclick=()=>{const k=$('#vNewKey').value.trim();if(!k){ttsMsg('先填新音色 key','bad');return;}const f=editFields();f.label=f.label+'（新）';ttsCfg({voice:Object.assign({key:k},f)},k);$('#vNewKey').value='';};
 $('#revoke').onclick=async()=>{
   if($('#revoke').disabled)return;
   const target=sel;
@@ -186,6 +246,6 @@ async function saveMode(body){
 }
 document.querySelectorAll('input[name=mode]').forEach(x=>x.onchange=()=>saveMode({mode:x.value}));
 $('#fallback').onchange=e=>saveMode({fallback:e.target.checked});
-loadMode();loadStatus();loadHistory();setInterval(loadStatus,15000);setInterval(loadHistory,15000);
+loadMode();loadStatus();loadHistory();loadTTS();setInterval(loadStatus,15000);setInterval(loadHistory,15000);
 </script>
 <script src="/static/nav.js"></script></html>

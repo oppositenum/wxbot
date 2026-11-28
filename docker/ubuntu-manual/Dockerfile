@@ -19,8 +19,10 @@ ENV DISPLAY=:0 \
 
 # 直发"语音":Linux 版微信发不了语音条,音频用 ffmpeg 转成带声波画面的视频再发
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+# 文字转语音用免费的 Edge 在线语音(edge-tts)
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg python3-pip \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m pip install --break-system-packages --no-cache-dir edge-tts
 
 COPY --chown=wechat:wechat config.py server.py /app/
 COPY --chown=wechat:wechat core/ /app/core/

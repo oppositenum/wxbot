@@ -73,7 +73,7 @@ def _ui_activity_request():
 
 _API_TOKEN_PATHS = frozenset({
     "/api/send", "/api/send/status", "/api/upload",
-    "/api/bot/push", "/api/bot/push/test", "/api/direct/revoke",
+    "/api/bot/push", "/api/bot/push/test", "/api/direct/revoke", "/api/direct/send_tts",
 })
 
 
@@ -1582,6 +1582,71 @@ def api_direct_send_image():
             row = direct_send.send_image(chat, path, name, label)
         else:
             row = direct_send.send_media(chat, path, name, label)
+    except direct_send.DirectSendError as e:
+        return jsonify(ok=False, code=e.code, error=e.message), 409
+    return jsonify(row)
+
+
+@app.get("/api/tts/config")
+def api_tts_config():
+    """音色配置 + 微软在线可用的中文音色(下拉框用;取不到时 edge_voices 为空并带 edge_error)。"""
+    from core import tts
+    out = tts.get_config()
+    try:
+        out["edge_voices"] = tts.list_edge_voices()
+    except tts.TTSError as e:
+        out.update(edge_voices=[], edge_error=e.message)
+    return jsonify(out)
+
+
+@app.post("/api/tts/config")
+def api_tts_config_set():
+    """JSON:{voice:{key,label,name,rate,pitch,volume}} 新增/修改;{delete:key} 删除或恢复预设;{default:key}。"""
+    from core import tts
+    data = request.get_json(silent=True) or {}
+    try:
+        if data.get("voice"):
+            v = data["voice"]
+            out = tts.save_voice(v.get("key"), v)
+        elif data.get("delete"):
+            out = tts.delete_voice(str(data["delete"]))
+        else:
+            out = tts.get_config()
+        if data.get("default"):
+            out = tts.set_default(str(data["default"]))
+    except tts.TTSError as e:
+        return jsonify(ok=False, code=e.code, error=e.message), 400
+    return jsonify(dict(out, ok=True))
+
+
+@app.post("/api/tts/preview")
+def api_tts_preview():
+    """试听:返回 mp3。JSON:text, voice, 可选 rate/pitch/volume 临时覆盖(不保存)。"""
+    from core import tts
+    data = request.get_json(silent=True) or {}
+    try:
+        path = tts.synth(data.get("text") or "你好，这是试听。", data.get("voice"), data.get("rate"),
+                         data.get("pitch"), data.get("volume"),
+                         out_dir=os.path.join(config.WORK_DIR, "tts_preview"))
+    except tts.TTSError as e:
+        return jsonify(ok=False, code=e.code, error=e.message), 400
+    with open(path, "rb") as f:
+        body = f.read()
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return app.response_class(body, mimetype="audio/mpeg")
+
+
+@app.post("/api/direct/send_tts")
+def api_direct_send_tts():
+    """文字转语音后以声波视频直发。JSON:chat, text, voice(音色 key,可空=默认), name。"""
+    from core import direct_send
+    data = request.get_json(silent=True) or {}
+    try:
+        row = direct_send.send_tts(data.get("chat"), data.get("text"), data.get("voice") or None,
+                                   data.get("name") or "", source=data.get("source") or "manual")
     except direct_send.DirectSendError as e:
         return jsonify(ok=False, code=e.code, error=e.message), 409
     return jsonify(row)

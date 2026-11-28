@@ -2,7 +2,7 @@
 
 后台地址默认为 `http://127.0.0.1:5100`。接口支持向好友或群发送文字、图片。
 
-本机调用带请求头 `X-Wxbot-Token: $WXBOT_API_TOKEN`，或在 JSON 里加 `"token": "$WXBOT_API_TOKEN"`，不必先登录网页。这个凭据只放行 `/api/send`、`/api/send/status`、`/api/upload`、`/api/bot/push`、`/api/bot/push/test` 和 `/api/direct/revoke`。其余后台接口仍要网页登录。未设置 `WXBOT_API_TOKEN` 时，请求头和 body 里的 token 都无效。
+本机调用带请求头 `X-Wxbot-Token: $WXBOT_API_TOKEN`，或在 JSON 里加 `"token": "$WXBOT_API_TOKEN"`，不必先登录网页。这个凭据只放行 `/api/send`、`/api/send/status`、`/api/upload`、`/api/bot/push`、`/api/bot/push/test`、`/api/direct/revoke` 和 `/api/direct/send_tts`。其余后台接口仍要网页登录。未设置 `WXBOT_API_TOKEN` 时，请求头和 body 里的 token 都无效。
 
 ## 发送文字或图片
 
@@ -84,6 +84,19 @@ curl -X POST http://127.0.0.1:5100/api/send \
 - 只能撤自己发的、2 分钟内的消息；文件传输助手不支持撤回。
 - 成功返回 HTTP 200 和 `{"ok":true,"kind":"revoke","local_id":…,"message":"已撤回"}`。
 - 失败返回 HTTP 409，`code` 可能是 `too_old`（超过 2 分钟）、`not_mine`（不是自己发的）、`already_revoked`、`not_found`（库里还没有这条，稍后再试）、`revoke_failed`（微信拒绝）、`unsupported`（微信版本未适配）。
+
+## 文字转语音
+
+`POST /api/direct/send_tts` 把文字用配置好的音色读出来，转成带声波画面的视频直发（Linux 版微信发不了语音条）：
+
+```json
+{"token":"…","chat":"wxid_xxx","text":"晚上好，早点休息。","voice":"calm_deep"}
+```
+
+- `voice` 是音色 key，省略时用默认音色。文字最多 500 字。
+- 语音来自免费的 Microsoft Edge 在线语音（edge-tts），容器要能上网。
+- 内置音色：`warm_low` 温柔低语(男，默认)、`calm_deep` 沉稳克制(男)、`magnetic` 磁性低音(男)、`sunny` 阳光少年(男)、`boyish` 少年感(男)、`cantonese` 粤语(男)、`female_warm` 温暖女声、`female_lively` 活泼女声、`female_tw` 台湾腔女声。
+- 音色在直发页「语音（文字转语音）」里试听和编辑：可改语速、音调、换微软音色、新增自定义音色、设默认。配置存在 `work/tts.json`。后台接口 `GET/POST /api/tts/config`、`POST /api/tts/preview`（返回 mp3）需要网页登录。
 
 ## 错误
 

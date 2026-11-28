@@ -19,7 +19,8 @@ const OFF = {
   makeReq: 0x39deee4,      // make_shared<文字Req>(vt 0x7e1b790),块 0x18+0x410,对象在 blk+0x18
   makeImgReq: 0x39dee1c,   // make_shared<图片Req>(vt 0x7e07a18),块 0x18+0x450
   videoCtor: 0x40f95f8,    // 视频Req 构造(vt 0x7e8bfb8,对象 0x410);微信自己是内联 make_shared,见 0x4225c84
-  videoBlkVtGot: 0x80e5430, // 视频 make_shared 控制块 vtable 组所在 GOT 槽,块头 = *GOT + 0x10
+  videoBlkVtGot: 0x80e5430,
+  makeFileReq: 0x40f97dc,  // make_shared<文件Req>(vt 0x7e07948),块 0x18+0x3e0;工厂里随后写 +0x94/+0x98 = 49/6(appmsg 文件) // 视频 make_shared 控制块 vtable 组所在 GOT 槽,块头 = *GOT + 0x10
   revokeSvc: 0x4bbe8bc,    // 撤回服务定位第3步(前两步同 svcA/svcB),x8 返回 shared_ptr
   revokeSvcVt: 0x7f4b030,
   revoke: 0x5081554,
@@ -105,6 +106,7 @@ const opNew = new NativeFunction(B.add(OFF.opNew), 'pointer', ['size_t']);
 const makeReq = new NativeFunction(B.add(OFF.makeReq), 'void', ['pointer']);
 const makeImgReq = new NativeFunction(B.add(OFF.makeImgReq), 'void', ['pointer']);
 const videoCtor = new NativeFunction(B.add(OFF.videoCtor), 'void', ['pointer']);
+const makeFileReq = new NativeFunction(B.add(OFF.makeFileReq), 'void', ['pointer']);
 const memsetZero = (p, n) => { for (let o = 0; o < n; o += 8) p.add(o).writeU64(0); };
 const strAssign = new NativeFunction(B.add(OFF.strAssign), 'pointer', ['pointer', 'pointer']);
 
@@ -144,6 +146,7 @@ const KINDS = {
   text: { type: 1, field: 0x3e0 },
   image: { type: 3, field: 0xa0 },
   video: { type: 43, field: 0xa0 },
+  file: { type: 49, field: 0xa0 },  // appmsg,子类型 +0x98=6
 };
 function newReq(kind) {
   if (kind === 'video') {  // 照抄微信工厂 0x4225c84 里的内联 make_shared
@@ -152,6 +155,12 @@ function newReq(kind) {
     blk.add(8).writeU64(0); blk.add(16).writeU64(0);
     memsetZero(blk.add(0x18), 0x410);
     videoCtor(blk.add(0x18));
+    return blk;
+  }
+  if (kind === 'file') {  // 构造函数不清零,先自己清
+    const blk = opNew(0x3f8);
+    memsetZero(blk, 0x3f8);
+    makeFileReq(blk);
     return blk;
   }
   const blk = opNew(kind === 'image' ? 0x468 : 0x428);
@@ -167,6 +176,7 @@ function build(kind, to, payload, size) {
   strAssign(obj.add(k.field), longStr(payload, keep));
   obj.add(0x6c).writeU32(1); obj.add(0x70).writeU32(7);
   obj.add(0x94).writeU32(k.type);
+  if (kind === 'file') obj.add(0x98).writeU32(6);
   obj.add(0xe8).writeU32(kind === 'text' ? utf8len(payload) : size);
   if (kind === 'video') obj.add(0x3e0).writeU8(1);
   if (readStr(obj.add(0x78)) !== to || readStr(obj.add(k.field)) !== payload) return null;
@@ -228,6 +238,7 @@ rpc.exports = {
   send(to, content) { return sendKind('text', to, content, 0); },
   sendImage(to, path, size) { return sendKind('image', to, path, size); },
   sendVideo(to, path, size) { return sendKind('video', to, path, size); },
+  sendFile(to, path, size) { return sendKind('file', to, path, size); },
   // r = {type, sender, chat, localId, serverId(十进制字符串), sortSeq(字符串), createTime, status, content, source}
   revoke(r) {
     const ex = executor();
@@ -244,7 +255,7 @@ rpc.exports = {
   dryBuild(kind, to, path, size) {
     const r = build(kind, to, path, size); if (!r) return null;
     hold(r.keep, r.blk);
-    return { vt: r.obj.readPointer().sub(B).toString(16), hex: Array.from(new Uint8Array(r.obj.readByteArray(0x410))).map(b => b.toString(16).padStart(2, '0')).join('') };
+    return { vt: r.obj.readPointer().sub(B).toString(16), hex: Array.from(new Uint8Array(r.obj.readByteArray(kind === 'file' ? 0x3e0 : 0x410))).map(b => b.toString(16).padStart(2, '0')).join('') };
   },
   poll() {
     return { step: G.add(11 * 8).readU64().toNumber(), calls: G.add(3 * 8).readU64().toNumber(),

@@ -1565,7 +1565,12 @@ def api_direct_send_image():
             form = request.form
             chat, name = form.get("chat"), form.get("name") or ""
             label = os.path.basename(f.filename or "") or "图片"
-            kind, path = direct_send.stage_media(f.read(), label)
+            blob = f.read()
+            from core import tts
+            if direct_send.media_kind(blob[:16]) == "audio" and tts.send_as() == "file":
+                kind, path = "file", direct_send.stage_file(blob, label)   # 音频按配置发成 mp3 文件
+            else:
+                kind, path = direct_send.stage_media(blob, label)
         else:
             data = request.get_json(silent=True) or {}
             chat, name = data.get("chat"), data.get("name") or ""
@@ -1576,7 +1581,9 @@ def api_direct_send_image():
                 raise direct_send.DirectSendError("bad_path", "path 只能是 /api/upload 返回的路径")
             label = os.path.basename(path)
             kind = None
-        if kind in ("video", "voice"):
+        if kind == "file":
+            row = direct_send.send_file(chat, path, name, label)
+        elif kind in ("video", "voice"):
             row = direct_send.send_video(chat, path, name, ("语音 · " if kind == "voice" else "") + label)
         elif kind == "image":
             row = direct_send.send_image(chat, path, name, label)
@@ -1601,7 +1608,8 @@ def api_tts_config():
 
 @app.post("/api/tts/config")
 def api_tts_config_set():
-    """JSON:{voice:{key,label,name,rate,pitch,volume}} 新增/修改;{delete:key} 删除或恢复预设;{default:key}。"""
+    """JSON:{voice:{key,label,name,rate,pitch,volume}} 新增/修改;{delete:key} 删除或恢复预设;{default:key};
+    {send_as:"video"|"file"} 语音发送形式。"""
     from core import tts
     data = request.get_json(silent=True) or {}
     try:
@@ -1614,6 +1622,8 @@ def api_tts_config_set():
             out = tts.get_config()
         if data.get("default"):
             out = tts.set_default(str(data["default"]))
+        if data.get("send_as"):
+            out = tts.set_send_as(str(data["send_as"]))
     except tts.TTSError as e:
         return jsonify(ok=False, code=e.code, error=e.message), 400
     return jsonify(dict(out, ok=True))
@@ -1641,12 +1651,13 @@ def api_tts_preview():
 
 @app.post("/api/direct/send_tts")
 def api_direct_send_tts():
-    """文字转语音后以声波视频直发。JSON:chat, text, voice(音色 key,可空=默认), name。"""
+    """文字转语音后直发。JSON:chat, text, voice(音色 key,可空=默认), name, send_as(video/file,可空=配置)。"""
     from core import direct_send
     data = request.get_json(silent=True) or {}
     try:
         row = direct_send.send_tts(data.get("chat"), data.get("text"), data.get("voice") or None,
-                                   data.get("name") or "", source=data.get("source") or "manual")
+                                   data.get("name") or "", source=data.get("source") or "manual",
+                                   send_as=data.get("send_as") or None)
     except direct_send.DirectSendError as e:
         return jsonify(ok=False, code=e.code, error=e.message), 409
     return jsonify(row)

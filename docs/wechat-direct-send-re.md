@@ -50,6 +50,7 @@
 | 撤回服务定位第 3 步 | `0x4bbe8bc` | `(b)`,x8 返回 shared_ptr,vtable `0x7f4b030`(前两步同 A/B) |
 | `Revoke` | `0x5081554` | `(x8=结果{u8 ok; string 提示}, x0=撤回服务, x1=const 消息行&)`,见 3.10 |
 | `GetMsgByLocalId` | `0x4bc9fe4` | `(x8=输出{Msg; bool@+0x1f8}, x0=svcC, x1=&会话, w2=local_id, w3=create_time)` |
+| 文件 Req 构造（make_shared） | `0x40f97dc` | 0x18 + 0x3e0 = **0x3f8**,vtable `0x7e07948`;**不清零**,要先自己清;`+0x94=49`(appmsg)、`+0x98=6`(文件) |
 | `std::string` 拷贝赋值 | `0x3639df8` | libc++ `operator=(const string&)` |
 | `co_launch` | `0x49bf7bc` | `(x0=执行器, x1=位置信息, x2=&std::function, w3=1)`，x8 返回协程句柄 |
 | 应用上下文全局量 | `0x82bb2a8` | `*(B+0x82bb2a8)+0x290` = 业务执行器；执行器 `+0x10` 为 0 表示还没登录完 |
@@ -248,6 +249,10 @@ Ghidra 全量分析 130MB 约 45 分钟（8 核，10G 内存），`PreFast.java`
 - 4.1.8 Linux 版**没有发语音的代码**：界面没有录音按钮；二进制里只有 CGI 路由表里的 `uploadvoice`(cmdid 19)，没有 `micromsg.UploadVoiceRequest` 描述符和 `/cgi-bin/micromsg-bin/uploadvoice` 路径（对比 newsendmsg 两样都有）。能收、能播（`VoiceMessageHandler`、SILK 解码），不能发。库里的 type 34 语音都是 `status=3, origin_source=2`，来自手机端或对方。
 - 现在的语音条是 SILK 音频先加密传 CDN，再发带 `voiceurl`/`aeskey` 的 `<voicemsg>`。要发真语音条，只能在手机端发（adb 自动化），或自己补整套上传协议（不建议，风控风险大）。
 - 采用的替代：`direct_send.stage_audio / send_voice` 用 ffmpeg 把 mp3/m4a/wav/ogg/flac/amr 转成「深绿底 + 绿色声波」的 640x360 mp4（最长 5 分钟），走 3.9 节的视频直发。微信 SILK 语音 ffmpeg 解不了，会直接报错提示先转格式。容器镜像已加装 ffmpeg。
+
+### 3.12 发文件（2026-11-28）
+
+界面往输入框粘贴 mp3 发送时抓到：同样走 `0x4baee74`,Req vtable `0x7e07948`,`+0x94=49`、`+0x98=6`、`+0xa0` 路径、`+0xe8` 大小。工厂 `0x4225c84` 的"其它文件"分支是 `operator new(0x3f8)` + `0x40f97dc(blk)`,再写 `+0xac`(=对象 +0x94)8 字节 `(49, 6)`(常量在 `0x1a6e808`)。这个构造函数**不 memset**,界面那份 `+0x118` 之后全是堆残留,agent 先清零再构造。直发后库里 appmsg XML 的 `totallen`/`md5`/`cdnattachurl`/`aeskey` 与界面发送一致。对方看到的文件名就是本地文件名，所以 `stage_file` 按原名存在 `work/direct_files/<时间戳>/` 下。
 
 ---
 

@@ -113,8 +113,51 @@ class TTSRoutesTest(unittest.TestCase):
         with patch("core.direct_send.send_tts", return_value={"ok": True}) as st:
             r = self.client.post("/api/direct/send_tts", json={"token": "api-token", "chat": "wxid_a", "text": "hi"})
         self.assertEqual(r.status_code, 200)
-        st.assert_called_once_with("wxid_a", "hi", None, "", source="manual")
+        st.assert_called_once_with("wxid_a", "hi", None, "", source="manual", send_as=None)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SendAsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.p = patch("config.WORK_DIR", self.tmp.name)
+        self.p.start()
+
+    def tearDown(self):
+        self.p.stop()
+        self.tmp.cleanup()
+
+    def test_send_as_config(self):
+        self.assertEqual(tts.send_as(), "video")
+        tts.set_send_as("file")
+        self.assertEqual(tts.get_config()["send_as"], "file")
+        with self.assertRaises(tts.TTSError):
+            tts.set_send_as("voice_bar")
+
+    def test_send_tts_file_mode_uses_readable_name(self):
+        from core import direct_send
+        mp3 = os.path.join(self.tmp.name, "x.mp3")
+        with open(mp3, "wb") as f:
+            f.write(b"ID3data")
+        tts.set_send_as("file")
+        with patch("core.tts.synth", return_value=mp3), \
+                patch("core.direct_send.FILE_DIR", os.path.join(self.tmp.name, "files")), \
+                patch("core.direct_send.send_file", side_effect=lambda c, p, *a, **k: {"path": p}) as sf, \
+                patch("core.direct_send.send_voice") as sv:
+            r = direct_send.send_tts("wxid_a", "晚上好。早点休息！")
+        sv.assert_not_called()
+        self.assertEqual(os.path.basename(r["path"]), "语音_晚上好早点休息.mp3")
+        with patch("core.tts.synth", return_value=mp3), patch("core.direct_send.send_voice", return_value={"ok": 1}) as sv:
+            direct_send.send_tts("wxid_a", "hi", send_as="video")
+        sv.assert_called_once()
+        self.assertEqual(sf.call_count, 1)
+
+    def test_stage_file_keeps_name(self):
+        from core import direct_send
+        with patch("core.direct_send.FILE_DIR", self.tmp.name):
+            p = direct_send.stage_file(b"x", "../../etc/晚安.mp3")
+        self.assertEqual(os.path.basename(p), "晚安.mp3")
+        self.assertTrue(os.path.realpath(p).startswith(os.path.realpath(self.tmp.name)))

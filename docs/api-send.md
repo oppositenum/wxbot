@@ -94,6 +94,7 @@ curl -X POST http://127.0.0.1:5100/api/send \
 ```
 
 - `voice` 是音色 key，省略时用默认音色。文字最多 500 字。
+- `send_as` 选发送形式，省略时用后台配置：`video` 发成声波视频（对方点开就播，默认）；`file` 发成 mp3 文件（对方看到 `语音_正文开头.mp3` 文件卡片，点开用微信预览播放）。直发页上传的音频文件也按这个配置发。
 - 语音来自免费的 Microsoft Edge 在线语音（edge-tts），容器要能上网。
 - 内置音色：`warm_low` 温柔低语(男，默认)、`calm_deep` 沉稳克制(男)、`magnetic` 磁性低音(男)、`sunny` 阳光少年(男)、`boyish` 少年感(男)、`cantonese` 粤语(男)、`female_warm` 温暖女声、`female_lively` 活泼女声、`female_tw` 台湾腔女声。
 - 音色在直发页「语音（文字转语音）」里试听和编辑：可改语速、音调、换微软音色、新增自定义音色、设默认。配置存在 `work/tts.json`。后台接口 `GET/POST /api/tts/config`、`POST /api/tts/preview`（返回 mp3）需要网页登录。

@@ -35,6 +35,7 @@ PRESETS = {
     "female_tw": {"label": "台湾腔女声", "name": "zh-TW-HsiaoChenNeural", "rate": "-5%", "pitch": "+0Hz"},
 }
 DEFAULT_KEY = "warm_low"
+SEND_AS = ("video", "file")   # 语音发送形式:声波视频(点开就播) / mp3 文件(文件卡片,点开预览播放)
 
 _lock = threading.Lock()
 _voices_cache = {"t": 0, "list": []}
@@ -82,7 +83,22 @@ def get_config():
             voices.append(dict({"volume": "+0%"}, **v, key=key, builtin=False, changed=True))
     keys = {v["key"] for v in voices}
     default = d.get("default") if d.get("default") in keys else DEFAULT_KEY
-    return {"default": default, "voices": voices}
+    send_as = d.get("send_as") if d.get("send_as") in SEND_AS else "video"
+    return {"default": default, "send_as": send_as, "voices": voices}
+
+
+def set_send_as(mode):
+    if mode not in SEND_AS:
+        raise TTSError("bad_param", "发送形式只能是 video(声波视频)或 file(mp3 文件)")
+    with _lock:
+        d = _read()
+        d["send_as"] = mode
+        _write(d)
+    return get_config()
+
+
+def send_as():
+    return get_config()["send_as"]
 
 
 def get_voice(key=None):

@@ -9,6 +9,7 @@
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -31,7 +32,7 @@ WAIT_SECONDS = 8.0
 NOT_SENT_CODES = frozenset({
     "no_frida", "no_wechat", "unsupported", "not_running", "attach_failed", "agent_error",
     "not_logged_in", "request_mismatch", "bad_chat", "empty", "too_long", "no_file",
-    "bad_image", "bad_video", "bad_audio", "no_ffmpeg", "convert_failed", "tts_failed", "too_large", "step_failed",
+    "bad_image", "bad_video", "bad_audio", "no_ffmpeg", "convert_failed", "tts_failed", "bad_param", "too_large", "step_failed",
     "not_found", "not_mine", "not_sent_ok", "too_old", "already_revoked",
 })
 
@@ -516,13 +517,62 @@ def revoke(chat, local_id=None, name="", source="manual"):
     return _dispatch(row, lambda ex: ex.revoke(msg), wait=20.0)
 
 
-def send_tts(chat, text, voice=None, name="", source="manual"):
-    """文字 → 配置的音色合成 mp3 → 声波视频发出。voice=音色 key,空=默认音色。"""
+_FNAME_DROP = re.compile(r"[\s\\/:*?\"<>|，。！？、；：,.!?;~…—'“”‘’()（）\[\]【】]+")
+
+
+def _voice_filename(text):
+    """mp3 文件名:语音_正文开头(去掉标点和文件名非法字符)。"""
+    head = _FNAME_DROP.sub("", str(text or ""))[:12]
+    return f"语音_{head or time.strftime('%H%M%S')}.mp3"
+
+
+def send_tts(chat, text, voice=None, name="", source="manual", send_as=None):
+    """文字 → 配置的音色合成 mp3 → 按配置发成声波视频或 mp3 文件。voice=音色 key,空=默认。"""
     from core import tts
     chat = _check_chat(chat)
+    mode = send_as or tts.send_as()
+    if mode not in tts.SEND_AS:
+        raise DirectSendError("bad_param", "send_as 只能是 video 或 file")
     try:
         mp3 = tts.synth(text, voice)
         label = "语音(" + tts.get_voice(voice)["label"] + ") · " + " ".join(str(text).split())[:60]
     except tts.TTSError as e:
         raise DirectSendError(e.code if e.code in ("empty", "too_long") else "tts_failed", e.message)
+    if mode == "file":
+        with open(mp3, "rb") as f:
+            path = stage_file(f.read(), _voice_filename(text))
+        return send_file(chat, path, name, label, source)
     return send_voice(chat, mp3, name, label, source)
+
+
+MAX_FILE_BYTES = 100 * 1024 * 1024
+FILE_DIR = os.path.join(config.WORK_DIR, "direct_files")
+
+
+def stage_file(data, filename):
+    """按原文件名存一份(对方看到的就是这个名字),返回路径。"""
+    if not data:
+        raise DirectSendError("empty", "文件是空的")
+    if len(data) > MAX_FILE_BYTES:
+        raise DirectSendError("too_large", "文件超过 100MB")
+    name = os.path.basename(str(filename or "")).strip().replace("\x00", "") or "file.bin"
+    d = os.path.join(FILE_DIR, f"{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(3).hex()}")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, name[:120])
+    with open(path, "wb") as f:
+        f.write(data)
+    return path
+
+
+def send_file(chat, path, name="", label="", source="manual"):
+    """发文件(对方看到文件卡片,显示的是文件名)。mp3 等音频这样发,点开用微信自带预览播放。"""
+    chat = _check_chat(chat)
+    path = os.path.realpath(path or "")
+    if not os.path.isfile(path):
+        raise DirectSendError("no_file", "文件不存在")
+    size = os.path.getsize(path)
+    if not size or size > MAX_FILE_BYTES:
+        raise DirectSendError("too_large", "文件为空或超过 100MB")
+    row = {"t": int(time.time()), "kind": "file", "chat": chat, "name": name,
+           "content": label or os.path.basename(path), "path": path, "size": size, "source": source}
+    return _dispatch(row, lambda ex: ex.send_file(chat, path, size))

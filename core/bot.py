@@ -37,6 +37,7 @@ from core import account_session as sessions, send_ledger, personalization, conv
 from core import niu_mode
 from core import voice_reply
 from core import admin_commands, battle_mode, continuous_mode, humanize, context_reset
+from core import webhook
 
 def rules_file():
     return os.path.join(config.account_dir(), "bot_rules.json")
@@ -1365,8 +1366,7 @@ def _push_targets(push_cfg):
             to = t["to"].strip()
             out.append({"type": "wechat", "to": to,
                         "username": t.get("username") or _username_for_name(to)})
-        elif typ == "webhook" and (t.get("url") or "").strip():
-            out.append({"type": "webhook", "url": t["url"].strip()})
+        # 明文 webhook 已停用:推给外部系统改用「Webhook 订阅」(core/webhook.py,内容加密)
     return out
 
 
@@ -1416,6 +1416,42 @@ def _ensure_push_worker():
             _push_worker_started = True
 
 
+def message_payload(msg, chat_username):
+    """一条消息的结构化字段(推送 / webhook 共用);时间放字段里,content/summary 不含时间。"""
+    sender_wxid = msg.get("sender") or ""
+    ts = msg.get("create_time") or msg.get("time") or 0
+    try:
+        tstr = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)) if ts else ""
+    except Exception:  # noqa: BLE001
+        tstr = ""
+    return {
+        "chat": chat_username, "chat_name": send_name_for(chat_username),
+        "is_group": chat_username.endswith("@chatroom"),
+        "sender": sender_wxid, "sender_name": _sender_name(sender_wxid) if sender_wxid else "",
+        "is_self": bool(msg.get("is_self")),
+        "type": msg.get("type"), "category": msg.get("category"),
+        "category_name": msg.get("category_name"),
+        "content": msg.get("content"), "summary": _push_summary(msg),
+        "meta": msg.get("meta") or {},
+        "time": tstr, "timestamp": ts,
+        "local_id": msg.get("local_id"),
+        "server_id": msg.get("server_id"),
+    }
+
+
+def _webhook_dispatch(m, chat, hooks, log):
+    """Webhook 订阅:加密投递,不经过微信发送锁,失败不影响后面的处理。"""
+    try:
+        if not any(webhook.wants(h, chat, m) for h in hooks):
+            return
+        me = config.wxid() or ""
+        webhook.dispatch(chat, m, {"account": {"wxid": me}, "message": message_payload(m, chat)}, me, log, hooks)
+    except sessions.StaleAccount:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log(f"  [webhook] 准备失败: {type(e).__name__}: {e}")
+
+
 @sessions.task
 def _do_push(msg, chat_username, push_cfg, log):
     """把 watch/监听会话里的一条消息【入队】推送到配置的目标(微信好友 / webhook)。
@@ -1424,36 +1460,13 @@ def _do_push(msg, chat_username, push_cfg, log):
     targets = _push_targets(push_cfg)
     if not targets:
         return
-    chat_name = send_name_for(chat_username)
-    sender_wxid = msg.get("sender") or ""
-    sender_name = _sender_name(sender_wxid) if sender_wxid else ""
-    summary = _push_summary(msg)
-    is_group = chat_username.endswith("@chatroom")
-    # 时间：微信好友的文本里带上(用户要求),webhook 只放字段、内容不带
-    ts = msg.get("create_time") or msg.get("time") or 0
-    try:
-        tstr = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)) if ts else ""
-    except Exception:  # noqa: BLE001
-        tstr = ""
+    payload = message_payload(msg, chat_username)
+    chat_name, summary, tstr = payload["chat_name"], payload["summary"], payload["time"]
+    is_group = payload["is_group"]
+    who = payload["sender_name"] or payload["sender"] or ("我" if msg.get("is_self") else "")
     # 微信好友收到的文本：时间 [会话] 发送者: 内容
-    who = sender_name or sender_wxid or ("我" if msg.get("is_self") else "")
-    if is_group:
-        body_line = f"[{chat_name}] {who}: {summary}"
-    else:
-        body_line = f"[{chat_name}] {summary}"
+    body_line = f"[{chat_name}] {who}: {summary}" if is_group else f"[{chat_name}] {summary}"
     line = f"{tstr} {body_line}".strip() if tstr else body_line
-    payload = {
-        "chat": chat_username, "chat_name": chat_name, "is_group": is_group,
-        "sender": sender_wxid, "sender_name": sender_name,
-        "is_self": bool(msg.get("is_self")),
-        "type": msg.get("type"), "category": msg.get("category"),
-        "category_name": msg.get("category_name"),
-        "content": msg.get("content"), "summary": summary,
-        "meta": msg.get("meta") or {},
-        "time": tstr, "timestamp": ts,      # webhook 用字段传时间;summary/content 不含时间
-        "local_id": msg.get("local_id"),
-        "server_id": msg.get("server_id"),
-    }
     # 防回环:绝不把某会话的消息推回它自己(否则推送又成新消息→无限乱发)——入队前先滤掉
     send_targets = []
     for tg in targets:
@@ -2061,11 +2074,17 @@ def run_once(rules, state, log=print):
     process_futures = []
     # push.sources 缺省=监听列表本身;含 '*' 展开为所有群
     push_src = set(_expand_watch(push_cfg.get("sources") or list(watch_set))) if push_on else set()
+    # Webhook 订阅:「全部会话」靠 recent_chats 覆盖;选定会话的额外加进轮询
+    hooks = webhook.active()
+    hook_src = set()
+    if hooks:
+        need = webhook.sources_needed(hooks)
+        hook_src = set(_expand_watch(list(need))) if need else set()
     # 防回环:推送目标(微信好友/群)本身绝不作为推送来源——否则"推进去的消息"又被当新消息推出去→乱发
     if push_src:
         tgt_names = {t["to"] for t in _push_targets(push_cfg) if t["type"] == "wechat"}
         push_src = {c for c in push_src if send_name_for(c) not in tgt_names}
-    for chat in (watch_set | push_src | admin_set | recent_chats):
+    for chat in (watch_set | push_src | hook_src | admin_set | recent_chats):
         msgs = messages.get_messages(chat, limit=40)
         if not msgs:
             continue
@@ -2118,6 +2137,8 @@ def run_once(rules, state, log=print):
             # 监听推送：来自监听会话的任何消息(不管类型)推给微信好友/webhook
             if push_on and chat in push_src and (push_self or not m["is_self"]):
                 _do_push(m, chat, push_cfg, log)
+            if hooks:
+                _webhook_dispatch(m, chat, hooks, log)
             # 管理员命令：本账号自己发的 /命令，任意会话、不必 @，一律执行。
             # 其他人必须在管理员名单里；群里还要 @我。执行后跳过普通回复。
             # 自己发出的人设长回复里会出现「告诉你」。口语代发只认别人发来的短指令。

@@ -1099,9 +1099,8 @@ def api_bot_push_set():
                               "username": t.get("username")
                               or botmod._username_for_name(to),
                               "enabled": t.get("enabled", True)})
-            elif typ == "webhook" and (t.get("url") or "").strip():
-                clean.append({"type": "webhook", "url": t["url"].strip(),
-                              "enabled": t.get("enabled", True)})
+            elif typ == "webhook":
+                return jsonify({"ok": False, "error": "推送不再支持明文 webhook,请到「Webhook 订阅」添加(消息内容加密)"}), 400
         p["targets"] = clean
     rules["push"] = {**_default_push(), **p}
     botmod.save_rules(rules)
@@ -1123,6 +1122,88 @@ def api_bot_push_test():
             "sender": "", "is_self": False, "local_id": 0}
     botmod._do_push(fake, body.get("chat") or "filehelper", p, logs.append)
     return jsonify({"ok": True, "log": logs})
+
+
+# ---------------- Webhook 订阅(加密推送收到的消息) ----------------
+def _wh_err(e, code=400):
+    return jsonify({"ok": False, "error": str(e) if not isinstance(e, KeyError) else "没有这个订阅"}), code
+
+
+@app.get("/api/webhooks")
+def api_webhooks_list():
+    from core import webhook
+    return jsonify({"ok": True, "hooks": webhook.list_hooks()})
+
+
+@app.post("/api/webhooks")
+def api_webhooks_create():
+    from core import webhook
+    try:
+        h = webhook.create(request.get_json(force=True, silent=True) or {})
+    except ValueError as e:
+        return _wh_err(e)
+    return jsonify({"ok": True, "hook": webhook.public(h), "secret": h["secret"]})
+
+
+@app.patch("/api/webhooks/<hook_id>")
+def api_webhooks_update(hook_id):
+    from core import webhook
+    try:
+        h = webhook.update(hook_id, request.get_json(force=True, silent=True) or {})
+    except KeyError as e:
+        return _wh_err(e, 404)
+    except ValueError as e:
+        return _wh_err(e)
+    return jsonify({"ok": True, "hook": webhook.public(h)})
+
+
+@app.delete("/api/webhooks/<hook_id>")
+def api_webhooks_delete(hook_id):
+    from core import webhook
+    try:
+        webhook.delete(hook_id)
+    except KeyError as e:
+        return _wh_err(e, 404)
+    return jsonify({"ok": True})
+
+
+@app.get("/api/webhooks/<hook_id>/secret")
+def api_webhooks_secret(hook_id):
+    from core import webhook
+    h = webhook.get(hook_id)
+    if not h:
+        return _wh_err(KeyError(hook_id), 404)
+    app.logger.warning("webhook secret viewed: %s", hook_id)
+    r = jsonify({"ok": True, "secret": h["secret"]})
+    r.headers["Cache-Control"] = "no-store"
+    return r
+
+
+@app.post("/api/webhooks/<hook_id>/rotate")
+def api_webhooks_rotate(hook_id):
+    from core import webhook
+    try:
+        h = webhook.rotate(hook_id)
+    except KeyError as e:
+        return _wh_err(e, 404)
+    return jsonify({"ok": True, "secret": h["secret"]})
+
+
+@app.post("/api/webhooks/<hook_id>/test")
+def api_webhooks_test(hook_id):
+    from core import webhook
+    try:
+        entry = webhook.send_test(hook_id, {"wxid": config.wxid() or ""})
+    except KeyError as e:
+        return _wh_err(e, 404)
+    return jsonify({"ok": entry["ok"], "delivery": entry,
+                    "error": "" if entry["ok"] else (entry.get("error") or f"HTTP {entry.get('status')}")})
+
+
+@app.get("/api/webhooks/<hook_id>/deliveries")
+def api_webhooks_deliveries(hook_id):
+    from core import webhook
+    return jsonify({"ok": True, "deliveries": webhook.deliveries(hook_id)})
 
 
 @app.post("/api/bot/persona")

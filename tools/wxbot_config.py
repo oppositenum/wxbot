@@ -13,7 +13,7 @@ import argparse, json, os, shutil, tempfile, time, zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ACCOUNTS = os.path.join(ROOT, "accounts")
-EXCLUDE_NAMES = {"keys.json", "llm_config.json", "decrypted", "msg", "mediacache", "send_ledger.sqlite3"}
+EXCLUDE_NAMES = {"keys.json", "llm_config.json", "webhooks.json", "decrypted", "msg", "mediacache", "send_ledger.sqlite3"}
 EXCLUDE_SUFFIXES = (".db-wal", ".db-shm")
 
 def allowed(rel):

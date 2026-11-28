@@ -169,7 +169,7 @@
           ${sw('puSelf', '连这个微信自己发的消息也推', '默认只推别人发的。', push.include_self)}
           <div class="bot-sub">推送目标</div>
           <div id="puTargets" class="stack" style="gap:8px"></div>
-          <div class="row" style="margin-top:10px"><button class="btn sm" id="puAddWx">＋ 微信好友 / 群</button><button class="btn sm" id="puAddWh">＋ Webhook</button></div>
+          <div class="row" style="margin-top:10px"><button class="btn sm" id="puAddWx">＋ 微信好友 / 群</button><a class="btn sm ghost" href="#/a/${id}/webhook">推给外部系统？用 Webhook 订阅（加密）→</a></div>
           <details class="bot-more"><summary>推送来源（默认＝监听的会话）</summary>
             <div class="muted small" style="margin:10px 0">一个都不选时，跟随「监听」里勾选的会话。推送目标本身永远不会被当作来源（防止循环转发）。</div>
             <div id="puSrc"></div></details>
@@ -378,7 +378,6 @@
       }
     });
     $('#puAddWx').onclick = () => { targets.push({type: 'wechat', to: '', enabled: true}); drawTargets(); markDirty(view, 'push'); };
-    $('#puAddWh').onclick = () => { targets.push({type: 'webhook', url: '', enabled: true}); drawTargets(); markDirty(view, 'push'); };
     ['puOn', 'puSelf'].forEach((k) => { $('#' + k).onchange = onDirty('push'); });
     const src = checklist($('#puSrc'), id, [ALL_GROUPS, ...pGroups(), ...pPeople()], push.sources || [], {onChange: onDirty('push')});
     save('push', async () => {

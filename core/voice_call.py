@@ -525,6 +525,36 @@ def synth_pcm(text, voice, out_dir, rate=24000):
 
 
 FILLERS = ["嗯。", "嗯嗯。", "哦～"]
+PICKUP = "喂，怎么啦？"                    # 接来电的第一句:固定,提前合成好,接起来马上说
+
+
+def synth_cached(text, voice, out_dir):
+    """固定的短句(「嗯」、接电话那句)每个音色只合成一次,存在 work/voice_calls/cache。"""
+    import hashlib
+    d = os.path.join(config.WORK_DIR, "voice_calls", "cache")
+    os.makedirs(d, exist_ok=True)
+    f = os.path.join(d, hashlib.sha256(f"{voice}|{text}".encode()).hexdigest()[:20] + ".pcm")
+    if os.path.isfile(f) and os.path.getsize(f) > 1000:
+        return open(f, "rb").read()
+    pcm = synth_pcm(text, voice, out_dir)
+    if len(pcm) > 1000:
+        with open(f + ".tmp", "wb") as fh:
+            fh.write(pcm)
+        os.replace(f + ".tmp", f)
+    return pcm
+
+
+def prewarm(log=print):
+    """名单里每个人的音色:把「嗯」和接电话那句先合成好(自动接听打开时后台做一次)。"""
+    from core import voice_reply
+    tmp = os.path.join(config.WORK_DIR, "voice_calls", "cache")
+    for x in load_settings().get("allow") or []:
+        try:
+            v = voice_reply.voice_for(x["username"])
+            for t in FILLERS + [PICKUP]:
+                synth_cached(t, v, tmp)
+        except Exception as e:  # noqa: BLE001
+            log(f"[语音通话] 预合成失败 {x.get('name')}: {e}")
 
 
 def play_filler(pcm):
@@ -1105,9 +1135,14 @@ def run_call(chat, display, out_dir, purpose="", direction="out", incoming_windo
         raise CallError("实时通话需要阿里云复刻音色(给这个联系人选一个阿里云音色)")
     STATE["phase"] = "preparing"
     t = time.time()
-    opener_text = brain.opener()
-    opener_pcm = synth_pcm(opener_text, voice, out_dir)
-    fillers = [synth_pcm(f, voice, out_dir) for f in FILLERS]
+    if direction == "in":
+        opener_text = PICKUP
+        brain.hist += [{"role": "user", "content": "(你接起了对方打来的电话)"}, {"role": "assistant", "content": PICKUP}]
+        opener_pcm = synth_cached(PICKUP, voice, out_dir)
+    else:
+        opener_text = brain.opener()
+        opener_pcm = synth_pcm(opener_text, voice, out_dir)
+    fillers = [synth_cached(f, voice, out_dir) for f in FILLERS]
     log("prepared", secs=round(time.time() - t, 2), opener=opener_text)
 
     if direction == "out":
@@ -1271,7 +1306,9 @@ def run_call(chat, display, out_dir, purpose="", direction="out", incoming_windo
 
 # ---------------- 自动接听 ----------------
 
-INCOMING_RE = re.compile(r"邀请你|语音通话邀请|来电|接听")
+# 来电是右下角一个小弹窗:「🐮🐮🌱besos / 邀请你语音通话..」+ 红色挂断、绿色接听两个圆按钮(没有文字)。
+# 「邀」常被认成「六」,所以只认后半截。
+INCOMING_RE = re.compile(r"请你语音通话|请你视频通话|邀请你|语音通话\.|来电")
 _watcher = {"started": False}
 
 
@@ -1282,9 +1319,40 @@ def _incoming_window(known):
             continue
         p = f"/tmp/vc_incoming_{w}.png"
         shot(p)
-        text = ocr(p, info["box"]).replace(" ", "")
+        raw = ocr(p, info["box"])
+        text = raw.replace(" ", "")
         if INCOMING_RE.search(text):
-            return w, info, text, p
+            return w, info, text, p, _caller_line(raw)
+    return None
+
+
+def _caller_line(raw):
+    """来电弹窗里「邀请你语音通话」上面那行就是来电人名字。"""
+    lines = [x.replace(" ", "") for x in raw.splitlines() if x.strip()]
+    out = []
+    for x in lines:
+        if INCOMING_RE.search(x) or "通话" in x:
+            break
+        out.append(x)
+    return "".join(out[-2:])
+
+
+def _find_green(png, box):
+    """在窗口里找绿色的接听按钮(微信绿 ~ #07C160),返回中心点。"""
+    try:
+        from PIL import Image
+        img = Image.open(png).convert("RGB")
+        x0, y0, w, h = box
+        xs, ys = [], []
+        for yy in range(y0, y0 + h, 2):
+            for xx in range(x0, x0 + w, 2):
+                r, g, b = img.getpixel((xx, yy))
+                if g > 150 and r < 60 and 60 < b < 140:
+                    xs.append(xx); ys.append(yy)
+        if len(xs) > 30:
+            return sum(xs) // len(xs), sum(ys) // len(ys)
+    except Exception:  # noqa: BLE001
+        pass
     return None
 
 
@@ -1309,11 +1377,12 @@ def watch_once(known):
     hit = _incoming_window(known)
     if not hit:
         return False
-    w, info, text, png = hit
-    caller = next((x for x in s.get("allow") or [] if name_matches(x.get("name", ""), text)), None)
+    w, info, text, png, who = hit
+    caller = next((x for x in s.get("allow") or []
+                   if name_matches(x.get("name", ""), who, others=similar_names(x.get("name", "")))), None)
     known.add(w)
     if not caller:
-        print(f"[语音通话] 来电不在名单里,不接:{text[:40]}", flush=True)
+        print(f"[语音通话] 来电不在名单里(或名字没认准),不接:{who!r} / {text[:40]!r}", flush=True)
         return False
     if not _lock.acquire(blocking=False):
         return False
@@ -1328,17 +1397,25 @@ def watch_once(known):
         res = {}
         try:
             log = Log(out_dir)
-            log("incoming", ocr=text[:80], window=info)
+            log("incoming", ocr=text[:80], caller=who, window=info)
             audio_setup(log)                           # 接听前把默认设备设好,微信新开的流直接走对
-            pos = _click_text(png, info["box"], ("接听",))
+            before = set(wechat_windows())
+            pos = _find_green(png, info["box"])
             if not pos:
                 x, y, ww, hh = info["box"]
-                pos = (x + ww * 3 // 4, y + hh - 90)      # 接听一般在右下(绿色)
-                click(*pos)
+                pos = (x + ww - 30, y + hh - 32)          # 接听在弹窗右下角
+            click(*pos)
             log("answer_click", pos=pos)
-            time.sleep(1.5)
-            cw = CallWindow(set(), log, out_dir)
-            cw.win = (w, info)
+            # 接听后弹窗关掉、真正的通话窗口「语音聊天」出来;用它判断对方挂断
+            cw = CallWindow(before - {w}, log, out_dir)
+            for _ in range(30):
+                time.sleep(0.2)
+                new = {k: i for k, i in wechat_windows().items() if k not in before and k != w}
+                if new:
+                    k, i = next(iter(new.items()))
+                    cw.win = (k, i)
+                    break
+            log("call_window", window=cw.win[1] if cw.win else None)
             res = run_call(caller["username"], caller.get("name"), out_dir, direction="in", incoming_window=cw)
         except Exception as e:  # noqa: BLE001
             res = {"result": "error", "error": f"{type(e).__name__}: {e}"[:200]}
@@ -1356,8 +1433,12 @@ def start_watcher(interval=2.0):
 
     def loop():
         known = set()
+        warmed = 0.0
         while True:
             try:
+                if load_settings().get("auto_answer") and not STATE.get("busy") and time.time() - warmed > 600:
+                    warmed = time.time()
+                    threading.Thread(target=prewarm, daemon=True).start()
                 if load_settings().get("auto_answer") and not STATE.get("busy"):
                     cur = set(wechat_windows())
                     known &= cur                       # 关掉的窗口从 known 里去掉

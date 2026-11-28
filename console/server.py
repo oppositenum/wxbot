@@ -64,11 +64,58 @@ def _verify(token):
         return None
 
 
+# 登录防爆破:
+# 1) 登录校验全站串行,失败等 1 秒 → 全世界加起来每秒最多试 1 次密码(并发也绕不过)
+# 2) 反代传了真实 IP(X-Real-IP / X-Forwarded-For)时,同一 IP 10 分钟错 5 次锁 15 分钟。
+#    没传真实 IP 时所有人看起来是同一个来源(隧道),这时不按 IP 锁,免得别人故意输错把你也锁在外面。
+FAIL_WINDOW, FAIL_PER_IP, LOCK_IP, FAIL_SLEEP = 600, 5, 900, 1.0
+_fails = {}            # ip -> [时间…]
+_locked = {}           # ip -> 解锁时间
+_login_lock = None
+
+
+def client_ip(request):
+    """反代给的真实 IP;没有就返回 None(不按 IP 锁)。"""
+    xff = request.headers.get("X-Forwarded-For", "")
+    return request.headers.get("X-Real-IP") or (xff.split(",")[-1].strip() if xff else None)
+
+
+def _login_locked(ip):
+    return (_locked.get(ip, 0) - time.time()) if ip else 0
+
+
+def _record_fail(ip):
+    if not ip:
+        return
+    now = time.time()
+    lst = [t for t in _fails.get(ip, []) if now - t < FAIL_WINDOW] + [now]
+    _fails[ip] = lst
+    if len(lst) >= FAIL_PER_IP:
+        _locked[ip] = now + LOCK_IP
+    if len(_fails) > 5000:                                  # 防止被随机 IP 撑爆内存
+        for k in [k for k, v in _fails.items() if now - v[-1] > FAIL_WINDOW]:
+            _fails.pop(k, None)
+
+
+def is_https(request):
+    return request.secure or request.headers.get("X-Forwarded-Proto", "").lower() == "https"
+
+
 def logged_in(request):
     return bool(_verify(request.cookies.get(COOKIE, "")))
 
 
 PUBLIC = ("/ui/login.html", "/ui/app.css", "/ui/login.js", "/api/console/login", "/api/console/auth", "/favicon.ico")
+
+
+@web.middleware
+async def security_headers(request, handler):
+    resp = await handler(request)
+    if not resp.prepared:
+        resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")         # 别的网站不能把控制台套进 iframe 骗点击
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault("Referrer-Policy", "same-origin")
+    return resp
 
 
 @web.middleware
@@ -85,14 +132,24 @@ async def api_login(request):
     d = await request.json()
     if not UI_PASSWORD:
         return web.json_response({"ok": False, "error": "没有配置 WXBOT_UI_PASSWORD"}, status=503)
-    ok = (hmac.compare_digest(str(d.get("username", "")), UI_USER)
-          and hmac.compare_digest(str(d.get("password", "")), UI_PASSWORD))
-    if not ok:
-        await asyncio.sleep(0.5)
-        return web.json_response({"ok": False, "error": "账号或密码不对"}, status=401)
+    global _login_lock
+    ip = client_ip(request)
+    wait = _login_locked(ip)
+    if wait > 0:
+        return web.json_response({"ok": False, "error": f"密码错误次数太多,{int(wait // 60) + 1} 分钟后再试"}, status=429)
+    _login_lock = _login_lock or asyncio.Lock()
+    async with _login_lock:
+        ok = (hmac.compare_digest(str(d.get("username", "")).encode(), UI_USER.encode())      # bytes:中文密码不会 500
+              & hmac.compare_digest(str(d.get("password", "")).encode(), UI_PASSWORD.encode()))
+        if not ok:
+            _record_fail(ip)
+            print(f"[console] 登录失败 ip={ip or request.remote}", flush=True)
+            await asyncio.sleep(FAIL_SLEEP)
+            return web.json_response({"ok": False, "error": "账号或密码不对"}, status=401)
+    _fails.pop(ip, None)
     resp = web.json_response({"ok": True})
     resp.set_cookie(COOKIE, _sign({"u": UI_USER, "exp": time.time() + SESSION_HOURS * 3600}),
-                    httponly=True, samesite="Lax", max_age=SESSION_HOURS * 3600)
+                    httponly=True, samesite="Lax", secure=is_https(request), max_age=SESSION_HOURS * 3600)
     return resp
 
 
@@ -103,7 +160,8 @@ async def api_logout(request):
 
 
 async def api_auth(request):
-    return web.json_response({"ok": logged_in(request), "user": UI_USER})
+    ok = logged_in(request)
+    return web.json_response({"ok": ok, "user": UI_USER if ok else None})   # 没登录不暴露用户名
 
 
 # ---------------- Docker ----------------
@@ -223,7 +281,7 @@ async def adopt(include_ignored=False):
         labels = (info.get("Config") or {}).get("Labels") or {}
         if f"{INTERNAL_WEB}/tcp" not in exposed and labels.get("com.oppositenum.wxbot.account") is None:
             continue
-        reg["accounts"].append({"id": _new_id(reg), "label": labels.get("com.oppositenum.wxbot.label") or name,
+        reg["accounts"].append({"id": _new_id(reg), "label": labels.get("com.oppositenum.wxbot.label") or "",
                                 "container": name, "managed": bool(labels.get("com.oppositenum.wxbot.account")),
                                 "created": int(time.time())})
         known.add(name)
@@ -389,9 +447,7 @@ async def _account_image():
 
 async def api_create(request):
     d = await request.json()
-    label = str(d.get("label") or "").strip()[:30]
-    if not label:
-        return web.json_response({"ok": False, "error": "给这个微信起个名字"}, status=400)
+    label = str(d.get("label") or "").strip()[:30]          # 备注,可空(空时显示微信昵称)
     reg = load_registry()
     used = {a["container"] for a in reg["accounts"]}
     names = {(c.get("Names") or ["/"])[0].lstrip("/") for c in await docker.containers()}
@@ -466,8 +522,8 @@ async def api_update(request):
     reg = load_registry()
     for a in reg["accounts"]:
         if a["id"] == acct_id:
-            if d.get("label"):
-                a["label"] = str(d["label"]).strip()[:30]
+            if "label" in d:                                   # 备注;传空字符串 = 清掉,改显示微信昵称
+                a["label"] = str(d["label"] or "").strip()[:30]
             if isinstance(d.get("order"), int):
                 a["order"] = d["order"]
             save_registry(reg)
@@ -539,7 +595,7 @@ async def proxy(request, acct=None, tail=None):
     try:
         r = await b.request(request.method, path, headers=headers, data=body)
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        return web.json_response({"error": f"连不上这个微信的后台({acct['label']}):{e.__class__.__name__}"},
+        return web.json_response({"error": f"连不上这个微信的后台({acct['label'] or acct['container']}):{e.__class__.__name__}"},
                                  status=502)
     try:
         out_headers = {k: v for k, v in r.headers.items() if k.lower() not in HOP}
@@ -606,7 +662,7 @@ async def vnc_info(request):
 
 
 def make_app():
-    app = web.Application(middlewares=[auth_mw], client_max_size=200 * 1024 * 1024)
+    app = web.Application(middlewares=[security_headers, auth_mw], client_max_size=200 * 1024 * 1024)
     app.add_routes([
         web.post("/api/console/login", api_login),
         web.post("/api/console/logout", api_logout),

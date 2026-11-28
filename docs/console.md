@@ -17,7 +17,7 @@
 
 | 菜单 | 内容 |
 | --- | --- |
-| 总览 | 所有微信的在线状态（在线 / 待扫码 / 缺密钥 / 微信未运行 / 已停止）、机器人和发送方式，一键处理 |
+| 总览 | 所有微信的在线状态（在线 / 待扫码 / 缺密钥 / 微信未运行 / 已停止）、机器人和发送方式，一键处理；每张卡片可单独停止/启动、✎ 加备注；勾选后批量启动 / 重启 / 停止（停止的号登录状态保留，启动后约 10 秒自动回到在线） |
 | 添加微信 | 起名字 → 自动建容器 → 页面里直接扫码 → 自动读取密钥 → 完成 |
 | 账号 · 概览 | 登录、密钥（刷新密钥 / 抓图片密钥）、机器人开关、发送方式与直发能力、容器（重启微信 / 重启 / 停止 / 改名 / 移除） |
 | 账号 · 消息 | 会话列表 + 聊天记录（图片、语音、视频封面、引用），发消息、引用回复、@ 群成员 |
@@ -76,6 +76,31 @@
 - 纳入进来的旧容器：只从列表移除，不动容器，并记进忽略名单（重启控制台不会再自动纳入）；点总览的「扫描已有容器」可以重新纳入。
 
 ## 安全
+
+### 穿透到公网时
+
+nginx 里要这样转发（缺 Upgrade 头「扫码与桌面」连不上；缺 X-Real-IP 控制台拿不到真实 IP，按 IP 锁定不生效）：
+
+```nginx
+server { listen 80; server_name 你的域名; return 301 https://$host$request_uri; }   # 别让密码走明文 http
+location / {
+    proxy_pass http://上游;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;          # 覆盖客户端自己带的,不能被伪造
+    proxy_set_header X-Forwarded-Proto $scheme;       # 让登录 Cookie 带 Secure
+    proxy_read_timeout 3600s; proxy_send_timeout 3600s;
+    proxy_buffering off; client_max_body_size 200m;
+}
+```
+
+控制台自身的防护：登录校验全站串行、失败等 1 秒（每秒最多试 1 次）；拿到真实 IP 时同一 IP 10 分钟错 5 次锁 15 分钟
+（拿不到时不锁，免得别人故意输错把你锁在外面）；没登录时不返回用户名；HTTPS 下 Cookie 带 Secure；`X-Frame-Options: SAMEORIGIN`。
+登录态是无状态签名，退出只清本机 Cookie；怀疑泄露时改 `WXBOT_SECRET` 并重建控制台，所有登录立即失效。
+
+### 本机
 
 - 控制台挂载了 `docker.sock`（为了创建/启停微信容器），等于能控制这台机器上的 Docker：端口默认只绑 `127.0.0.1`，远程访问请走 SSH 隧道或带认证的反向代理。
 - 登录态是 HMAC 签名的 Cookie（`WXBOT_SECRET`），默认 24 小时；每个新建的微信容器有自己的 `WXBOT_SECRET`。

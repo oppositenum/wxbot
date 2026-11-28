@@ -59,9 +59,18 @@ const STATE = {
   unknown:      {t: '未知', c: 'gray', hint: ''},
 };
 const st = (s) => STATE[s.state] || STATE.unknown;
+// 显示名:有备注用备注,没有就用微信昵称
+const nm = (s) => s.label || s.name || s.container || s.id;
+async function editNote(s) {
+  const f = await modal({title: '备注', body: `<p class="muted small">只在控制台里显示，方便区分。留空就显示微信昵称${s.name ? `「${esc(s.name)}」` : ''}。</p>`,
+    extra: `<input class="input" name="label" value="${esc(s.label || '')}" maxlength="30" placeholder="${esc(s.name || '例如：客服号、小号')}">`, ok: '保存'});
+  if (!f) return;
+  await api(`/api/console/accounts/${s.id}`, {method: 'PATCH', json: {label: f.label.trim()}});
+  toast('已保存'); await loadAccounts(true);
+}
 const badge = (s) => `<span class="badge ${st(s).c}"><span class="dot ${st(s).c} ${st(s).pulse ? 'pulse' : ''}"></span>${st(s).t}</span>`;
 function avatar(s, cls = '') {
-  const letter = esc((s.label || s.name || '?').trim().slice(0, 1));
+  const letter = esc((s.name || s.label || '?').trim().slice(0, 1));
   if (s.wxid && s.backend) return `<img class="avatar ${cls}" src="/a/${s.id}/api/avatar?username=${encodeURIComponent(s.wxid)}" onerror="this.outerHTML='<div class=&quot;avatar ${cls}&quot;>${letter}</div>'">`;
   return `<div class="avatar ${cls}">${letter}</div>`;
 }
@@ -111,7 +120,7 @@ function renderSide() {
     const on = r.id === s.id;
     let h = `<a class="acct ${on ? 'active' : ''}" href="#/a/${s.id}">
       <div class="avatar-wrap">${avatar(s, 'sm')}<span class="dot ${st(s).c}"></span></div>
-      <div class="grow"><div class="name ellipsis">${esc(s.label)}</div><div class="sub ellipsis">${esc(s.name || st(s).t)}</div></div></a>`;
+      <div class="grow"><div class="name ellipsis">${esc(nm(s))}</div><div class="sub ellipsis">${esc(s.label && s.name ? s.name : st(s).t)}</div></div></a>`;
     if (on) {
       let group = undefined;
       h += '<div class="nav">';
@@ -158,21 +167,53 @@ function pageHome(view) {
   $('#scanBtn').onclick = (e) => busy(e.currentTarget, async () => {
     const d = await api('/api/console/scan', {method: 'POST'}); toast(d.added ? `纳入了 ${d.added} 个微信` : '没有发现新的微信容器'); await loadAccounts(true);
   });
+  const sel = new Set();
   const draw = () => {
     const n = (k) => accounts.filter((a) => k.includes(a.state)).length;
+    for (const id of [...sel]) if (!accounts.some((a) => a.id === id)) sel.delete(id);
+    const all = accounts.length && sel.size === accounts.length;
     view.innerHTML = `<div class="page">
       <div class="grid cols-4" style="margin-bottom:18px">
         ${[['微信总数', accounts.length, ''], ['在线', n(['online']), 'var(--brand-d)'], ['需要处理', n(['need_login', 'keys_missing', 'wechat_down', 'missing', 'error']), '#a5700c'], ['已停止', n(['stopped']), 'var(--text-3)']]
           .map(([l, v, c]) => `<div class="card stat"><div class="n" style="color:${c || 'inherit'}">${v}</div><div class="l">${l}</div></div>`).join('')}
       </div>
-      <div class="grid cols-3">${accounts.map(cardHtml).join('')}
+      ${accounts.length ? `<div class="card bulk-bar">
+        <label class="row" style="gap:8px;cursor:pointer"><input type="checkbox" id="selAll" ${all ? 'checked' : ''}> 全选</label>
+        <span class="muted small grow">${sel.size ? `已选 ${sel.size} 个微信` : '勾选卡片左上角可以批量启停'}</span>
+        <button class="btn sm primary" data-bulk="start" ${sel.size ? '' : 'disabled'}>启动</button>
+        <button class="btn sm" data-bulk="restart" ${sel.size ? '' : 'disabled'}>重启</button>
+        <button class="btn sm danger" data-bulk="stop" ${sel.size ? '' : 'disabled'}>停止</button>
+      </div>` : ''}
+      <div class="grid cols-3">${accounts.map((a) => cardHtml(a, sel.has(a.id))).join('')}
         <a class="card acct-card add" href="#/add"><div class="plus">＋</div><div style="font-weight:600">添加微信</div><div class="small faint">新建一个容器，扫码登录</div></a>
       </div></div>`;
     bindCardActions(view);
+    $$('[data-note]', view).forEach((b) => b.onclick = () => editNote(acct(b.dataset.note)).catch((e) => toast(e.message, 'err')));
+    $$('[data-sel]', view).forEach((c) => c.onchange = () => { c.checked ? sel.add(c.dataset.sel) : sel.delete(c.dataset.sel); draw(); });
+    const sa = $('#selAll', view);
+    if (sa) sa.onchange = () => { sel.clear(); if (sa.checked) accounts.forEach((a) => sel.add(a.id)); draw(); };
+    $$('[data-bulk]', view).forEach((b) => b.onclick = () => bulk(b, b.dataset.bulk));
   };
+  const OPN = {start: '启动', stop: '停止', restart: '重启'};
+  async function bulk(btn, op) {
+    const picked = accounts.filter((a) => sel.has(a.id));
+    const todo = picked.filter((a) => op === 'start' ? !isUp(a) : op === 'stop' ? isUp(a) : a.state !== 'missing');
+    if (!todo.length) return toast(op === 'start' ? '选中的都已经在运行' : op === 'stop' ? '选中的都已经停止' : '没有可重启的', 'err');
+    if (op !== 'start' && !await modal({title: `${OPN[op]} ${todo.length} 个微信？`, danger: op === 'stop', ok: OPN[op],
+      body: `<p>${todo.map((a) => esc(nm(a))).join('、')}</p><p class="muted small">${op === 'stop'
+        ? '会停掉整个容器：微信下线、机器人不回复、定时任务不执行。登录状态保留，之后点启动就能回来（一般不用重新扫码）。'
+        : '容器重启约需 1 分钟，期间这些微信收不到消息。'}</p>`})) return;
+    await busy(btn, async () => {
+      const r = await Promise.allSettled(todo.map((a) => api(`/api/console/accounts/${a.id}/action`, {method: 'POST', json: {op}})));
+      const bad = r.map((x, i) => x.status === 'rejected' ? `${nm(todo[i])}：${x.reason.message}` : '').filter(Boolean);
+      bad.length ? toast(`${todo.length - bad.length} 个成功；失败 ${bad.join('；')}`, 'err') : toast(`已${OPN[op]} ${todo.length} 个`);
+      sel.clear(); await sleep(1500); await loadAccounts(true);
+    });
+  }
   draw(); window.addEventListener('accounts', draw); onLeave(() => window.removeEventListener('accounts', draw));
 }
-function cardHtml(s) {
+const isUp = (s) => !['stopped', 'missing'].includes(s.state);
+function cardHtml(s, checked = false) {
   const chips = [];
   if (s.state === 'online' || s.state === 'keys_missing') {
     chips.push(`<span class="badge ${s.bot_running ? 'green' : ''}">机器人 ${s.bot_running ? '运行中' : '已停止'}</span>`);
@@ -184,17 +225,24 @@ function cardHtml(s) {
   else if (s.state === 'need_login') act = `<a class="btn sm primary" href="#/a/${s.id}/desktop">去扫码</a>`;
   else if (s.state === 'wechat_down') act = `<button class="btn sm primary" data-op="restart_wechat" data-id="${s.id}">重启微信</button>`;
   else if (s.state === 'keys_missing') act = `<a class="btn sm primary" href="#/a/${s.id}">刷新密钥</a>`;
-  return `<div class="card acct-card">
-    <div class="top">${avatar(s, 'lg')}<div class="grow"><div class="row"><h2 class="ellipsis">${esc(s.label)}</h2></div>
-      <div class="muted small ellipsis">${esc(s.name || '—')}${s.wxid ? ' · ' + esc(s.wxid) : ''}</div></div>${badge(s)}</div>
+  const power = s.state === 'missing' ? '' : isUp(s)
+    ? `<button class="btn sm ghost" data-op="stop" data-id="${s.id}" data-label="${esc(nm(s))}" title="停止这个微信的容器">停止</button>`
+    : (s.state === 'stopped' ? '' : `<button class="btn sm primary" data-op="start" data-id="${s.id}">启动</button>`);
+  return `<div class="card acct-card${checked ? ' picked' : ''}">
+    <div class="top"><input type="checkbox" class="acct-sel" data-sel="${s.id}" ${checked ? 'checked' : ''} title="选中后可批量启停">${avatar(s, 'lg')}<div class="grow"><div class="row" style="gap:4px"><h2 class="ellipsis">${esc(nm(s))}</h2><button class="note-btn" data-note="${s.id}" title="${s.label ? '改备注' : '加备注'}">✎</button></div>
+      <div class="muted small ellipsis">${s.label && s.name ? esc(s.name) + ' · ' : ''}${esc(s.wxid || '未登录')}</div></div>${badge(s)}</div>
     <div class="meta"><div class="small muted" style="margin-bottom:8px">${esc(st(s).hint)}</div><div class="chips">${chips.join('')}</div></div>
-    <div class="actions"><a class="btn sm" href="#/a/${s.id}">进入</a><a class="btn sm" href="#/a/${s.id}/chats">消息</a>${act}</div></div>`;
+    <div class="actions"><a class="btn sm" href="#/a/${s.id}">进入</a><a class="btn sm" href="#/a/${s.id}/chats">消息</a>${act}<span class="grow"></span>${power}</div></div>`;
 }
 function bindCardActions(root) {
-  $$('[data-op]', root).forEach((b) => b.onclick = () => busy(b, async () => {
+  $$('[data-op]', root).forEach((b) => b.onclick = async () => {
+    if (b.dataset.op === 'stop' && !await modal({title: `停止「${b.dataset.label}」？`, danger: true, ok: '停止',
+      body: '<p class="muted small">会停掉整个容器：微信下线、机器人不回复、定时任务不执行。登录状态保留，之后点启动就能回来（一般不用重新扫码）。</p>'})) return;
+    return busy(b, async () => {
     await api(`/api/console/accounts/${b.dataset.id}/action`, {method: 'POST', json: {op: b.dataset.op}});
     toast('已执行'); await sleep(1500); loadAccounts(true);
-  }));
+  });
+  });
 }
 
 // ---------------- 添加微信 ----------------
@@ -206,13 +254,13 @@ function pageAdd(view) {
     `<div class="step ${i + 1 === step ? 'on' : i + 1 < step ? 'done' : ''}"><span class="n">${i + 1 < step ? '✓' : i + 1}</span>${t}</div>`).join('')}</div>`;
   const draw = (inner) => { view.innerHTML = `<div class="page" style="max-width:880px">${steps()}${inner}</div>`; };
   draw(`<div class="card card-body stack">
-      <h2>给新微信起个名字</h2>
+      <h2>新建一个微信</h2>
       <div class="muted">会新建一个独立的容器（独立的微信、数据和机器人），创建后在下一步用手机扫码登录。</div>
-      <div class="field"><label>名字</label><input class="input" id="label" placeholder="例如：客服号、小号 3" maxlength="30"></div>
+      <div class="field"><label>备注（可不填，登录后默认显示微信昵称）</label><input class="input" id="label" placeholder="例如：客服号、小号 3" maxlength="30"></div>
       <div class="row"><button class="btn primary" id="go">创建</button><span class="faint small">第一次创建要拉镜像，可能要一会儿</span></div></div>`);
   $('#label').focus();
   $('#go').onclick = (e) => busy(e.currentTarget, async () => {
-    const label = $('#label').value.trim(); if (!label) throw new Error('先起个名字');
+    const label = $('#label').value.trim();
     const d = await api('/api/console/accounts', {method: 'POST', json: {label}});
     id = d.id; await loadAccounts(true); step = 2; waitLogin();
   });
@@ -248,13 +296,14 @@ function pageAdd(view) {
 function pageAccount(view, id) {
   const draw = () => {
     const s = acct(id); if (!s) return;
-    setTop(`<div class="row">${avatar(s, 'sm')}<h1 class="ellipsis">${esc(s.label)}</h1>${badge(s)}</div>`);
+    setTop(`<div class="row">${avatar(s, 'sm')}<h1 class="ellipsis">${esc(nm(s))}</h1>${badge(s)}</div>`, '<button class="btn" id="noteTop">✎ 备注</button>');
+    $('#noteTop').onclick = () => editNote(s).catch((e) => toast(e.message, 'err'));
     const d = s.direct || {};
     const caps = ['revoke:撤回', 'voice:语音条', 'quote:引用', 'at:@提醒'].map((x) => { const [k, l] = x.split(':'); return `<span class="badge ${d[k] ? 'green' : ''}">${d[k] ? '✓' : '–'} ${l}</span>`; }).join('');
     const tip = st(s).hint ? `<div class="callout ${s.state === 'online' ? 'green' : st(s).c === 'red' ? 'red' : 'amber'}">${esc(st(s).hint)}</div>` : '';
     view.innerHTML = `<div class="page stack" style="gap:16px">
       <div class="card"><div class="card-body row gap-16" style="align-items:center">
-        ${avatar(s, 'lg')}<div class="grow"><h2>${esc(s.name || s.label)}</h2><div class="muted small">${esc(s.wxid || '未登录')} · 容器 ${esc(s.container)}</div></div>
+        ${avatar(s, 'lg')}<div class="grow"><h2>${esc(s.name || nm(s))}</h2><div class="muted small">${s.label ? '备注「' + esc(s.label) + '」 · ' : ''}${esc(s.wxid || '未登录')} · 容器 ${esc(s.container)}</div></div>
         <div class="row wrap">${stateActions(s)}</div></div>${tip ? `<div style="padding:0 20px 18px">${tip}</div>` : ''}</div>
       <div class="grid cols-2">
         <div class="card"><div class="card-head"><h2>微信与密钥</h2></div><div class="card-body">
@@ -275,7 +324,7 @@ function pageAccount(view, id) {
           <div class="row wrap" style="margin-top:14px">
             <button class="btn sm" data-op="restart_wechat">重启微信</button><button class="btn sm" data-op="restart">重启容器</button>
             ${s.container_state === 'running' ? '<button class="btn sm" data-op="stop">停止</button>' : '<button class="btn sm primary" data-op="start">启动</button>'}
-            <span class="grow"></span><button class="btn sm ghost" id="renameBtn">改名</button><button class="btn sm danger" id="rmBtn">移除</button></div></div></div>
+            <span class="grow"></span><button class="btn sm ghost" id="renameBtn">备注</button><button class="btn sm danger" id="rmBtn">移除</button></div></div></div>
       </div></div>`;
     bind(s);
   };
@@ -297,12 +346,9 @@ function pageAccount(view, id) {
       try { await A(id, e.target.checked ? '/api/bot/start' : '/api/bot/stop', {method: 'POST'}); toast(e.target.checked ? '机器人已启动' : '机器人已停止'); loadAccounts(true); }
       catch (x) { toast(x.message, 'err'); e.target.checked = !e.target.checked; }
     };
-    $('#renameBtn').onclick = async () => {
-      const f = await modal({title: '改名', extra: `<input class="input" name="label" value="${esc(s.label)}" maxlength="30">`});
-      if (f && f.label.trim()) { await api(`/api/console/accounts/${id}`, {method: 'PATCH', json: {label: f.label.trim()}}); loadAccounts(true); }
-    };
+    $('#renameBtn').onclick = () => editNote(s).catch((e) => toast(e.message, 'err'));
     $('#rmBtn').onclick = async () => {
-      const f = await modal({title: `移除「${s.label}」？`, danger: true, ok: '移除',
+      const f = await modal({title: `移除「${nm(s)}」？`, danger: true, ok: '移除',
         body: s.managed ? '会删除这个微信的容器。' : '只从控制台列表移除，不会动这个容器（之后可以「扫描已有容器」再纳入）。',
         extra: s.managed ? `<label class="row" style="margin-top:12px"><input type="checkbox" name="purge"> 同时删除数据卷（登录状态、聊天记录、密钥全部清空，不能恢复）</label>` : ''});
       if (!f) return;

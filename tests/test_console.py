@@ -75,6 +75,7 @@ class ConsoleTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.c = load(self.tmp.name)
+        self.c.FAIL_SLEEP = 0
         self.fd = FakeDocker({"wxbot-ubuntu-manual": web_container(), "wxbot-second": web_container(),
                               "wxbot-second-old-4118": web_container(), "wxbot-console": web_container(),
                               "postgres-dev": web_container(), "wxbot-tool": {"Config": {}, "State": {}}})
@@ -134,6 +135,27 @@ class ConsoleTest(unittest.IsolatedAsyncioTestCase):
         r = await cl.get("/api/console/auth")
         self.assertTrue((await r.json())["ok"])
 
+    async def test_login_lockout_and_no_username_leak(self):
+        cl = await self.client()
+        d = await (await cl.get("/api/console/auth")).json()
+        self.assertEqual((d["ok"], d["user"]), (False, None))
+        h = {"X-Real-IP": "1.2.3.4"}
+        for _ in range(5):
+            r = await cl.post("/api/console/login", json={"username": "admin", "password": "bad"}, headers=h)
+            self.assertEqual(r.status, 401)
+        r = await cl.post("/api/console/login", json={"username": "admin", "password": "pw"}, headers=h)
+        self.assertEqual(r.status, 429)                                   # 锁住了,密码对也不行
+        r = await cl.post("/api/console/login", json={"username": "admin", "password": "pw"},
+                          headers={"X-Real-IP": "5.6.7.8", "X-Forwarded-Proto": "https"})
+        self.assertEqual(r.status, 200)                                   # 别的 IP 不受影响
+        self.assertIn("Secure", r.headers["Set-Cookie"])
+        for _ in range(6):                                                 # 没有真实 IP:不锁(否则谁都能把你锁在外面)
+            r = await cl.post("/api/console/login", json={"username": "admin", "password": "bad"})
+            self.assertEqual(r.status, 401)
+        r = await cl.post("/api/console/login", json={"username": "admin", "password": "pw"})
+        self.assertEqual(r.status, 200)
+        self.assertEqual(r.headers["X-Frame-Options"], "SAMEORIGIN")
+
     async def test_create_and_delete(self):
         cl = await self.client()
         await cl.post("/api/console/login", json={"username": "admin", "password": "pw"})
@@ -155,6 +177,18 @@ class ConsoleTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await r.json())["ok"])
         self.assertIn("/containers/wxbot-acc1", self.fd.deleted)
         self.assertIn("/volumes/wxbot-acc1-home", self.fd.deleted)
+
+    async def test_note_is_optional_and_can_be_cleared(self):
+        await self.c.adopt()
+        self.assertEqual({a["label"] for a in self.c.load_registry()["accounts"]}, {""})   # 纳入时不起名,显示昵称
+        cl = await self.client()
+        await cl.post("/api/console/login", json={"username": "admin", "password": "pw"})
+        d = await (await cl.post("/api/console/accounts", json={})).json()
+        self.assertTrue(d["ok"], d)
+        for v in ("客服号", ""):
+            r = await cl.patch(f"/api/console/accounts/{d['id']}", json={"label": v})
+            self.assertTrue((await r.json())["ok"])
+            self.assertEqual([a["label"] for a in self.c.load_registry()["accounts"] if a["id"] == d["id"]], [v])
 
     async def test_removing_adopted_container_only_unregisters(self):
         await self.c.adopt()
